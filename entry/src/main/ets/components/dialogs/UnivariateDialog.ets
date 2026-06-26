@@ -3,12 +3,18 @@ export struct UnivariateDialog {
   @Link visible: boolean;
   @State test_typeIdx: number = 0;
   test_typeOpts: string[] = ["Summary", "Normality", "t-test", "ANOVA", "Kruskal-Wallis"];
+  @State showTips: boolean = false;
   onConfirm: (params: Record<string, Object>) => void = () => {};
 
   build() {
     Column() {
       Text("Univariate").fontSize(18).fontWeight(FontWeight.Bold).margin({ bottom: 16 })
       Row() { Text("Test:").width(140).fontSize(13); Select(this.test_typeOpts.map((v, i) => ({ value: v }))).selected(this.test_typeIdx).onSelect((idx: number) => { this.test_typeIdx = idx; }) }.width("100%").margin({ bottom: 8 })
+            Row() { Text("[+] Tips").fontSize(11).fontColor("#3498DB").onClick(() => { this.showTips = !this.showTips; }) }.width("100%").margin({ bottom: 8 })
+      if (this.showTips) { Column() {
+          Text("Summary: mean/std").fontSize(10).fontColor("#7F8C8D").margin({ bottom: 2 })
+          Text("ANOVA: >= 2 groups").fontSize(10).fontColor("#7F8C8D").margin({ bottom: 2 })
+      }.margin({ bottom: 8 }) }
       Divider().margin({ top: 8, bottom: 12 })
       Row() {
         Button("Cancel").backgroundColor("#95A5A6").fontColor("#FFFFFF").onClick(() => { this.visible = false; }).margin({ right: 12 })

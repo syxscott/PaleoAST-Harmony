@@ -4,6 +4,7 @@ export struct ExportDialog {
   @State formatIdx: number = 0;
   formatOpts: string[] = ['CSV', 'TSV'];
   @State includeLabels: boolean = true;
+  @State showTips: boolean = false;
   onConfirm: (params: Record<string, Object>) => void = () => {};
 
   build() {
