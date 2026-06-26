@@ -1,20 +1,20 @@
 @Component
 export struct EFADialog {
   @Link visible: boolean;
-@State nHarm: number = 10;
-  @State nPts: number = 200;
+  @State n_harmonics: number = 10;
+  @State n_points: number = 200;
   onConfirm: (params: Record<string, Object>) => void = () => {};
 
   build() {
     Column() {
-      Text('Elliptic Fourier').fontSize(18).fontWeight(FontWeight.Bold).margin({ bottom: 16 })
-
+      Text("EFA").fontSize(18).fontWeight(FontWeight.Bold).margin({ bottom: 16 })
+      Row() { Text("Harmonics:").width(140).fontSize(13); TextInput({ text: String(this.n_harmonics) }).width(100).type(InputType.Number).onChange((v: string) => { this.n_harmonics = parseInt(v) || 10; }) }.width("100%").margin({ bottom: 8 })
+      Row() { Text("Points:").width(140).fontSize(13); TextInput({ text: String(this.n_points) }).width(100).type(InputType.Number).onChange((v: string) => { this.n_points = parseInt(v) || 200; }) }.width("100%").margin({ bottom: 8 })
       Divider().margin({ top: 8, bottom: 12 })
       Row() {
         Button("Cancel").backgroundColor("#95A5A6").fontColor("#FFFFFF").onClick(() => { this.visible = false; }).margin({ right: 12 })
-        Button("Run Analysis").type(ButtonType.Capsule).backgroundColor("#3498DB").fontColor("#FFFFFF").onClick(() => { this.doRun(); this.visible = false; })
+        Button("Run Analysis").type(ButtonType.Capsule).backgroundColor("#3498DB").fontColor("#FFFFFF").onClick(() => { this.onConfirm({'n_harmonics': this.n_harmonics, 'n_points': this.n_points}); this.visible = false; })
       }.width("100%").justifyContent(FlexAlign.End)
     }.padding(24).width(450).borderRadius(12)
   }
-  doRun(): void { this.onConfirm({}); }
 }

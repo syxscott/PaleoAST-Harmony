@@ -1,7 +1,7 @@
 export { parseCSV, toCSV } from './CSVParser';
-export { parseNewick, toNewick, countTaxa, getLeafNames, getTreeHeight, NewickNode } from './NewickParser';
-export { parseNexus, NexusData } from './NexusParser';
-export { parseTPS, TPSRecord } from './TPSParser';
-export { parseDAT, DATData } from './DATParser';
-export { serializeMatrix, deserializeMatrix, CacheHeader } from './BinaryCache';
-export { Lexer, Token, TokenType } from './Lexer';
+export { parseNewick, toNewick, countTaxa, getLeafNames, getTreeHeight } from './NewickParser';
+export { parseNexus } from './NexusParser';
+export { parseTPS } from './TPSParser';
+export { parseDAT } from './DATParser';
+export { serializeMatrix, deserializeMatrix } from './BinaryCache';
+export { Lexer, TokenType } from './Lexer';

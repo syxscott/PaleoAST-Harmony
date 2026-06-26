@@ -1,20 +1,20 @@
 @Component
 export struct WaveletDialog {
   @Link visible: boolean;
-@State minScale: number = 2;
-  @State maxScale: number = 50;
+  @State min_scale: number = 2;
+  @State max_scale: number = 50;
   onConfirm: (params: Record<string, Object>) => void = () => {};
 
   build() {
     Column() {
-      Text('Wavelet CWT').fontSize(18).fontWeight(FontWeight.Bold).margin({ bottom: 16 })
-
+      Text("Wavelet").fontSize(18).fontWeight(FontWeight.Bold).margin({ bottom: 16 })
+      Row() { Text("Min:").width(140).fontSize(13); TextInput({ text: String(this.min_scale) }).width(100).type(InputType.Number).onChange((v: string) => { this.min_scale = parseInt(v) || 2; }) }.width("100%").margin({ bottom: 8 })
+      Row() { Text("Max:").width(140).fontSize(13); TextInput({ text: String(this.max_scale) }).width(100).type(InputType.Number).onChange((v: string) => { this.max_scale = parseInt(v) || 50; }) }.width("100%").margin({ bottom: 8 })
       Divider().margin({ top: 8, bottom: 12 })
       Row() {
         Button("Cancel").backgroundColor("#95A5A6").fontColor("#FFFFFF").onClick(() => { this.visible = false; }).margin({ right: 12 })
-        Button("Run Analysis").type(ButtonType.Capsule).backgroundColor("#3498DB").fontColor("#FFFFFF").onClick(() => { this.doRun(); this.visible = false; })
+        Button("Run Analysis").type(ButtonType.Capsule).backgroundColor("#3498DB").fontColor("#FFFFFF").onClick(() => { this.onConfirm({'min_scale': this.min_scale, 'max_scale': this.max_scale}); this.visible = false; })
       }.width("100%").justifyContent(FlexAlign.End)
     }.padding(24).width(450).borderRadius(12)
   }
-  doRun(): void { this.onConfirm({}); }
 }

@@ -6,14 +6,13 @@ export struct PaleoEnvDialog {
 
   build() {
     Column() {
-      Text('Paleo-Environment CA').fontSize(18).fontWeight(FontWeight.Bold).margin({ bottom: 16 })
-      Text("Configure parameters below").fontSize(12).fontColor("#7F8C8D").margin({ bottom: 12 })
+      Text("Paleo-Environment").fontSize(18).fontWeight(FontWeight.Bold).margin({ bottom: 16 })
+
       Divider().margin({ top: 8, bottom: 12 })
       Row() {
         Button("Cancel").backgroundColor("#95A5A6").fontColor("#FFFFFF").onClick(() => { this.visible = false; }).margin({ right: 12 })
-        Button("Run Analysis").type(ButtonType.Capsule).backgroundColor("#3498DB").fontColor("#FFFFFF").onClick(() => { this.doRun(); this.visible = false; })
+        Button("Run Analysis").type(ButtonType.Capsule).backgroundColor("#3498DB").fontColor("#FFFFFF").onClick(() => { this.onConfirm({}); this.visible = false; })
       }.width("100%").justifyContent(FlexAlign.End)
     }.padding(24).width(450).borderRadius(12)
   }
-  doRun(): void { this.onConfirm({}); }
 }
