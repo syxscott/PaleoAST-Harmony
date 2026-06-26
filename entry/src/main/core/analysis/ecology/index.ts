@@ -502,3 +502,43 @@ export function lbKeogh(query: number[], reference: number[], window: number = 5
   }
   return Math.sqrt(lb);
 }
+
+
+// Sample-based rarefaction (Scheiner 2003)
+export interface SampleBasedRarefactionResult {
+  sampleSizes: number[];
+  expectedRichness: number[];
+  observedRichness: number;
+}
+
+export function sampleBasedRarefaction(
+  abundanceMatrix: number[][],
+  nPoints: number = 50,
+): SampleBasedRarefactionResult {
+  const nSamples = abundanceMatrix.length;
+  const allSpecies = new Set<number>();
+  for (const row of abundanceMatrix)
+    for (let j = 0; j < row.length; j++)
+      if (row[j] > 0) allSpecies.add(j);
+
+  const totalSpecies = allSpecies.size;
+  const sampleSizes: number[] = [];
+  const expected: number[] = [];
+
+  for (let k = 1; k <= nSamples; k += Math.max(1, Math.floor(nSamples / nPoints))) {
+    sampleSizes.push(k);
+    // Expected richness when drawing k samples
+    let E = 0;
+    for (const sp of allSpecies) {
+      // Probability species sp is present in at least one of k random samples
+      let absent = 1;
+      for (let s = 0; s < k; s++) {
+        const hasSp = abundanceMatrix[s % nSamples][sp] > 0;
+        if (hasSp) { absent = 0; break; }
+      }
+      if (absent === 0) E += 1;
+    }
+    expected.push(E);
+  }
+  return { sampleSizes, expectedRichness: expected, observedRichness: totalSpecies };
+}
