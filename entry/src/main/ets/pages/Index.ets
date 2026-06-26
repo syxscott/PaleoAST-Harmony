@@ -306,7 +306,9 @@ struct Index {
         case 'NMDS':
           result = this.statCtrl.runNMDS(
             params['metric'] as string ?? 'bray_curtis',
-            params['n_dimensions'] as number ?? 2
+            params['n_dimensions'] as number ?? 2,
+            params['max_iterations'] as number ?? 300,
+            params['n_restarts'] as number ?? 10
           );
           this.plotDataX = result.coordinates.col(0);
           this.plotDataY = result.coordinates.col(1);

@@ -58,11 +58,10 @@ export function pca(
   }
   const Z = new Matrix(Zdata, n, p);
 
-  // SVD
-  const { S } = svd(Z);
+  // SVD — call once, reuse S, U, Vt
+  const { S, Vt } = svd(Z);
   const eigenvaluesRaw = S.map(s => (s * s) / (n - 1));
 
-  // Sort descending (SVD already returns descending)
   const eigenvalues = eigenvaluesRaw.slice(0, nc);
   const totalVar = eigenvaluesRaw.reduce((a, b) => a + b, 0);
   const explainedVar = eigenvalues.map(e => totalVar > 0 ? (e / totalVar) * 100 : 0);
@@ -70,16 +69,19 @@ export function pca(
   let cum = 0;
   for (const v of explainedVar) { cum += v; cumVar.push(cum); }
 
-  // Scores and loadings
-  const { U, Vt } = svd(Z);
+  // Scores: T = Z @ V (V = Vt^T, take first nc columns)
   const V = Vt.transpose();
   const scores = Z.matmul(V.sliceCols(0, nc));
-  const loadingsD = new Float64Array(nc * p);
-  for (let j = 0; j < nc; j++) {
-    const sq = Math.sqrt(eigenvalues[j]);
-    for (let i = 0; i < p; i++) loadingsD[j * p + i] = V.get(i, j) * sq;
+
+  // Loadings: P = V * sqrt(Λ) — shape (p, nc) to match Python
+  const loadingsD = new Float64Array(p * nc);
+  for (let i = 0; i < p; i++) {
+    for (let j = 0; j < nc; j++) {
+      const sq = Math.sqrt(Math.max(eigenvalues[j], 0));
+      loadingsD[i * nc + j] = V.get(i, j) * sq;
+    }
   }
-  const loadings = new Matrix(loadingsD, nc, p);
+  const loadings = new Matrix(loadingsD, p, nc);
 
   return {
     scores, loadings, eigenvalues,
@@ -227,27 +229,42 @@ function computeDistMatrix(X: Matrix): Matrix {
 }
 
 function isotonicRegression(target: number[], weights: number[]): number[] {
-  // Pool-adjacent-violators algorithm
+  // Pool-adjacent-violators algorithm (O(n) with backtracking)
   const n = target.length;
   const order = target.map((_, i) => i).sort((a, b) => target[a] - target[b]);
   const sortedWeights = order.map(i => weights[i]);
   const result = [...sortedWeights];
 
-  // Merge violating blocks
-  let i = 0;
-  while (i < n - 1) {
-    if (result[i] > result[i + 1]) {
-      // Merge block
-      let j = i + 1;
-      while (j < n && result[j] < result[i]) j++;
-      const avg = 0;
-      let sum = 0;
-      for (let k = i; k < j; k++) sum += result[k];
-      const mean = sum / (j - i);
-      for (let k = i; k < j; k++) result[k] = mean;
-      i = 0; // restart
-    } else {
-      i++;
+  // Stack-based PAV: maintain blocks with (sum, count, start)
+  const blockSums: number[] = [result[0]];
+  const blockCounts: number[] = [1];
+
+  for (let i = 1; i < n; i++) {
+    blockSums.push(result[i]);
+    blockCounts.push(1);
+    // Merge while violating
+    while (blockSums.length >= 2) {
+      const last = blockSums.length - 1;
+      const meanLast = blockSums[last] / blockCounts[last];
+      const meanPrev = blockSums[last - 1] / blockCounts[last - 1];
+      if (meanLast < meanPrev) {
+        // Merge
+        blockSums[last - 1] += blockSums[last];
+        blockCounts[last - 1] += blockCounts[last];
+        blockSums.pop();
+        blockCounts.pop();
+      } else {
+        break;
+      }
+    }
+  }
+
+  // Reconstruct result from blocks
+  let idx = 0;
+  for (let b = 0; b < blockSums.length; b++) {
+    const mean = blockSums[b] / blockCounts[b];
+    for (let k = 0; k < blockCounts[b]; k++) {
+      result[idx++] = mean;
     }
   }
 

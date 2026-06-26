@@ -154,7 +154,10 @@ export struct PlotCanvas {
     const pw = w - this.margin.left - this.margin.right;
     const xPad = (this.xMax - this.xMin) * 0.1 || 1;
     const range = (this.xMax - this.xMin + 2 * xPad);
-    return this.margin.left + ((v - this.xMin + xPad) / range) * pw * this.zoomLevel + this.panX;
+    // Zoom relative to plot center, not margin.left
+    const dataX = ((v - this.xMin + xPad) / range) * pw;
+    const centerX = pw / 2;
+    return this.margin.left + centerX + (dataX - centerX) * this.zoomLevel + this.panX;
   }
 
   private mapY(v: number): number {
@@ -162,7 +165,9 @@ export struct PlotCanvas {
     const ph = h - this.margin.top - this.margin.bottom;
     const yPad = (this.yMax - this.yMin) * 0.1 || 1;
     const range = (this.yMax - this.yMin + 2 * yPad);
-    return this.margin.top + ph - ((v - this.yMin + yPad) / range) * ph * this.zoomLevel + this.panY;
+    const dataY = ((v - this.yMin + yPad) / range) * ph;
+    const centerY = ph / 2;
+    return this.margin.top + centerY + (dataY - centerY) * this.zoomLevel + this.panY;
   }
 
   // ─── Rendering ─────────────────────────────────────────────────
