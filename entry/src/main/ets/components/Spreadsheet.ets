@@ -273,10 +273,66 @@ export struct Spreadsheet {
   loadData(data: number[][], rowLabels: string[], colLabels: string[]): void {
     const dm = new DataMatrix(Matrix.from2D(data), rowLabels, colLabels);
     this.rowGroups = Array.from({ length: dm.nSamples }, () => 'Ungrouped');
-    // Note: In real ArkUI, @Prop dataMatrix would be set by parent
   }
 
   getSelectedData(): number[][] {
+    if (this.dataMatrix == null) return [];
+    const rows = this.selectedRows.size > 0 ? Array.from(this.selectedRows) : [this.selectedRow];
+    return rows.filter(r => r >= 0).map(r => this.dataMatrix!.data.row(r));
+  }
+
+  getSelectedRows(): number[] {
+    return this.selectedRows.size > 0 ? Array.from(this.selectedRows) : [this.selectedRow].filter(r => r >= 0);
+  }
+
+  getGroups(): string[] { return this.rowGroups; }
+  setGroups(groups: string[]): void { this.rowGroups = groups; this.onGroupChanged(groups); }
+  setDarkMode(dark: boolean): void { this.darkMode = dark; }
+
+  // ─── Context Menu Actions ───────────────────────────────────────
+
+  setGroupForRow(row: number, group: string): void {
+    this.rowGroups[row] = group;
+    this.onGroupChanged(this.rowGroups);
+  }
+
+  selectAllRows(): void {
+    if (!this.dataMatrix) return;
+    for (let i = 0; i < this.dataMatrix.nSamples; i++) this.selectedRows.add(i);
+  }
+
+  invertSelection(): void {
+    if (!this.dataMatrix) return;
+    for (let i = 0; i < this.dataMatrix.nSamples; i++) {
+      if (this.selectedRows.has(i)) this.selectedRows.delete(i);
+      else this.selectedRows.add(i);
+    }
+  }
+
+  copySelection(): string {
+    const rows = this.getSelectedRows();
+    if (rows.length === 0 || !this.dataMatrix) return '';
+    const lines: string[] = [];
+    lines.push(this.dataMatrix.colLabels.join('\\t'));
+    for (const r of rows) {
+      const vals = this.dataMatrix.data.row(r).map(v => isNaN(v) ? 'NA' : v.toString());
+      lines.push([this.dataMatrix.rowLabels[r], ...vals].join('\\t'));
+    }
+    return lines.join('\\n');
+  }
+
+  // ─── Statistics for Selection ───────────────────────────────────
+
+  getSelectionStats(): { count: number; mean: number; std: number } {
+    const data = this.getSelectedData();
+    if (data.length === 0) return { count: 0, mean: 0, std: 0 };
+    const flat = data.flat().filter(v => !isNaN(v));
+    const n = flat.length;
+    if (n === 0) return { count: 0, mean: 0, std: 0 };
+    const m = flat.reduce((a, b) => a + b, 0) / n;
+    const s = Math.sqrt(flat.reduce((sum, v) => sum + (v - m) ** 2, 0) / (n - 1));
+    return { count: n, mean: m, std: s };
+  }
     if (this.dataMatrix == null) return [];
     const rows = this.selectedRows.size > 0 ? Array.from(this.selectedRows) : [this.selectedRow];
     return rows.filter(r => r >= 0).map(r => this.dataMatrix!.data.row(r));
