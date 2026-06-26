@@ -102,4 +102,59 @@ export class DataController {
     }
     return new Matrix(d, dm.data.rows, dm.data.cols);
   }
+
+  // ─── Subset Operations ─────────────────────────────────────────
+
+  subsetRows(indices: number[]): DataMatrix {
+    const dm = this.getDM();
+    const newData = dm.data.sliceRows(indices[0], indices[indices.length - 1] + 1);
+    const newRL = indices.map(i => dm.rowLabels[i]);
+    return new DataMatrix(newData, newRL, [...dm.colLabels]);
+  }
+
+  subsetColumns(indices: number[]): DataMatrix {
+    const dm = this.getDM();
+    const d = new Float64Array(dm.data.rows * indices.length);
+    for (let i = 0; i < dm.data.rows; i++)
+      for (let j = 0; j < indices.length; j++)
+        d[i * indices.length + j] = dm.data.get(i, indices[j]);
+    const newCL = indices.map(j => dm.colLabels[j]);
+    return new DataMatrix(new Matrix(d, dm.data.rows, indices.length), [...dm.rowLabels], newCL);
+  }
+
+  // ─── Apply Transform to State ──────────────────────────────────
+
+  applyTransformToState(transformFn: (data: Matrix) => Matrix): void {
+    const dm = this.getDM();
+    const transformed = transformFn(dm.data);
+    const newDM = new DataMatrix(transformed, [...dm.rowLabels], [...dm.colLabels]);
+    this.state.setData(newDM);
+    this.state.markModified();
+  }
+
+  // ─── Validation ────────────────────────────────────────────────
+
+  validateData(): { valid: boolean; message: string; nRows: number; nCols: number; nNaN: number } {
+    const dm = this.state.dataMatrix;
+    if (!dm) return { valid: false, message: 'No data loaded', nRows: 0, nCols: 0, nNaN: 0 };
+    let nNaN = 0;
+    for (let i = 0; i < dm.data.length; i++) if (isNaN(dm.data.data[i])) nNaN++;
+    return {
+      valid: true,
+      message: nNaN > 0 ? `${nNaN} missing values detected` : 'Data OK',
+      nRows: dm.nSamples,
+      nCols: dm.nVariables,
+      nNaN,
+    };
+  }
+
+  // ─── Helpers ───────────────────────────────────────────────────
+
+  hasData(): boolean { return this.state.hasData; }
+
+  private getDM(): DataMatrix {
+    const dm = this.state.dataMatrix;
+    if (!dm) throw new Error('No data loaded');
+    return dm;
+  }
 }
