@@ -1,0 +1,2 @@
+export interface Task { id:string; priority:number; fn:()=>Promise<unknown>; }
+export class TaskScheduler { private _q:Task[]=[]; private _run=0; constructor(private max=4){} submit(t:Task){this._q.push(t);this._q.sort((a,b)=>b.priority-a.priority);this._proc();} private async _proc(){while(this._run<this.max&&this._q.length){const t=this._q.shift()!;this._run++;t.fn().finally(()=>{this._run--;this._proc();});}} getQueue(){return this._q.length;} }

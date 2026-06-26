@@ -1,0 +1,7 @@
+{
+  "string": [
+    { "name": "module_desc", "value": "PaleoAST Paleontological Analysis" },
+    { "name": "EntryAbility_desc", "value": "PaleoAST for HarmonyOS" },
+    { "name": "EntryAbility_label", "value": "PaleoAST" }
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "name": "paleoast-harmony",
+  "version": "1.0.0",
+  "description": "PaleoAST - Paleontological Advanced Statistical Toolkit for HarmonyOS",
+  "main": "",
+  "author": "PaleoAST Development Team",
+  "license": "MIT",
+  "dependencies": {},
+  "devDependencies": {
+    "@ohos/hypium": "1.0.18"
+  }
+}

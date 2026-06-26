@@ -1,0 +1,2 @@
+export class State { constructor(public name:string,public isAccept=false,public transitions=new Map<string,State[]>()) {} }
+export class StateMachine { private _start:State|null=null; setStart(s:State){this._start=s;} match(input:string):boolean { if(!this._start)return false; let cur=new Set([this._start]); for(const ch of input){const next=new Set<State>();for(const s of cur)for(const t of s.transitions.get(ch)??[])next.add(t);cur=next;if(!cur.size)return false;} for(const s of cur)if(s.isAccept)return true; return false; } }
