@@ -1,2 +1,1 @@
-export class State { constructor(public name:string,public isAccept=false,public transitions=new Map<string,State[]>()) {} }
-export class FiniteAutomaton { constructor(private start:State) {} match(input:string):boolean { let cur=new Set([this.start]); for(const ch of input){const next=new Set<State>(); for(const s of cur) for(const t of s.transitions.get(ch)??[]) next.add(t); cur=next; if(!cur.size)return false;} for(const s of cur) if(s.isAccept)return true; return false; } }
+export * from "./Base";
