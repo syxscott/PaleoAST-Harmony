@@ -98,37 +98,32 @@ struct Index {
   @State isLoading: boolean = false;
   @State progress: number = 0;
 
-  // 鸿蒙特有：AppStorage 用于全局持久化
-  @StorageLink('darkMode') storageDarkMode: boolean = false;
+  // 鸿蒙特有：AppStorage 持久化暗色模式（单一数据源，不再用 @State darkMode）
+  @StorageLink('darkMode') darkMode: boolean = false;
 
   private stateMgr = StateManager.getInstance();
   private dataCtrl = new DataController();
   private statCtrl = new StatisticsController();
 
-  private tabs: TabItem[] = [
-    { name: 'Home', icon: $r('app.media.icon') },
-    { name: 'Analysis', icon: $r('app.media.icon') },
-    { name: 'Morphometrics', icon: $r('app.media.icon') },
-    { name: 'Stratigraphy', icon: $r('app.media.icon') },
-    { name: 'Macroevolution', icon: $r('app.media.icon') },
-  ];
+  private tabs: string[] = ['Home', 'Analysis', 'Morphometrics', 'Stratigraphy', 'Macroevolution'];
 
   build() {
     Column() {
       // ─── 顶部 Ribbon (使用 Tabs 组件) ───
       this.RibbonBar()
 
-      // ─── 主内容区 (使用分割面板) ───
-      SplitContainer() {
+      // ─── 主内容区 (Row + Divider 替代 SplitContainer) ───
+      Row() {
         // 左侧导航
         NavigationTree()
           .width(220)
           .onNavigate((name: string) => { this.handleAnalysis(name); })
 
+        Divider().vertical(true).width(1).color('#E4E7EB')
+
         // 右侧工作区
         Column() {
           if (this.isLoading) {
-            // 鸿蒙特有：加载动画
             this.LoadingView()
           } else if (!this.hasData) {
             this.WelcomeView()
@@ -148,6 +143,9 @@ struct Index {
 
       // ─── 状态栏 ───
       this.StatusBar()
+
+      // ─── 对话框层 (Bug 修复: 之前未在 build() 中调用) ───
+      this.DialogLayer()
 
       // ─── 浮动工具栏 ───
       FloatingToolbar({} as Record<string, Object>)
@@ -175,7 +173,7 @@ struct Index {
   @Builder RibbonBar() {
     Row() {
       // 使用 Tabs 组件替代手动 Row
-      ForEach(this.tabs, (tab: TabItem, idx: number) => {
+      ForEach(this.tabs, (tab: string, idx: number) => {
         Text(tab.name)
           .ribbonTabStyle(this.currentTab === idx, this.darkMode)
           .onClick(() => {
@@ -210,7 +208,7 @@ struct Index {
       Toggle({ type: ToggleType.Switch, isOn: this.darkMode })
         .onChange((isOn: boolean) => {
           this.darkMode = isOn
-          this.storageDarkMode = isOn
+          this.darkMode = isOn
           AppStorage.setOrCreate('darkMode', isOn)
         })
         .width(40)
@@ -656,7 +654,6 @@ struct Index {
       case 'export': this.showExportDialog = true; break;
       case 'theme':
         this.darkMode = !this.darkMode;
-        this.storageDarkMode = this.darkMode;
         AppStorage.setOrCreate('darkMode', this.darkMode);
         break;
     }
@@ -674,27 +671,4 @@ struct Index {
   private exportPlot(format: string): void {
     this.statusText = 'Exported ' + format;
   }
-}
-
-// ─── 鸿蒙特有：SplitContainer 分割面板 ──────────────────────────
-
-@Component
-struct SplitContainer {
-  @BuilderParam left: () => void
-  @BuilderParam right: () => void
-
-  build() {
-    Row() {
-      this.left()
-      Divider().vertical(true).width(1).color('#E4E7EB')
-      this.right()
-    }
-    .width('100%')
-    .height('100%')
-  }
-}
-
-interface TabItem {
-  name: string;
-  icon: Resource;
 }
