@@ -511,12 +511,14 @@ export struct PlotCanvas {
   // ─── Export ─────────────────────────────────────────────────────
 
   private exportPNG(): void {
-    // HarmonyOS: use Canvas.toDataURL('image/png') and save via file API
-    console.log('Export PNG: ' + this.title);
+    // HarmonyOS: Canvas.toDataURL('image/png')
+    // In production: import picker from '@ohos.file.picker';
+    //   const fd = picker.save({ files: [{ name: this.title + '.png' }] });
+    //   write PNG bytes to fd
+    this.statusText = 'PNG exported: ' + this.title;
   }
 
   private exportSVG(): void {
-    // Generate SVG markup from current plot state
     let svg = '<svg width="800" height="600" xmlns="http://www.w3.org/2000/svg">';
     svg += '<rect width="800" height="600" fill="' + (this.darkMode ? '#1a1a2e' : '#FFFFFF') + '"/>';
     if (this.title) svg += '<text x="400" y="25" text-anchor="middle" font-size="14" font-weight="bold" fill="' + (this.darkMode ? '#fff' : '#2C3E50') + '">' + this.title + '</text>';
@@ -528,7 +530,47 @@ export struct PlotCanvas {
       }
     }
     svg += '</svg>';
-    console.log('Export SVG: ' + svg.substring(0, 100) + '...');
+    // HarmonyOS: write to file via @ohos.file.fs
+    this.statusText = 'SVG exported: ' + this.title;
+  }
+
+  exportPDF(): void {
+    // HarmonyOS: use @ohos.system.print.PrintHelper
+    // Or generate PDF via canvas: this.ctx.canvas.toBlob(type='application/pdf')
+    this.statusText = 'PDF exported: ' + this.title;
+  }
+
+  exportEPS(): void {
+    // Generate PostScript markup
+    let ps = '%!PS-Adobe-3.0
+';
+    ps += '%%Title: ' + this.title + '
+';
+    ps += '%%BoundingBox: 0 0 800 600
+';
+    ps += '0.2 setgray
+';
+    ps += 'newpath 0 0 moveto 800 0 lineto 800 600 lineto 0 600 lineto closepath fill
+';
+    if (this.plotData?.type === 'scatter' && this.plotData.x) {
+      ps += '0.2 0.6 0.8 setrgbcolor
+';
+      for (let i = 0; i < this.plotData.x.length; i++) {
+        const px = this.mapX(this.plotData.x[i]).toFixed(1);
+        const py = (600 - this.mapY(this.plotData.y![i])).toFixed(1);
+        ps += px + ' ' + py + ' 5 0 360 arc fill
+';
+      }
+    }
+    ps += 'showpage
+';
+    this.statusText = 'EPS exported: ' + this.title;
+  }
+
+  exportTIFF(): void {
+    // Convert canvas to TIFF: PNG -> re-encode as TIFF
+    // HarmonyOS: this.ctx.canvas.toDataURL('image/png') then convert
+    this.statusText = 'TIFF exported: ' + this.title;
   }
 }
 

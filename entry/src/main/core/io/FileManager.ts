@@ -1,29 +1,8 @@
-/**
- * File manager ¡ª replaces parsers I/O utilities.
- * Abstraction over HarmonyOS file system APIs.
- */
-
 export class FileManager {
-  static getExtension(path: string): string { return path.split('.').pop()?.toLowerCase() || ''; }
-
-  static isTextFile(path: string): boolean {
-    return ['csv','tsv','txt','tps','nxs','nex','tre','newick','nwck','dat','json'].includes(FileManager.getExtension(path));
-  }
-
-  static getFileType(path: string): string {
-    const ext = FileManager.getExtension(path);
-    const map: Record<string, string> = {
-      csv: 'csv', tsv: 'csv', txt: 'text', tps: 'tps',
-      nxs: 'nexus', nex: 'nexus', tre: 'newick', newick: 'newick',
-      nwck: 'newick', dat: 'dat', xlsx: 'excel', xls: 'excel',
-    };
-    return map[ext] || 'unknown';
-  }
-
-  static getBaseName(path: string): string { return path.split('/').pop()?.split('').pop() || path; }
-  static getDirName(path: string): string { return path.substring(0, path.lastIndexOf('/')); }
-
-  static joinPath(...parts: string[]): string {
-    return parts.join('/').replace(/\/+/g, '/');
-  }
+  static getExtension(p:string):string{return p.split(".").pop()?.toLowerCase()||"";}
+  static getBaseName(p:string):string{return p.split("/").pop()?.split("\\").pop()||p;}
+  static isTextFile(p:string):boolean{return ["csv","tsv","txt","tps","nxs","nex","tre","newick","dat"].includes(FileManager.getExtension(p));}
+  static getFileType(p:string):string{const e=FileManager.getExtension(p);const m:Record<string,string>={csv:"csv",tsv:"csv",tps:"tps",nxs:"nexus",nex:"nexus",tre:"newick",dat:"dat",xlsx:"excel"};return m[e]||"unknown";}
+  static async readText(path:string):Promise<string>{return"";}
+  static async writeText(path:string,content:string):Promise<void>{}
 }
