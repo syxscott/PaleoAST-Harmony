@@ -1,17 +1,18 @@
 /**
  * Native Math — NAPI wrapper for C++ linear algebra.
- * Uses import from .so file. Falls back to TS when unavailable.
+ *
+ * Static import pattern (recommended by HarmonyOS):
+ *   On device: import nativeModule from 'libpaleoast_napi.so';
+ *   On PC preview: create src/mock/libpaleoast_napi.so.ts returning null,
+ *   configure build-profile.json5 mock switch.
+ *
+ * hasNative() allows graceful TS fallback when native module is unavailable.
  */
 
-// HarmonyOS: import nativeModule from 'libpaleoast_napi.so';
-// For now, use dynamic import with fallback
-let nativeModule: any = null;
-try {
-  // In production HarmonyOS: import nativeModule from 'libpaleoast_napi.so';
-  nativeModule = null; // Will be set when running on device
-} catch (e) {
-  nativeModule = null;
-}
+// Device mode (uncomment on real device):
+// import nativeModule from 'libpaleoast_napi.so';
+// PC preview mode:
+const nativeModule: any = null;
 
 export const hasNative = (): boolean => nativeModule !== null;
 

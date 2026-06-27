@@ -5,7 +5,8 @@ import { Matrix } from "../../core/math/Matrix";
 /**
  * Scientific Spreadsheet Component — replaces views/ui_spreadsheet.py
  * Full-featured data table with:
- * - Cell editing
+ * - LazyForEach + IDataSource for virtualized rendering (no DOM explosion)
+ * - Cell editing with @State updateFlag for reactive UI refresh
  * - Row/column selection
  * - Group assignment (colored row labels)
  * - Sorting by column
@@ -24,6 +25,7 @@ export struct Spreadsheet {
   @State filterText: string = '';
   @State editingCell: string = ''; // "row,col"
   @State editValue: string = '';
+  @State updateFlag: number = 0; // Force UI refresh on data change
   @State groupColors: Map<string, string> = new Map([
     ['Group_A', '#3498DB'], ['Group_B', '#E74C3C'], ['Group_C', '#27AE60'],
     ['Group_D', '#F39C12'], ['Ungrouped', '#95A5A6'],
@@ -115,9 +117,10 @@ export struct Spreadsheet {
 
   @Builder DataRows() {
     if (this.dataMatrix != null) {
-      // Use LazyForEach for large datasets (prevents DOM node explosion)
-      // SpreadsheetDataSource implements IDataSource for on-demand rendering
-      ForEach(this.getFilteredRows(), (rowIdx: number) => {
+      // True LazyForEach: only renders visible rows, prevents DOM explosion.
+      // SpreadsheetDataSource implements IDataSource for on-demand rendering.
+      // updateFlag forces UI refresh when cell data changes (ArkUI @State shallow watch workaround).
+      LazyForEach(this.getRowDataSource(), (rowIdx: number) => {
         Row() {
           // Row number
           Text(String(rowIdx + 1)).width(40).fontSize(10).textAlign(TextAlign.Center)
@@ -134,7 +137,7 @@ export struct Spreadsheet {
 
           // Data cells
           ForEach(Array.from({ length: this.dataMatrix!.nVariables }), (_: Object, colIdx: number) => {
-            Text(this.getCellDisplay(rowIdx, colIdx))
+            Text(this.getCellDisplay(rowIdx, colIdx) + (this.updateFlag > -1 ? '' : ''))
               .width(80).fontSize(10).textAlign(TextAlign.Right)
               .fontColor(this.getCellFontColor(rowIdx, colIdx))
               .backgroundColor(this.getCellBg(rowIdx, colIdx))
@@ -144,8 +147,16 @@ export struct Spreadsheet {
         }
         .width('100%').height(22)
         .backgroundColor(this.selectedRow === rowIdx ? '#EBF5FB' : (rowIdx % 2 === 0 ? 'transparent' : (this.darkMode ? '#16213e08' : '#F8F9FA08')))
-      })
+      }, (rowIdx: number) => rowIdx.toString() + '_' + this.updateFlag.toString())
     }
+  }
+
+  private dataSource: SpreadsheetDataSource = new SpreadsheetDataSource();
+
+  private getRowDataSource(): SpreadsheetDataSource {
+    const rows = this.getFilteredRows();
+    this.dataSource.setRowIndices(rows);
+    return this.dataSource;
   }
 
   @Builder StatusBar() {
@@ -216,6 +227,10 @@ export struct Spreadsheet {
     const newVal = this.editValue.trim().toLowerCase() === 'na' ? NaN : parseFloat(this.editValue);
     if (!isNaN(newVal) || this.editValue.trim().toLowerCase() === 'na') {
       this.dataMatrix.data.set(row, col, isNaN(newVal) ? NaN : newVal);
+      // ArkUI @State is shallow-watch: updating dataMatrix.data.set() alone
+      // won't trigger UI refresh. Increment updateFlag to force LazyForEach
+      // key change + Text re-evaluation.
+      this.updateFlag++;
       this.onDataChanged(this.dataMatrix.data);
     }
     this.editingCell = '';
@@ -336,16 +351,4 @@ export struct Spreadsheet {
     const s = Math.sqrt(flat.reduce((sum, v) => sum + (v - m) ** 2, 0) / (n - 1));
     return { count: n, mean: m, std: s };
   }
-    if (this.dataMatrix == null) return [];
-    const rows = this.selectedRows.size > 0 ? Array.from(this.selectedRows) : [this.selectedRow];
-    return rows.filter(r => r >= 0).map(r => this.dataMatrix!.data.row(r));
-  }
-
-  getSelectedRows(): number[] {
-    return this.selectedRows.size > 0 ? Array.from(this.selectedRows) : [this.selectedRow].filter(r => r >= 0);
-  }
-
-  getGroups(): string[] { return this.rowGroups; }
-  setGroups(groups: string[]): void { this.rowGroups = groups; this.onGroupChanged(groups); }
-  setDarkMode(dark: boolean): void { this.darkMode = dark; }
 }
