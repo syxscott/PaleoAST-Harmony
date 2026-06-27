@@ -1,4 +1,4 @@
-import { DataMatrix } from '../../core/data/index';
+import { DataMatrix } from '../../core/models/index';
 
 /**
  * Interactive Plot Canvas — replaces views/ui_plot_canvas.py (2,892 lines)

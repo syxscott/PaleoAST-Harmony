@@ -1,5 +1,5 @@
 import { Matrix } from '../math/Matrix';
-import { DataMatrix, StateManager } from '../data/index';
+import { DataMatrix, StateManager } from '../models/index';
 import { computeDistanceMatrix, Metric, pca, pcoa, nmds, lda, cca, anosim, permanova, simper, hierarchicalClustering, univariateSummary, tTest, anova, kruskalWallis, phylogeneticSignal, mannWhitneyU, convexHullVolume, morphospaceDisparity, plsAnalysis, minimumSpanningTree, reconstructAncestralStates } from '../analysis/statistics/index';
 import { computeDiversity, computeRarefaction, betaDiversityDecomposition, nullModel, sheAnalysis, paleoEnvironment, fitAbundanceModels, fitLogSeries, lbKeogh, sampleBasedRarefaction } from '../analysis/ecology/index';
 import { coniss, markov, directional, extinctionCI, spectralAnalysis, isotopeAnalysis, waveletTransform, stratigraphicCorrelation, lowessSmooth, fitPolynomialTrend, movingAverage, removeOutliers, crossValidate, detectExcursions, filterEndemic, buildARMAModel, armaPredict } from '../analysis/stratigraphy/index';

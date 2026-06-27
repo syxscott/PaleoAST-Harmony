@@ -1,5 +1,5 @@
 import { Matrix } from '../math/Matrix';
-import { DataMatrix } from '../data/index';
+import { DataMatrix } from '../models/index';
 
 export function parseCSV(text: string, delimiter = ',', hasHeader = true, hasRowLabels = true, naValues: string[] = ['NA','NaN','-','','nan','null']): DataMatrix {
   const lines = text.trim().split(/?

@@ -1,6 +1,6 @@
 import { DataController } from '../../core/controllers/DataController';
 import { StatisticsController } from '../../core/controllers/StatisticsController';
-import { StateManager } from '../../core/data/index';
+import { StateManager } from '../../core/models/index';
 import { parseCSV } from '../../core/parsers/CSVParser';
 import { NavigationTree } from '../components/NavigationTree';
 import { Spreadsheet } from '../components/Spreadsheet';

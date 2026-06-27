@@ -1,5 +1,5 @@
 import { Matrix } from '../math/Matrix';
-import { DataMatrix, StateManager } from '../data/index';
+import { DataMatrix, StateManager } from '../models/index';
 import { parseCSV, toCSV } from '../parsers/index';
 
 /**
