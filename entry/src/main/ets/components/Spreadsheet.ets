@@ -1,4 +1,5 @@
-import { DataMatrix } from "../../core/data/index";
+import { DataMatrix } from "../../core/models/index";
+import { SpreadsheetDataSource } from "./SpreadsheetDataSource";
 import { Matrix } from "../../core/math/Matrix";
 
 /**

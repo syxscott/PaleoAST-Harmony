@@ -112,28 +112,16 @@ struct Index {
       // ─── 顶部 Ribbon (使用 Tabs 组件) ───
       this.RibbonBar()
 
-      // ─── 主内容区 (Row + Divider 替代 SplitContainer) ───
-      Row() {
+      // ─── 主内容区 (SideBarContainer 响应式布局) ───
+      SideBarContainer(SideBarContainerType.Embed) {
         // 左侧导航
         NavigationTree()
-          .width(220)
           .onNavigate((name: string) => { this.handleAnalysis(name); })
-
-        Divider().vertical(true).width(1).color('#E4E7EB')
-
-        // 右侧工作区
-        Column() {
-          if (this.isLoading) {
-            this.LoadingView()
-          } else if (!this.hasData) {
-            this.WelcomeView()
-          } else {
-            this.WorkspaceView()
-          }
-        }
-        .layoutWeight(1)
-        .height('100%')
       }
+      .showSideBar(true)
+      .sideBarWidth(220)
+      .minSideBarWidth(180)
+      .maxSideBarWidth(300)
       .height('100%')
 
       // ─── 诊断控制台 (滑出式面板) ───
