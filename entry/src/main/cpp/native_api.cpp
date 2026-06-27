@@ -1,14 +1,11 @@
 /**
  * PaleoAST Native API — NAPI C++ entry point
- * Exposes high-performance linear algebra to ArkTS.
  */
-#include "napi/native_api.h"
+#include "native_api.h"
 #include "napi/matrix_ops.h"
-#include "napi/linalg_c.h"
 
 static napi_value Init(napi_env env, napi_value exports) {
-    // Register matrix operations
-    napi_property_descriptor matrixDesc[] = {
+    napi_property_descriptor desc[] = {
         DECLARE_NAPI_FUNCTION("matrixMultiply", MatrixOps::Multiply),
         DECLARE_NAPI_FUNCTION("matrixTranspose", MatrixOps::Transpose),
         DECLARE_NAPI_FUNCTION("matrixSVD", MatrixOps::SVD),
@@ -17,7 +14,7 @@ static napi_value Init(napi_env env, napi_value exports) {
         DECLARE_NAPI_FUNCTION("computeDistanceMatrix", MatrixOps::DistanceMatrix),
         DECLARE_NAPI_FUNCTION("hierarchicalClustering", MatrixOps::Clustering),
     };
-    napi_define_properties(env, exports, sizeof(matrixDesc) / sizeof(matrixDesc[0]), matrixDesc);
+    napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);
     return exports;
 }
 

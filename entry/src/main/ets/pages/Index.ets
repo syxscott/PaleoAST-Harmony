@@ -114,9 +114,22 @@ struct Index {
 
       // ─── 主内容区 (SideBarContainer 响应式布局) ───
       SideBarContainer(SideBarContainerType.Embed) {
-        // 左侧导航
+        // SideBar: 左侧导航
         NavigationTree()
           .onNavigate((name: string) => { this.handleAnalysis(name); })
+
+        // Content: 右侧工作区
+        Column() {
+          if (this.isLoading) {
+            this.LoadingView()
+          } else if (!this.hasData) {
+            this.WelcomeView()
+          } else {
+            this.WorkspaceView()
+          }
+        }
+        .layoutWeight(1)
+        .height('100%')
       }
       .showSideBar(true)
       .sideBarWidth(220)

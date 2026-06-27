@@ -5,9 +5,8 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 add_library(paleoast_napi SHARED
-    napi/native_api.cpp
+    native_api.cpp
     napi/matrix_ops.cpp
-    napi/linalg_c.cpp
 )
 
 target_include_directories(paleoast_napi PRIVATE

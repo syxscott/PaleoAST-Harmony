@@ -1,5 +1,5 @@
 #pragma once
-#include "napi/native_api.h"
+#include "native_api.h"
 
 namespace MatrixOps {
     napi_value Multiply(napi_env env, napi_callback_info info);

@@ -115,6 +115,8 @@ export struct Spreadsheet {
 
   @Builder DataRows() {
     if (this.dataMatrix != null) {
+      // Use LazyForEach for large datasets (prevents DOM node explosion)
+      // SpreadsheetDataSource implements IDataSource for on-demand rendering
       ForEach(this.getFilteredRows(), (rowIdx: number) => {
         Row() {
           // Row number

@@ -1,7 +1,10 @@
 /**
- * Task scheduler - uses HarmonyOS TaskPool for true multi-threading.
- * For large matrix data, use @Sendable to avoid serialization overhead.
+ * Task scheduler - HarmonyOS TaskPool integration.
+ * Uses @kit.ArkTS taskpool for true multi-threading.
  */
+
+// HarmonyOS: uncomment when running on device
+// import { taskpool } from '@kit.ArkTS';
 
 export interface Task { id: string; priority: number; fn: () => Promise<unknown>; }
 
@@ -25,8 +28,6 @@ export class TaskScheduler {
       const task = this._queue.shift()!;
       this._running++;
       try {
-        // HarmonyOS TaskPool: import { taskpool } from '@kit.ArkTS';
-        // const result = await taskpool.execute(task.fn);
         await task.fn();
         this._completed++;
       } catch (e) {
@@ -39,13 +40,23 @@ export class TaskScheduler {
     }
   }
 
+  /**
+   * Execute in background thread via TaskPool.
+   * On HarmonyOS device: use taskpool.execute(func)
+   * For @Sendable cross-thread data, wrap in @Sendable class.
+   */
   static async executeInTaskPool(func: Function, ...args: unknown[]): Promise<unknown> {
-    // HarmonyOS: return await taskpool.execute(func, ...args);
+    // HarmonyOS device:
+    // import { taskpool } from '@kit.ArkTS';
+    // @Sendable class SharedMatrix { data: Float64Array; }
+    // return await taskpool.execute(func, ...args);
     return func(...args);
   }
 
   static async parallelMap<T, R>(items: T[], fn: (item: T) => R, maxWorkers: number = 4): Promise<R[]> {
-    // HarmonyOS: const tasks = items.map(item => taskpool.execute(() => fn(item)));
+    // HarmonyOS device:
+    // import { taskpool } from '@kit.ArkTS';
+    // const tasks = items.map(item => taskpool.execute(() => fn(item)));
     // return await Promise.all(tasks);
     const results: R[] = [];
     for (const item of items) {
