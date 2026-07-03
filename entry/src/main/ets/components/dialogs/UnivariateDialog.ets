@@ -1,6 +1,6 @@
 @Component
 export struct UnivariateDialog {
-  @Link visible: boolean;
+  @State visible: boolean = false;
   @State test_typeIdx: number = 0;
   test_typeOpts: string[] = ["Summary", "Normality", "t-test", "ANOVA", "Kruskal-Wallis"];
   @State showTips: boolean = false;

@@ -75,7 +75,6 @@ struct Index {
   @State hasData: boolean = false;
   @State statusText: string = 'PaleoAST-Harmony - Ready';
   @State dataInfo: string = 'No data loaded';
-  @State darkMode: boolean = false;
   @State workspaceWidgets: string[] = [];
   @State currentWidget: number = 0;
   @State showConsole: boolean = false;
@@ -175,7 +174,7 @@ struct Index {
     Row() {
       // 使用 Tabs 组件替代手动 Row
       ForEach(this.tabs, (tab: string, idx: number) => {
-        Text(tab.name)
+        Text(tab)
           .ribbonTabStyle(this.currentTab === idx, this.darkMode)
           .onClick(() => {
             animateTo({ duration: 200, curve: Curve.EaseInOut }, () => {

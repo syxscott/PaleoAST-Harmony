@@ -1,6 +1,6 @@
 @Component
 export struct PaleoEnvDialog {
-  @Link visible: boolean;
+  @State visible: boolean = false;
 
   @State showTips: boolean = false;
   onConfirm: (params: Record<string, Object>) => void = () => {};

@@ -1,6 +1,6 @@
 @Component
 export struct BetaDivDialog {
-  @Link visible: boolean;
+  @State visible: boolean = false;
   @State metricIdx: number = 0;
   metricOpts: string[] = ["jaccard", "sorensen"];
   @State showTips: boolean = false;

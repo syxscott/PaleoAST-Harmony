@@ -1,6 +1,6 @@
 @Component
 export struct ImportDialog {
-  @Link visible: boolean;
+  @State visible: boolean = false;
   @State filePath: string = '';
   @State hasHeader: boolean = true;
   @State hasRowLabels: boolean = true;

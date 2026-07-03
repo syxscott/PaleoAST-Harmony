@@ -1,6 +1,6 @@
 @Component
 export struct PermanovaDialog {
-  @Link visible: boolean;
+  @State visible: boolean = false;
   @State n_permutations: number = 999;
   @State metricIdx: number = 0;
   metricOpts: string[] = ["bray_curtis", "euclidean"];

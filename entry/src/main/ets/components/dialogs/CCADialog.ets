@@ -1,6 +1,6 @@
 @Component
 export struct CCADialog {
-  @Link visible: boolean;
+  @State visible: boolean = false;
   @State n_components: number = 3;
   @State methodIdx: number = 0;
   methodOpts: string[] = ["cca", "rda"];

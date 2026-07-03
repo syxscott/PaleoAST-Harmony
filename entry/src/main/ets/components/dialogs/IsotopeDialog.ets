@@ -1,6 +1,6 @@
 @Component
 export struct IsotopeDialog {
-  @Link visible: boolean;
+  @State visible: boolean = false;
 
   @State showTips: boolean = false;
   onConfirm: (params: Record<string, Object>) => void = () => {};

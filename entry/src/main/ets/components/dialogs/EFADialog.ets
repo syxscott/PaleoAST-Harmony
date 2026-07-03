@@ -4,7 +4,7 @@
  */
 @Component
 export struct EFADialog {
-  @Link visible: boolean;
+  @State visible: boolean = false;
   @State n_harmonics: number = 10;
   @State n_points: number = 200;
   @State errorMsg: string = '';

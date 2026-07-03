@@ -1,6 +1,6 @@
 @Component
 export struct PhyloSignalDialog {
-  @Link visible: boolean;
+  @State visible: boolean = false;
   @State n_randomizations: number = 999;
   @State showTips: boolean = false;
   onConfirm: (params: Record<string, Object>) => void = () => {};

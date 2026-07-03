@@ -1,6 +1,6 @@
 @Component
 export struct DiversityDialog {
-  @Link visible: boolean;
+  @State visible: boolean = false;
   @State sample_index: number = 0;
   @State showTips: boolean = false;
   onConfirm: (params: Record<string, Object>) => void = () => {};

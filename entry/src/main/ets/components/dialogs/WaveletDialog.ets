@@ -1,6 +1,6 @@
 @Component
 export struct WaveletDialog {
-  @Link visible: boolean;
+  @State visible: boolean = false;
   @State min_scale: number = 2;
   @State max_scale: number = 50;
   @State showTips: boolean = false;

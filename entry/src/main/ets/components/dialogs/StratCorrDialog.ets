@@ -1,6 +1,6 @@
 @Component
 export struct StratCorrDialog {
-  @Link visible: boolean;
+  @State visible: boolean = false;
 
   onConfirm: (params: Record<string, Object>) => void = () => {};
 

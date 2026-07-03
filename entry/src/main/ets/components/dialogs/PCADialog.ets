@@ -4,7 +4,7 @@
  */
 @Component
 export struct PCADialog {
-  @Link visible: boolean;
+  @State visible: boolean = false;
   @State nComponents: number = 3;
   @State methodIdx: number = 0;
   @State errorMsg: string = '';

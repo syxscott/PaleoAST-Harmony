@@ -1,6 +1,6 @@
 @Component
 export struct GPADialog {
-  @Link visible: boolean;
+  @State visible: boolean = false;
   @State max_iterations: number = 100;
   @State showTips: boolean = false;
   onConfirm: (params: Record<string, Object>) => void = () => {};

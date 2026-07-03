@@ -4,7 +4,7 @@
  */
 @Component
 export struct ExtinctionDialog {
-  @Link visible: boolean;
+  @State visible: boolean = false;
   @State methodIdx: number = 0;
   @State confidence_level: number = 0.95;
   @State showAdvanced: boolean = false;

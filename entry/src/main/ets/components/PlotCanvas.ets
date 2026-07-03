@@ -515,7 +515,7 @@ export struct PlotCanvas {
     // In production: import picker from '@ohos.file.picker';
     //   const fd = picker.save({ files: [{ name: this.title + '.png' }] });
     //   write PNG bytes to fd
-    this.statusText = 'PNG exported: ' + this.title;
+    if (this.onStatus) this.onStatus('PNG exported: ' + this.title);
   }
 
   private exportSVG(): void {
@@ -531,13 +531,13 @@ export struct PlotCanvas {
     }
     svg += '</svg>';
     // HarmonyOS: write to file via @ohos.file.fs
-    this.statusText = 'SVG exported: ' + this.title;
+    if (this.onStatus) this.onStatus('SVG exported: ' + this.title);
   }
 
   exportPDF(): void {
     // HarmonyOS: use @ohos.system.print.PrintHelper
     // Or generate PDF via canvas: this.ctx.canvas.toBlob(type='application/pdf')
-    this.statusText = 'PDF exported: ' + this.title;
+    if (this.onStatus) this.onStatus('PDF exported: ' + this.title);
   }
 
   exportEPS(): void {
@@ -564,13 +564,13 @@ export struct PlotCanvas {
     }
     ps += 'showpage
 ';
-    this.statusText = 'EPS exported: ' + this.title;
+    if (this.onStatus) this.onStatus('EPS exported: ' + this.title);
   }
 
   exportTIFF(): void {
     // Convert canvas to TIFF: PNG -> re-encode as TIFF
     // HarmonyOS: this.ctx.canvas.toDataURL('image/png') then convert
-    this.statusText = 'TIFF exported: ' + this.title;
+    if (this.onStatus) this.onStatus('TIFF exported: ' + this.title);
   }
 }
 

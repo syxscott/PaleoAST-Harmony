@@ -4,7 +4,7 @@
  */
 @Component
 export struct NullModelDialog {
-  @Link visible: boolean;
+  @State visible: boolean = false;
   @State metricIdx: number = 0;
   @State n_permutations: number = 999;
   @State n_workers: number = 4;

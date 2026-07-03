@@ -1,6 +1,6 @@
 @Component
 export struct DirectionalDialog {
-  @Link visible: boolean;
+  @State visible: boolean = false;
   @State n_bins: number = 12;
   @State showTips: boolean = false;
   onConfirm: (params: Record<string, Object>) => void = () => {};

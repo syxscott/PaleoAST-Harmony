@@ -1,6 +1,6 @@
 @Component
 export struct TPSDialog {
-  @Link visible: boolean;
+  @State visible: boolean = false;
   @State grid_size: number = 15;
   @State showTips: boolean = false;
   onConfirm: (params: Record<string, Object>) => void = () => {};

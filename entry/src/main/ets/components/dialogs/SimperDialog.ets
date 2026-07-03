@@ -1,6 +1,6 @@
 @Component
 export struct SimperDialog {
-  @Link visible: boolean;
+  @State visible: boolean = false;
   @State metricIdx: number = 0;
   metricOpts: string[] = ["bray_curtis", "euclidean"];
   @State showTips: boolean = false;

@@ -1,6 +1,6 @@
 @Component
 export struct LDADialog {
-  @Link visible: boolean;
+  @State visible: boolean = false;
   @State n_components: number = 2;
   @State showTips: boolean = false;
   onConfirm: (params: Record<string, Object>) => void = () => {};

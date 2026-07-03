@@ -1,6 +1,6 @@
 @Component
 export struct RarefactionDialog {
-  @Link visible: boolean;
+  @State visible: boolean = false;
   @State max_n: number = 100;
   @State n_points: number = 50;
   @State showTips: boolean = false;

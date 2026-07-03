@@ -1,6 +1,6 @@
 @Component
 export struct PhyloAnovaDialog {
-  @Link visible: boolean;
+  @State visible: boolean = false;
   @State n_permutations: number = 999;
   @State showTips: boolean = false;
   onConfirm: (params: Record<string, Object>) => void = () => {};

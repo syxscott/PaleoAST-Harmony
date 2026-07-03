@@ -4,7 +4,7 @@
  */
 @Component
 export struct ClusteringDialog {
-  @Link visible: boolean;
+  @State visible: boolean = false;
   @State n_clusters: number = 3;
   @State methodIdx: number = 0;
   @State metricIdx: number = 0;

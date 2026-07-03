@@ -1,6 +1,6 @@
 @Component
 export struct BiostratDialog {
-  @Link visible: boolean;
+  @State visible: boolean = false;
   @State methodIdx: number = 0;
   methodOpts: string[] = ["ua", "rasc"];
   @State min_occurrence: number = 2;
