@@ -1,11 +1,34 @@
 import { Matrix } from '../math/Matrix';
 import { DataMatrix, StateManager } from '../models/index';
-import { computeDistanceMatrix, Metric, pca, pcoa, nmds, lda, cca, anosim, permanova, simper, hierarchicalClustering, univariateSummary, tTest, anova, kruskalWallis, phylogeneticSignal, mannWhitneyU, convexHullVolume, morphospaceDisparity, plsAnalysis, minimumSpanningTree, reconstructAncestralStates } from '../analysis/statistics/index';
-import { computeDiversity, computeRarefaction, betaDiversityDecomposition, nullModel, sheAnalysis, paleoEnvironment, fitAbundanceModels, fitLogSeries, lbKeogh, sampleBasedRarefaction } from '../analysis/ecology/index';
-import { coniss, markov, directional, extinctionCI, spectralAnalysis, isotopeAnalysis, waveletTransform, stratigraphicCorrelation, lowessSmooth, fitPolynomialTrend, movingAverage, removeOutliers, crossValidate, detectExcursions, filterEndemic, buildARMAModel, armaPredict } from '../analysis/stratigraphy/index';
-import { cohortSurvivorship, estimateDiversity, simulateFBD, coxPH, logRankTest, fitExponential, fitLogistic, simulateNeutral, fbdLogLikelihood, testEquilibrium } from '../analysis/macroevolution/index';
-import { gpa, efa, allometry, evolutionRate, tpsDeformation, relativeWarps, divideConfigurationIntoBlocks } from '../analysis/morphometrics/index';
-import { parseNewick, fitchParsimony, pic, neighborJoining, buildUPGMA, majorityRuleConsensus, heuristicSearch, strictConsensus, PhyloNode } from '../analysis/phylogenetics/index';
+import {
+  computeDistanceMatrix, Metric, pca, pcoa, nmds, lda, cca, anosim, permanova, simper,
+  hierarchicalClustering, univariateSummary, tTest, anova, kruskalWallis, phylogeneticSignal,
+  mannWhitneyU, convexHullVolume, morphospaceDisparity, plsAnalysis, minimumSpanningTree,
+  reconstructAncestralStates, ripleyK, normalityTest
+} from '../analysis/statistics/index';
+import {
+  computeDiversity, computeRarefaction, betaDiversityDecomposition, nullModel, sheAnalysis,
+  paleoEnvironment, fitAbundanceModels, fitLogSeries, lbKeogh, sampleBasedRarefaction,
+  coverageRarefaction
+} from '../analysis/ecology/index';
+import {
+  coniss, markov, directional, extinctionCI, spectralAnalysis, isotopeAnalysis, waveletTransform,
+  stratigraphicCorrelation, lowessSmooth, fitPolynomialTrend, movingAverage, removeOutliers,
+  crossValidate, detectExcursions, filterEndemic, buildARMAModel, armaPredict,
+  unitaryAssociations, rasc, buildAgeModel, computeSedimentationRate, computeCorrelation
+} from '../analysis/stratigraphy/index';
+import {
+  cohortSurvivorship, estimateDiversity, simulateFBD, coxPH, logRankTest, fitExponential,
+  fitLogistic, simulateNeutral, fbdLogLikelihood, testEquilibrium, kaplanMeier
+} from '../analysis/macroevolution/index';
+import {
+  gpa, efa, allometry, evolutionRate, tpsDeformation, relativeWarps,
+  divideConfigurationIntoBlocks, eigenshape, plsIntegration, tpsAnalyze, tpsWarpGrid
+} from '../analysis/morphometrics/index';
+import {
+  parseNewick, fitchParsimony, pic, neighborJoining, buildUPGMA, majorityRuleConsensus,
+  heuristicSearch, strictConsensus, PhyloNode
+} from '../analysis/phylogenetics/index';
 
 /**
  * StatisticsController — orchestrates all analysis calls.
@@ -351,4 +374,59 @@ export class StatisticsController {
   getCached<T>(key: string): T | null { return this.state.getCachedResult<T>(key); }
   hasData(): boolean { return this.state.hasData; }
   getDataMatrix(): DataMatrix | null { return this.state.dataMatrix; }
+
+  // ─── Newly ported analyses ───────────────────────────────────────────────
+
+  runRipleyK(coords: number[][], rMax?: number, nR: number = 50, nSim: number = 99) {
+    return ripleyK(coords, rMax, nR, nSim);
+  }
+
+  runNormalityTest(col: number = 0) {
+    return normalityTest(this.getData(), col);
+  }
+
+  runCoverageRarefaction(coverageLevels?: number[], nIterations: number = 200) {
+    const dm = this.getDM();
+    return coverageRarefaction(dm.data.to2D(), coverageLevels, nIterations);
+  }
+
+  runKaplanMeier(times: number[], events: number[], confLevel: number = 0.95) {
+    return kaplanMeier(times, events, confLevel);
+  }
+
+  runEigenshape(efaCoefficients: Matrix[] | number[][][], nComponents?: number) {
+    return eigenshape(efaCoefficients, nComponents);
+  }
+
+  runPLSIntegration(blockA: Matrix, blockB: Matrix, nc?: number, nPerm: number = 999) {
+    return plsIntegration(blockA, blockB, nc, nPerm);
+  }
+
+  runTPSAnalyze(source: number[][], target: number[][]) {
+    return tpsAnalyze(source, target);
+  }
+
+  runTPSWarpGrid(result: { source: number[][]; warpPoints: (ps: number[][]) => number[][] }, rows: number = 20, cols: number = 20) {
+    return tpsWarpGrid(result as any, rows, cols);
+  }
+
+  runUnitaryAssociations(fad: number[][], lad: number[][], sectionNames?: string[], eventNames?: string[]) {
+    return unitaryAssociations(fad, lad, sectionNames, eventNames);
+  }
+
+  runRASC(distMatrix: number[][], eventNames?: string[], nIter: number = 100) {
+    return rasc(distMatrix, eventNames, nIter);
+  }
+
+  runAgeModel(section: { name: string; heights: number[]; thicknesses?: number[]; lithologies?: string[]; ages?: number[]; ageErrors?: number[]; notes?: string[] }, constraints: [number, number, number][], modelType: 'linear' | 'spline' = 'linear') {
+    return buildAgeModel(section as any, constraints, modelType);
+  }
+
+  runSedimentationRate(section: { name: string; heights: number[]; thicknesses?: number[]; lithologies?: string[]; ages?: number[]; ageErrors?: number[]; notes?: string[] }, smooth: boolean = true) {
+    return computeSedimentationRate(section as any, smooth);
+  }
+
+  runComputeCorrelation(x: number[], y: number[], method: 'pearson' | 'spearman' = 'pearson') {
+    return computeCorrelation(x, y, method);
+  }
 }

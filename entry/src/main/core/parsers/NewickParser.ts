@@ -1,5 +1,5 @@
 /**
- * Newick tree parser ¡ª replaces parsers/newick_parser.py
+ * Newick tree parser ï¿½ï¿½ replaces parsers/newick_parser.py
  * Full implementation with branch lengths, support values, comments.
  */
 
@@ -102,4 +102,18 @@ export function getLeafNames(node: NewickNode): string[] {
 export function getTreeHeight(node: NewickNode): number {
   if (node.children.length === 0) return node.branchLength;
   return node.branchLength + Math.max(...node.children.map(c => getTreeHeight(c)));
+}
+
+/**
+ * Parse a file/string containing one or more Newick trees separated by ';'.
+ * Equivalent to Python's read_newick_file(). Whitespace and comments between
+ * trees are tolerated.
+ */
+export function readNewickBatch(content: string): NewickNode[] {
+  const trees: NewickNode[] = [];
+  if (!content || !content.trim()) return trees;
+  const cleaned = content.replace(/\[.*?\]/g, '').trim();
+  const parts = cleaned.split(';').map(p => p.trim()).filter(p => p.length > 0);
+  for (const p of parts) trees.push(parseNewick(p));
+  return trees;
 }

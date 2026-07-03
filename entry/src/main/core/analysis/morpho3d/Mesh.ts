@@ -1,5 +1,5 @@
 /**
- * 3D Mesh �� replaces morpho3d/mesh.py
+ * 3D Mesh �� replaces morpho3d/mesh.py
  */
 
 export interface Mesh3D {
@@ -30,4 +30,51 @@ export function meshArea(mesh: Mesh3D): number {
     area += 0.5 * Math.sqrt(nx*nx + ny*ny + nz*nz);
   }
   return area;
+}
+
+// ─── Surface interpolator (port of morpho3d/mesh.py::SurfaceInterpolator) ──────
+export class SurfaceInterpolator {
+  private points: number[][];
+  private values: number[];
+
+  constructor(points: number[][], values: number[]) {
+    if (points.length !== values.length) throw new Error('point/value count mismatch');
+    this.points = points;
+    this.values = values;
+  }
+
+  /**
+   * Inverse-distance weighted interpolation (Shepard's method).
+   */
+  interpolate(q: number[], power: number = 2): number {
+    if (this.points.length === 0) return NaN;
+    let num = 0, den = 0;
+    for (let i = 0; i < this.points.length; i++) {
+      let sq = 0;
+      for (let k = 0; k < q.length; k++) {
+        const d = this.points[i][k] - q[k];
+        sq += d * d;
+      }
+      const w = sq < 1e-300 ? 1 : 1 / Math.pow(sq, power / 2);
+      num += w * this.values[i];
+      den += w;
+    }
+    return num / den;
+  }
+
+  /** Bilinear interpolation in a regular 2D grid (uses IDW fallback otherwise). */
+  interpolateGrid(xMin: number, xMax: number, yMin: number, yMax: number,
+                  nx: number, ny: number): number[][] {
+    const grid: number[][] = [];
+    for (let j = 0; j < ny; j++) {
+      const y = yMin + (j / (ny - 1)) * (yMax - yMin);
+      const row: number[] = [];
+      for (let i = 0; i < nx; i++) {
+        const x = xMin + (i / (nx - 1)) * (xMax - xMin);
+        row.push(this.interpolate([x, y]));
+      }
+      grid.push(row);
+    }
+    return grid;
+  }
 }

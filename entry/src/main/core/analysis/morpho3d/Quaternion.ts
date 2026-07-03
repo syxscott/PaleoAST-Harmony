@@ -1,5 +1,5 @@
 /**
- * Quaternion operations �� replaces morpho3d/quaternion.py
+ * Quaternion operations �� replaces morpho3d/quaternion.py
  * Used for 3D rotations in GPA and TPS.
  */
 
@@ -72,4 +72,146 @@ export class Quaternion {
     const result = this.multiply(qp).multiply(this.conjugate());
     return [result.x, result.y, result.z];
   }
+}
+
+// ─── 3×3 Rotation matrix utilities (port of morpho3d/quaternion.py::RotationMatrix) ─
+export class RotationMatrix {
+  /** Identity matrix. */
+  static identity(): number[][] {
+    return [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
+  }
+
+  /** Rotation matrix from axis-angle (Rodrigues' form). */
+  static fromAxisAngle(axis: [number, number, number], angle: number): number[][] {
+    const norm = Math.hypot(axis[0], axis[1], axis[2]) || 1;
+    const x = axis[0] / norm, y = axis[1] / norm, z = axis[2] / norm;
+    const c = Math.cos(angle), s = Math.sin(angle), C = 1 - c;
+    return [
+      [c + x * x * C,       x * y * C - z * s,   x * z * C + y * s],
+      [y * x * C + z * s,   c + y * y * C,       y * z * C - x * s],
+      [z * x * C - y * s,   z * y * C + x * s,   c + z * z * C      ]
+    ];
+  }
+
+  /** Compute the best-fit rotation aligning two point sets (Procrustes SVD). */
+  static procrustes(A: number[][], B: number[][]): number[][] {
+    if (A.length !== B.length || A.length === 0) throw new Error('procrustes: empty or mismatched sets');
+    for (const p of A) if (p.length !== 3) throw new Error('procrustes: 3D sets only');
+    for (const p of B) if (p.length !== 3) throw new Error('procrustes: 3D sets only');
+    // Centre both
+    const meanA = [0, 0, 0], meanB = [0, 0, 0];
+    for (let i = 0; i < A.length; i++) { meanA[0] += A[i][0]; meanA[1] += A[i][1]; meanA[2] += A[i][2]; }
+    for (let i = 0; i < B.length; i++) { meanB[0] += B[i][0]; meanB[1] += B[i][1]; meanB[2] += B[i][2]; }
+    for (let k = 0; k < 3; k++) { meanA[k] /= A.length; meanB[k] /= A.length; }
+    const Ac: number[][] = A.map(p => [p[0] - meanA[0], p[1] - meanA[1], p[2] - meanA[2]]);
+    const Bc: number[][] = B.map(p => [p[0] - meanB[0], p[1] - meanB[1], p[2] - meanB[2]]);
+    // H = Aᵀ B
+    const H: number[][] = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+    for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) {
+      for (let k = 0; k < A.length; k++) H[i][j] += Ac[k][i] * Bc[k][j];
+    }
+    // SVD of H ≈ U S Vᵀ; R = V Uᵀ (single-sided Jacobi — fallback inline)
+    const svd = _jacobiSVD3x3(H);
+    // If det(VUᵀ) < 0, flip last column to enforce proper rotation
+    const V = svd.V, U = svd.U;
+    const R: number[][] = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+    for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) {
+      for (let k = 0; k < 3; k++) R[i][j] += V[i][k] * U[j][k];
+    }
+    if (det3(R) < 0) {
+      for (let i = 0; i < 3; i++) R[i][2] = -R[i][2];
+    }
+    return R;
+  }
+
+  /** Apply rotation to a 3-vector. */
+  static apply(R: number[][], v: [number, number, number]): [number, number, number] {
+    return [
+      R[0][0] * v[0] + R[0][1] * v[1] + R[0][2] * v[2],
+      R[1][0] * v[0] + R[1][1] * v[1] + R[1][2] * v[2],
+      R[2][0] * v[0] + R[2][1] * v[1] + R[2][2] * v[2]
+    ];
+  }
+
+  /** Transpose. */
+  static transpose(R: number[][]): number[][] {
+    return [
+      [R[0][0], R[1][0], R[2][0]],
+      [R[0][1], R[1][1], R[2][1]],
+      [R[0][2], R[1][2], R[2][2]]
+    ];
+  }
+}
+
+function det3(R: number[][]): number {
+  return R[0][0] * (R[1][1] * R[2][2] - R[1][2] * R[2][1])
+       - R[0][1] * (R[1][0] * R[2][2] - R[1][2] * R[2][0])
+       + R[0][2] * (R[1][0] * R[2][1] - R[1][1] * R[2][0]);
+}
+
+function _jacobiSVD3x3(M: number[][]): { U: number[][]; S: number[]; V: number[][] } {
+  // Compute Hᵀ H then eigen-decompose via Jacobi; back out U, V.
+  const HtH: number[][] = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+  for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) {
+    for (let k = 0; k < 3; k++) HtH[i][j] += M[k][i] * M[k][j];
+  }
+  const eig = _jacobi3x3(HtH);
+  const order = eig.values.map((v, i) => ({ v, i })).sort((a, b) => b.v - a.v).map(o => o.i);
+  const sortedVals = order.map(i => Math.max(0, eig.values[i]));
+  const S = sortedVals.map(v => Math.sqrt(v));
+  // V columns = eigenvectors[:, order[k]]
+  const V: number[][] = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+  for (let k = 0; k < 3; k++) for (let j = 0; j < 3; j++) V[j][k] = eig.vectors[j][order[k]];
+  // U = M V S⁻¹
+  const U: number[][] = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+  for (let k = 0; k < 3; k++) {
+    if (S[k] < 1e-300) continue;
+    for (let i = 0; i < 3; i++) {
+      let s = 0;
+      for (let j = 0; j < 3; j++) s += M[i][j] * V[j][k];
+      U[i][k] = s / S[k];
+    }
+  }
+  return { U, S, V };
+}
+
+function _jacobi3x3(M: number[][]): { values: number[]; vectors: number[][] } {
+  const n = 3;
+  const A: number[][] = [M[0].slice(), M[1].slice(), M[2].slice()];
+  let V: number[][] = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
+  for (let iter = 0; iter < 100; iter++) {
+    let off = 0;
+    for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) off += Math.abs(A[i][j]);
+    if (off < 1e-14) break;
+    for (let p = 0; p < 2; p++) {
+      for (let q = p + 1; q < 3; q++) {
+        const apq = A[p][q];
+        if (Math.abs(apq) < 1e-30) continue;
+        const app = A[p][p], aqq = A[q][q];
+        const theta = (aqq - app) / (2 * apq);
+        const t = Math.sign(theta) / (Math.abs(theta) + Math.sqrt(theta * theta + 1));
+        const c = 1 / Math.sqrt(t * t + 1);
+        const s = t * c;
+        const app2 = app - t * apq, aqq2 = aqq + t * apq;
+        A[p][p] = app2; A[q][q] = aqq2;
+        A[p][q] = 0; A[q][p] = 0;
+        for (let i = 0; i < 3; i++) {
+          if (i !== p && i !== q) {
+            const aip = A[i][p], aiq = A[i][q];
+            A[i][p] = c * aip - s * aiq;
+            A[p][i] = A[i][p];
+            A[i][q] = s * aip + c * aiq;
+            A[q][i] = A[i][q];
+          }
+        }
+        for (let i = 0; i < 3; i++) {
+          const vip = V[i][p], viq = V[i][q];
+          V[i][p] = c * vip - s * viq;
+          V[i][q] = s * vip + c * viq;
+        }
+      }
+    }
+  }
+  const values = [A[0][0], A[1][1], A[2][2]];
+  return { values, vectors: V };
 }

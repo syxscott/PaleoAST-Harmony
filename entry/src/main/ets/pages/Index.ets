@@ -581,7 +581,7 @@ struct Index {
         case 'LDA': result = this.statCtrl.runLDA(groups ?? []); break;
         case 'CCA': result = this.statCtrl.runCCA(data, data); break;
         case 'Summary': result = this.statCtrl.runSummary(); break;
-        case 'Normality': result = this.statCtrl.runSummary(); break;
+        case 'Normality': result = this.statCtrl.runNormalityTest(0); break;
         case 't-test': result = this.statCtrl.runTTest(data.col(0), data.col(1)); break;
         case 'ANOVA': result = this.statCtrl.runANOVA([data.col(0), data.col(1)]); break;
         case 'Kruskal-Wallis': result = this.statCtrl.runKruskal([data.col(0), data.col(1)]); break;
@@ -635,6 +635,49 @@ struct Index {
         case 'Null Model': this.showNullModelDialog = true; return;
         case 'Import': this.showImportDialog = true; return;
         case 'Export': this.showExportDialog = true; return;
+        // ─── Newly ported analyses ──────────────────────────────────────────
+        case 'Mann-Whitney U': result = this.statCtrl.runMannWhitney(data.col(0), data.col(1)); break;
+        case 'PLS Integration':
+          this.statusText = 'PLS Integration: 2 blocks required (use Import or Dialog)';
+          break;
+        case 'Relative Warps': result = this.statCtrl.runRelativeWarps(); break;
+        case 'Morphospace Disparity': result = this.statCtrl.runMorphospaceDisparity(); break;
+        case 'Convex Hull': result = this.statCtrl.runConvexHull(data.to2D()); break;
+        case 'Minimum Spanning Tree': result = this.statCtrl.runMST(); break;
+        case 'Ripley K': this.statusText = 'Ripley K: needs 2D coordinate data'; break;
+        case 'Coverage Rarefaction': result = this.statCtrl.runCoverageRarefaction(); break;
+        case 'Abundance Models': result = this.statCtrl.runAbundanceModels(); break;
+        case 'DTW': this.statusText = 'DTW: needs 2 sequences'; break;
+        case 'Compute Correlation': result = this.statCtrl.runComputeCorrelation(data.col(0), data.col(1)); break;
+        case 'Centroid Configuration Blocks': result = this.statCtrl.runDivideBlocks('anterior_posterior'); break;
+        case 'TPS Analyzer': this.statusText = 'TPS Analyzer: needs (source, target) landmarks'; break;
+        case 'Unitary Associations': this.statusText = 'UA: needs FAD/LAD matrices'; break;
+        case 'RASC Ranking': this.statusText = 'RASC: needs event distance matrix'; break;
+        case 'Age Model': this.statusText = 'Age Model: needs age constraints'; break;
+        case 'Sedimentation Rate': this.statusText = 'Sed Rate: needs section with ages'; break;
+        case 'LOWESS Smooth': result = this.statCtrl.runLowess(data.col(0), data.col(1)); break;
+        case 'Polynomial Trend': result = this.statCtrl.runPolynomialTrend(data.col(0), data.col(1)); break;
+        case 'Moving Average': this.statusText = 'Moving Average: needs 1D series'; break;
+        case 'Remove Outliers': result = this.statCtrl.runRemoveOutliers(data.col(0)); break;
+        case 'Cross Validate': result = this.statCtrl.runCrossValidate(data.col(0), data.col(1)); break;
+        case 'Detect Excursions': result = this.statCtrl.runDetectExcursions(data.col(0), data.col(1)); break;
+        case 'Filter Endemic': result = this.statCtrl.runFilterEndemic(data.to2D()); break;
+        case 'Build ARMA': result = this.statCtrl.runBuildARMA(data.col(0)); break;
+        case 'ARMA Predict': result = this.statCtrl.runARMAPredict({}, 5); break;
+        case 'Cox PH': this.statusText = 'Cox PH: needs durations + events + covariates'; break;
+        case 'Log-rank': this.statusText = 'Log-rank: needs two survival groups'; break;
+        case 'Kaplan-Meier': result = this.statCtrl.runKaplanMeier(data.col(0), data.col(0).map(_ => 1)); break;
+        case 'Neutral Simulation': result = this.statCtrl.runSimulateNeutral(100, 10); break;
+        case 'Equilibrium Test': result = this.statCtrl.runTestEquilibrium(0.5, 0.4); break;
+        case 'Exponential Fit': result = this.statCtrl.runFitExponential(data.col(0), data.col(1)); break;
+        case 'Logistic Fit': result = this.statCtrl.runFitLogistic(data.col(0), data.col(1)); break;
+        case 'FBD Likelihood': this.statusText = 'FBD Likelihood: needs tree data'; break;
+        case 'NJ Tree': this.statusText = 'NJ: needs distance matrix + names'; break;
+        case 'UPGMA Tree': this.statusText = 'UPGMA: needs distance matrix + names'; break;
+        case 'Strict Consensus': this.statusText = 'Strict Consensus: needs ≥ 2 trees'; break;
+        case 'Majority Rule': this.statusText = 'Majority Rule: needs ≥ 2 trees'; break;
+        case 'Heuristic Search': this.statusText = 'Heuristic Search: needs sequences'; break;
+        case 'Tree Comparator': this.statusText = 'Tree Comparator: needs ≥ 2 parsed trees'; break;
         default: this.statusText = name + ': not implemented'; return;
       }
 

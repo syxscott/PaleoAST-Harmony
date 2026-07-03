@@ -11,15 +11,49 @@ export struct NavigationTree {
   onNavigate: (name: string) => void = () => {};
 
   private sections: NavSection[] = [
-    { name: 'Multivariate', icon: '[M]', entries: ['PCA', 'PCoA', 'NMDS', 'LDA', 'CCA'] },
-    { name: 'Univariate', icon: '[U]', entries: ['Summary', 'Normality', 't-test', 'ANOVA', 'Kruskal-Wallis'] },
-    { name: 'Diversity', icon: '[D]', entries: ['Diversity Indices', 'Rarefaction', 'SHE Analysis'] },
+    { name: 'Multivariate', icon: '[M]', entries: [
+      'PCA', 'PCoA', 'NMDS', 'LDA', 'CCA',
+      'PLS Integration', 'Relative Warps', 'Morphospace Disparity',
+      'Convex Hull', 'Minimum Spanning Tree', 'Ripley K'
+    ] },
+    { name: 'Univariate', icon: '[U]', entries: [
+      'Summary', 'Normality', 't-test', 'ANOVA',
+      'Kruskal-Wallis', 'Mann-Whitney U'
+    ] },
+    { name: 'Diversity', icon: '[D]', entries: [
+      'Diversity Indices', 'Rarefaction', 'Coverage Rarefaction',
+      'SHE Analysis', 'Abundance Models', 'DTW'
+    ] },
     { name: 'Clustering', icon: '[C]', entries: ['Hierarchical Clustering', 'CONISS'] },
-    { name: 'Tests', icon: '[T]', entries: ['ANOSIM', 'PERMANOVA', 'SIMPER'] },
-    { name: 'Morphometrics', icon: '[Mo]', entries: ['GPA', 'EFA', 'Eigenshape', 'TPS Grid', 'Allometry', 'Evolution Rate'] },
-    { name: 'Stratigraphy', icon: '[S]', entries: ['Spectral', 'Markov', 'Directional', 'Wavelet', 'Extinction CI', 'Isotope', 'Stratigraphic Correlation', 'Biostratigraphy', 'Paleo-Environment'] },
-    { name: 'Phylogenetics', icon: '[Ph]', entries: ['Fitch Parsimony', 'PIC', 'Phylo Signal', 'Phylo ANOVA'] },
-    { name: 'Macroevolution', icon: '[Ma]', entries: ['Cohort Survival', 'Diversity Dynamics', 'FBD Process', 'Beta Diversity', 'Null Models'] },
+    { name: 'Tests', icon: '[T]', entries: ['ANOSIM', 'PERMANOVA', 'SIMPER', 'Compute Correlation'] },
+    { name: 'Morphometrics', icon: '[Mo]', entries: [
+      'GPA', 'EFA', 'Eigenshape', 'TPS Grid',
+      'Allometry', 'Evolution Rate',
+      'TPS Analyzer', 'Centroid Configuration Blocks'
+    ] },
+    { name: 'Stratigraphy', icon: '[S]', entries: [
+      'Spectral', 'Markov', 'Directional', 'Wavelet',
+      'Extinction CI', 'Isotope', 'Stratigraphic Correlation',
+      'Biostratigraphy', 'Paleo-Environment',
+      'Unitary Associations', 'RASC Ranking',
+      'Age Model', 'Sedimentation Rate',
+      'LOWESS Smooth', 'Polynomial Trend', 'Moving Average',
+      'Remove Outliers', 'Cross Validate',
+      'Detect Excursions', 'Filter Endemic',
+      'Build ARMA', 'ARMA Predict'
+    ] },
+    { name: 'Phylogenetics', icon: '[Ph]', entries: [
+      'Fitch Parsimony', 'PIC', 'Phylo Signal', 'Phylo ANOVA',
+      'NJ Tree', 'UPGMA Tree', 'Strict Consensus', 'Majority Rule',
+      'Heuristic Search', 'Tree Comparator'
+    ] },
+    { name: 'Macroevolution', icon: '[Ma]', entries: [
+      'Cohort Survival', 'Diversity Dynamics', 'FBD Process',
+      'Cox PH', 'Log-rank', 'Kaplan-Meier',
+      'Beta Diversity', 'Null Models',
+      'Neutral Simulation', 'Equilibrium Test',
+      'Exponential Fit', 'Logistic Fit', 'FBD Likelihood'
+    ] },
   ];
 
   build() {

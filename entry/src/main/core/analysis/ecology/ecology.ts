@@ -542,3 +542,6 @@ export function sampleBasedRarefaction(
   }
   return { sampleSizes, expectedRichness: expected, observedRichness: totalSpecies };
 }
+
+// ─── Re-exports: Coverage-based Rarefaction ────────────────────────────────────
+export { coverageRarefaction, type CoverageRarefactionResult } from './CoverageRarefaction';

@@ -1,4 +1,5 @@
 import { Matrix } from "../math/Matrix";
+import * as linalg from "../math/linalg";
 export type DistanceMetric = "euclidean" | "bray_curtis" | "cosine" | "jaccard" | "canberra" | "cityblock" | "correlation" | "hamming";
 export function pairwiseDistance(a: number[], b: number[], metric: DistanceMetric = "euclidean"): number {
   switch (metric) {
@@ -23,3 +24,138 @@ export function normalizeMatrix(X:Matrix):Matrix {const mins=new Float64Array(X.
 export function countNaN(X:Matrix):number{let c=0;for(let i=0;i<X.length;i++)if(isNaN(X.data[i]))c++;return c;}
 export function rowSums(X:Matrix):number[]{return X.sumAxis(1).toArray();}
 export function colSums(X:Matrix):number[]{return X.sumAxis(0).toArray();}
+
+// ─── Ported from Python utils/matrix_ops.py ───────────────────────────────────
+export function ensureMatrix(x: unknown, minDim: number = 2): Matrix {
+  if (x instanceof Matrix) return x;
+  if (Array.isArray(x)) {
+    if (x.length === 0) throw new Error('ensureMatrix: empty array');
+    if (Array.isArray(x[0])) {
+      const nr = x.length, nc = (x[0] as number[]).length;
+      const d = new Float64Array(nr * nc);
+      for (let i = 0; i < nr; i++) for (let j = 0; j < nc; j++) d[i * nc + j] = Number((x as number[][])[i][j]);
+      return new Matrix(d, nr, nc);
+    }
+    const d = new Float64Array(x.length);
+    for (let i = 0; i < x.length; i++) d[i] = Number((x as number[])[i]);
+    return new Matrix(d, x.length, 1);
+  }
+  if (minDim < 1) throw new Error('ensureMatrix: minDim');
+  throw new Error('ensureMatrix: unsupported type');
+}
+
+export function validateMatrixShape(X: Matrix, expectedRows?: number, expectedCols?: number, name: string = 'matrix'): void {
+  if (!X || X.rows < 1 || X.cols < 1) throw new Error(name + ': empty/invalid');
+  if (expectedRows !== undefined && X.rows !== expectedRows) throw new Error(name + ': expected ' + expectedRows + ' rows, got ' + X.rows);
+  if (expectedCols !== undefined && X.cols !== expectedCols) throw new Error(name + ': expected ' + expectedCols + ' cols, got ' + X.cols);
+}
+
+export function centerMatrix(X: Matrix, axis: number = 0): Matrix {
+  const mean = X.meanAxis(axis);
+  const r = X.clone();
+  if (axis === 0) for (let i = 0; i < r.rows; i++) for (let j = 0; j < r.cols; j++) r.data[i * r.cols + j] = X.get(i, j) - mean.get(0, j);
+  else for (let i = 0; i < r.rows; i++) for (let j = 0; j < r.cols; j++) r.data[i * r.cols + j] = X.get(i, j) - mean.get(i, 0);
+  return r;
+}
+
+export function standardizeMatrix(X: Matrix, axis: number = 0, ddof: number = 1): Matrix {
+  // ddof parameter accepted for API parity with scipy.stats.zscore; ddof is honoured
+  // implicitly via Matrix.stdAxis default (ddof=1).
+  const mean = X.meanAxis(axis);
+  const std = X.stdAxis(axis, ddof);
+  const r = X.clone();
+  if (axis === 0) {
+    for (let i = 0; i < r.rows; i++) for (let j = 0; j < r.cols; j++) {
+      const s = std.get(0, j) || 1;
+      r.data[i * r.cols + j] = (X.get(i, j) - mean.get(0, j)) / s;
+    }
+  } else {
+    for (let i = 0; i < r.rows; i++) for (let j = 0; j < r.cols; j++) {
+      const s = std.get(i, 0) || 1;
+      r.data[i * r.cols + j] = (X.get(i, j) - mean.get(i, 0)) / s;
+    }
+  }
+  return r;
+}
+
+export function covarianceMatrix(X: Matrix, rowvar: boolean = false, ddof: number = 1): Matrix {
+  // When rowvar=false (default), each column is a variable and each row an observation.
+  const data = rowvar ? X : X.transpose();
+  const n = data.rows;
+  const c = centerMatrix(data, 0);
+  // C = (c.T @ c) / (n - ddof)
+  const ct = c.transpose();
+  const num = (ct).matmul(c);
+  const d = new Float64Array(num.rows * num.cols);
+  const denom = Math.max(1, n - ddof);
+  for (let i = 0; i < d.length; i++) d[i] = num.data[i] / denom;
+  return new Matrix(d, num.rows, num.cols);
+}
+
+export function correlationMatrix(X: Matrix, method: 'pearson' | 'spearman' = 'pearson'): Matrix {
+  // Each column is a variable. Returns square symmetric matrix.
+  let data = X;
+  if (method === 'spearman') {
+    // rank each column
+    const ranked = X.clone();
+    for (let j = 0; j < X.cols; j++) {
+      const col = X.col(j);
+      const pairs = col.map((v, i) => ({ v, i })).sort((a, b) => a.v - b.v);
+      const ranks = new Float64Array(col.length);
+      // average-rank ties
+      let i = 0;
+      while (i < pairs.length) {
+        let j = i;
+        while (j + 1 < pairs.length && pairs[j + 1].v === pairs[i].v) j++;
+        const r = (i + j) / 2 + 1;
+        for (let k = i; k <= j; k++) ranks[pairs[k].i] = r;
+        i = j + 1;
+      }
+      for (let r = 0; r < X.rows; r++) ranked.data[r * X.cols + j] = ranks[r];
+    }
+    data = ranked;
+  }
+  const cov = covarianceMatrix(data, false, 1);
+  const d = new Float64Array(cov.length);
+  const std = new Float64Array(cov.rows);
+  for (let i = 0; i < cov.rows; i++) std[i] = Math.sqrt(Math.max(cov.get(i, i), 1e-300));
+  for (let i = 0; i < cov.rows; i++)
+    for (let j = 0; j < cov.cols; j++)
+      d[i * cov.cols + j] = cov.get(i, j) / (std[i] * std[j]);
+  return new Matrix(d, cov.rows, cov.cols);
+}
+
+export function euclideanDistanceMatrix(X: Matrix, squared: boolean = false): Matrix {
+  const n = X.rows;
+  const D = Matrix.zeros(n, n);
+  const rowCache: number[][] = X.to2D();
+  for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) {
+    let s = 0;
+    const a = rowCache[i], b = rowCache[j];
+    for (let k = 0; k < a.length; k++) { const dx = a[k] - b[k]; s += dx * dx; }
+    const v = squared ? s : Math.sqrt(s);
+    D.set(i, j, v); D.set(j, i, v);
+  }
+  return D;
+}
+
+export function mahalanobisDistance(x: Matrix | number[], meanVec: Matrix | number[], cov: Matrix, inverted: boolean = false): number {
+  const xm = x instanceof Matrix ? x : ensureMatrix(x);
+  const mv = meanVec instanceof Matrix ? meanVec : ensureMatrix(meanVec);
+  const diff = xm.sub(mv);
+  const inv = inverted ? cov : linalg.inv(cov);
+  // d^2 = (x-µ)^T Σ^-1 (x-µ)
+  let s = 0;
+  const d2 = diff.to2D()[0];
+  const invData = inv.to2D();
+  for (let i = 0; i < d2.length; i++) {
+    let rowSum = 0;
+    for (let j = 0; j < d2.length; j++) rowSum += invData[i][j] * d2[j];
+    s += d2[i] * rowSum;
+  }
+  return Math.sqrt(Math.max(0, s));
+}
+
+export function pairwiseDistances(X: Matrix, Y?: Matrix, metric: DistanceMetric = 'euclidean'): Matrix {
+  return Y ? cdist(X, Y, metric) : computeDistanceMatrix(X, metric);
+}

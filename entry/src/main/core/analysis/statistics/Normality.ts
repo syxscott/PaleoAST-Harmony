@@ -1,0 +1,159 @@
+/**
+ * Normality test module — replaces statistics/univariate.py::normality_test.
+ * Implements Shapiro-Wilk (n ≤ 5000) and Anderson-Darling.
+ */
+import { Matrix } from '../../math/Matrix';
+import { ComputationError } from '../../utils/Exceptions';
+import { pnorm } from '../../math/stats';
+
+export interface NormalityResult {
+  shapiroStat: number;
+  shapiroP: number;
+  andersonStat: number;
+  andersonCritical: Record<number, number>;
+  isNormalShapiro: boolean;
+  isNormalAnderson: boolean;
+}
+
+/**
+ * Test normality of one variable using Shapiro-Wilk + Anderson-Darling.
+ *
+ * @param data   Matrix or 1D array, or column index if Matrix
+ * @param column column index for 2D data (default 0)
+ */
+export function normalityTest(data: Matrix | number[], column: number = 0): NormalityResult {
+  let col: number[];
+  if (data instanceof Matrix) {
+    if (data.cols < column + 1) throw new ComputationError('column index out of range');
+    col = data.col(column);
+  } else {
+    col = [...data];
+  }
+  const valid = col.filter(v => !isNaN(v));
+  if (valid.length < 3) throw new ComputationError('Need ≥ 3 non-NaN values for normality test');
+
+  // ─── Shapiro-Wilk (Royston 1992 algorithm for n < 5000) ───────────────────
+  const sw = _shapiroWilk(valid);
+
+  // ─── Anderson-Darling ─────────────────────────────────────────────────────
+  const sorted = [...valid].sort((a, b) => a - b);
+  const n = sorted.length;
+  const mean = sorted.reduce((s, v) => s + v, 0) / n;
+  // sample standard deviation (unbiased)
+  let svar = 0;
+  for (const x of sorted) svar += (x - mean) ** 2;
+  svar = Math.sqrt(svar / (n - 1));
+  if (!isFinite(svar) || svar <= 0) svar = 1;  // constant data guard
+  const z = sorted.map(v => (v - mean) / svar);
+  const cdf = z.map(v => pnorm(v, 0, 1));
+  let S = 0;
+  for (let i = 1; i <= n; i++) {
+    const a = cdf[i - 1];
+    const b = 1 - cdf[n - i]; // CDF of mirrored = 1 - F(z_{n-i+1})
+    if (a > 0 && b > 0) S += (2 * i - 1) * (Math.log(a) + Math.log(b));
+  }
+  const adStat = -n - S / n;
+  // Anderson-Darling critical values for normality at standard significance levels
+  const critMap: Record<number, number> = {
+    15: 0.576,
+    10: 0.632,
+    5: 0.752,
+    2.5: 0.873,
+    1: 1.038
+  };
+
+  return {
+    shapiroStat: sw.W,
+    shapiroP: sw.p,
+    andersonStat: adStat,
+    andersonCritical: critMap,
+    isNormalShapiro: sw.p > 0.05,
+    isNormalAnderson: adStat < (critMap[5] ?? 0.752)
+  };
+}
+
+/**
+ * Shapiro-Wilk test (Royston 1992 approximation).
+ */
+function _shapiroWilk(x: number[]): { W: number; p: number } {
+  const n = x.length;
+  const sorted = [...x].sort((a, b) => a - b);
+  const mean = sorted.reduce((s, v) => s + v, 0) / n;
+  let ssq = 0;
+  for (const v of sorted) ssq += (v - mean) ** 2;
+
+  // Royston coefficients m_n, (small-sample constants)
+  // For n ≤ 50 we use approximate Blom-style lookup.
+  const m: Record<number, number> = { 3: 0.7071, 4: 0.6872, 5: 0.6646, 6: 0.6431, 7: 0.6233, 8: 0.6052,
+    9: 0.5888, 10: 0.5739, 11: 0.5601, 12: 0.5475, 13: 0.5359 };
+  // For larger n, default to asymptotic ~ 0.0039 * log(n) + 0.4 (only a rough fallback).
+  const m_n = m[n] ?? Math.max(0.454, 0.0039 * Math.log(n) + 0.4);
+
+  // Compute a_i for i = 1..floor(n/2)
+  const half = Math.floor(n / 2);
+  const mVec = _generateMVector(n);
+  // Symmetric a's: a_i = mVec[i]
+  let num = 0;
+  for (let i = 0; i < half; i++) {
+    num += mVec[i] * (sorted[n - 1 - i] - sorted[i]);
+  }
+  const W = num === 0 ? 0 : (num * num) / ssq;
+  // p-value via Royston approximation
+  const mu = 0.0038915 * Math.log(n) ** 3 - 0.083751 * Math.log(n) ** 2 - 0.31082 * Math.log(n) - 1.5861;
+  const sigma = Math.exp(0.0030302 * Math.log(n) ** 2 - 0.082676 * Math.log(n) - 0.4803);
+  const z = (Math.log(1 - W) - mu) / sigma;
+  const p = 1 - pnorm(z, 0, 1);
+  return { W, p };
+}
+
+/** Royston's m-vector (a_i weights). */
+function _generateMVector(n: number): number[] {
+  const out: number[] = [];
+  const half = Math.floor(n / 2);
+  // Royston's algorithm uses the inverse of the n×n matrix of expected normal order stats.
+  // For practical purposes we approximate using the known leading coefficients. This is
+  // an analytic approximation that gives W in [0.7, 1] for typical ecological data.
+  for (let i = 1; i <= half; i++) {
+    // Approximate using scipy-style Royston polynomial
+    const pi = (i - 3 / 8) / (n + 1 / 4);
+    const a = _ppnd7(pi); // probit normal order stat
+    out.push(a);
+  }
+  // Normalize so that sum(a_i^2) = 1
+  const sumSq = out.reduce((s, v) => s + v * v, 0);
+  if (sumSq > 0) for (let i = 0; i < out.length; i++) out[i] /= Math.sqrt(sumSq);
+  return out;
+}
+
+/** Wichura's probit (rational approximation) for normal order statistics. */
+function _ppnd7(p: number): number {
+  // Inverse CDF of standard normal, |p-0.5| ≤ 0.425
+  const a: number[] = [3.3871328727963666080e0, 1.3314166789178437745e+2,
+                       1.9715909503065454428e+3, 5.4331804369741335490e+3,
+                       6.4084652603484218618e+3, 1.8377943005255063505e+3];
+  const b: number[] = [3.2311922173186680246e1, 4.5575397787254915877e+2,
+                       4.6996223267726658805e+3, 1.3513745708743029856e+4,
+                       5.8116666075642747948e+3, 5.9382543008020985825e+2];
+  const c: number[] = [1.42343711074968357734e0, 4.63033784619666529550e0,
+                       5.76949722146069140550e0, 3.64784832476320542610e0,
+                       1.27045825245276838278e0, 2.41780725177480197710e-1];
+  const d: number[] = [1.05075007164440884317e0, 1.42553666253209753820e+1,
+                       2.19299800815724046105e+2, 1.61428251834292693805e+3,
+                       1.94994407494650297355e+3, 6.58965264682251888390e+2];
+  const pl = 0.06384671209696170708;
+  const pr = 1 - pl;
+  let q: number, r: number;
+  if (p < pl) {
+    q = Math.sqrt(-2 * Math.log(p));
+    return (((((c[0]*q+c[1])*q+c[2])*q+c[3])*q+c[4])*q+c[5]) /
+           ((((d[0]*q+d[1])*q+d[2])*q+d[3])*q+d[4])*q+1;
+  } else if (p <= pr) {
+    q = p - 0.5; r = q * q;
+    return (((((a[0]*r+a[1])*r+a[2])*r+a[3])*r+a[4])*r+a[5])*q /
+           (((((b[0]*r+b[1])*r+b[2])*r+b[3])*r+b[4])*r+b[5]);
+  } else {
+    q = Math.sqrt(-2 * Math.log(1 - p));
+    return -(((((c[0]*q+c[1])*q+c[2])*q+c[3])*q+c[4])*q+c[5]) /
+           ((((d[0]*q+d[1])*q+d[2])*q+d[3])*q+d[4])*q+1;
+  }
+}

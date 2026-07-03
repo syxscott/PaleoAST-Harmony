@@ -533,3 +533,8 @@ function seededRNG(seed: number): () => number {
   let s = seed;
   return () => { s = (s * 16807 + 0) % 2147483647; return s / 2147483647; };
 }
+
+// ─── Re-exports: Eigenshape / 2B-PLS Integration / TPS basis ───────────────────
+export { eigenshape, type EigenshapeResult } from './Eigenshape';
+export { plsIntegration, type PLSResult } from './Integration';
+export { tpsAnalyze, tpsWarpGrid, type TPSResult } from './TPSAnalyzer';

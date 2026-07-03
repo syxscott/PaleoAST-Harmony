@@ -1312,3 +1312,7 @@ export function reconstructAncestralStates(root: any, traitValues: Record<string
   assignStates(root);
   return { nodeStates, nodeNames, tipValues: traitValues, model };
 }
+
+// ─── Re-exports of new sub-modules (Ripley K, Normality test) ─────────────────
+export { ripleyK, type SpatialResult } from './Spatial';
+export { normalityTest, type NormalityResult } from './Normality';

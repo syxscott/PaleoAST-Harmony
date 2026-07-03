@@ -1,39 +1,96 @@
 /**
- * Custom exceptions ¡ª replaces utils/exceptions.py
+ * Custom exceptions â€” replaces utils/exceptions.py (13 classes).
+ *
+ * All exceptions inherit from PaleoASTError so callers may catch generically.
  */
 
-export class ValidationError extends Error {
+export class PaleoASTError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'PaleoASTError';
+  }
+}
+
+export class ValidationError extends PaleoASTError {
   constructor(message: string, public details?: Record<string, unknown>) {
-    super(message); this.name = 'ValidationError';
+    super(message);
+    this.name = 'ValidationError';
   }
 }
 
-export class ComputationError extends Error {
-  constructor(message: string, public originalException?: unknown) {
-    super(message); this.name = 'ComputationError';
+export class DataValidationError extends ValidationError {
+  constructor(message: string, details?: Record<string, unknown>) {
+    super(message, details);
+    this.name = 'DataValidationError';
   }
 }
 
-export class MatrixDimensionError extends Error {
+export class MatrixDimensionError extends PaleoASTError {
   constructor(message: string, public details?: Record<string, unknown>) {
-    super(message); this.name = 'MatrixDimensionError';
+    super(message);
+    this.name = 'MatrixDimensionError';
   }
 }
 
-export class ConvergenceError extends Error {
+export class ConvergenceError extends PaleoASTError {
   constructor(message: string, public iterations?: number) {
-    super(message); this.name = 'ConvergenceError';
+    super(message);
+    this.name = 'ConvergenceError';
   }
 }
 
-export class FileOperationError extends Error {
+export class InvalidDataTypeError extends PaleoASTError {
+  constructor(message: string, public received?: unknown) {
+    super(message);
+    this.name = 'InvalidDataTypeError';
+  }
+}
+
+export class FileFormatError extends PaleoASTError {
+  constructor(message: string, public path?: string) {
+    super(message);
+    this.name = 'FileFormatError';
+  }
+}
+
+export class FileOperationError extends PaleoASTError {
   constructor(message: string, public filepath?: string) {
-    super(message); this.name = 'FileOperationError';
+    super(message);
+    this.name = 'FileOperationError';
   }
 }
 
-export class DataFormatError extends Error {
+export class ComputationError extends PaleoASTError {
+  constructor(message: string, public originalException?: unknown) {
+    super(message);
+    this.name = 'ComputationError';
+  }
+}
+
+export class StatisticalError extends ComputationError {
+  constructor(message: string, originalException?: unknown) {
+    super(message, originalException);
+    this.name = 'StatisticalError';
+  }
+}
+
+export class MorphometricsError extends ComputationError {
+  constructor(message: string, originalException?: unknown) {
+    super(message, originalException);
+    this.name = 'MorphometricsError';
+  }
+}
+
+export class PlottingError extends PaleoASTError {
+  constructor(message: string, public chartName?: string) {
+    super(message);
+    this.name = 'PlottingError';
+  }
+}
+
+export class DataFormatError extends FileFormatError {
   constructor(message: string, public context?: string) {
-    super(message); this.name = 'DataFormatError';
+    super(message);
+    this.name = 'DataFormatError';
   }
 }

@@ -774,3 +774,9 @@ export function armaPredict(model: ARMAResult, nSteps: number): number[] {
 
   return predictions;
 }
+
+// ─── Re-exports: UA / RASC / AgeModel / computeCorrelation ─────────────────────
+export { unitaryAssociations, type Zone, type BioeventResult as UABioeventResult } from './UA';
+export { rasc } from './RASC';
+export { buildAgeModel, computeSedimentationRate, type StratigraphicSection, type AgeModelResult } from './AgeModel';
+export { computeCorrelation } from './StratCorr';

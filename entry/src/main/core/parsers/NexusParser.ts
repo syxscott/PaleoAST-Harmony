@@ -1,7 +1,85 @@
 /**
- * Nexus file parser ¡ª replaces parsers/nexus_lexer.py
+ * Nexus file parser ï¿½ï¿½ replaces parsers/nexus_lexer.py
  * Handles BEGIN TAXA, BEGIN CHARACTERS, BEGIN DATA blocks.
  */
+
+/**
+ * Nexus tokeniser â€” low-level access for advanced callers.
+ * Mirrors parsers/nexus_lexer.py::NexusLexer / NexusTokenType.
+ */
+export enum NexusTokenType {
+  BEGIN = 'BEGIN', END = 'END', BLOCK = 'BLOCK',
+  TAXA = 'TAXA', CHARACTERS = 'CHARACTERS', DATA = 'DATA',
+  DIMENSIONS = 'DIMENSIONS', NTAX = 'NTAX', NCHAR = 'NCHAR',
+  FORMAT = 'FORMAT', DATATYPE = 'DATATYPE', MISSING = 'MISSING',
+  GAP = 'GAP', MATRIX = 'MATRIX',
+  SEMICOLON = ';', EQUALS = '=', COMMA = ',',
+  NUMBER = 'NUMBER', STRING = 'STRING', COMMENT = 'COMMENT',
+  EOF = 'EOF', UNKNOWN = 'UNKNOWN'
+}
+
+export interface NexusToken {
+  type: NexusTokenType;
+  value: string;
+  line: number;
+  column: number;
+}
+
+export function tokenizeNexus(text: string): NexusToken[] {
+  const out: NexusToken[] = [];
+  let pos = 0, line = 1, col = 1;
+  const push = (type: NexusTokenType, value: string) =>
+    out.push({ type, value, line, column: col });
+  while (pos < text.length) {
+    const ch = text[pos];
+    if (/\s/.test(ch)) { if (ch === '\n') { line++; col = 1; } else col++; pos++; continue; }
+    if (ch === '[') {
+      const start = pos; pos++;
+      while (pos < text.length && text[pos] !== ']') pos++;
+      if (pos < text.length) pos++;
+      push(NexusTokenType.COMMENT, text.slice(start, pos));
+      col++; continue;
+    }
+    if (ch === ';') { push(NexusTokenType.SEMICOLON, ';'); pos++; col++; continue; }
+    if (ch === '=') { push(NexusTokenType.EQUALS, '='); pos++; col++; continue; }
+    if (ch === ',') { push(NexusTokenType.COMMA, ','); pos++; col++; continue; }
+    if (/[0-9]/.test(ch) || (ch === '-' && /[0-9]/.test(text[pos + 1] ?? ''))) {
+      const start = pos;
+      while (pos < text.length && /[0-9.\-eE+]/.test(text[pos])) pos++;
+      push(NexusTokenType.NUMBER, text.slice(start, pos));
+      col += pos - start; continue;
+    }
+    if (ch === "'" || ch === '"') {
+      const quote = ch; pos++;
+      const start = pos;
+      while (pos < text.length && text[pos] !== quote) pos++;
+      const value = text.slice(start, pos);
+      if (pos < text.length) pos++;
+      push(NexusTokenType.STRING, value);
+      col += pos - start + 2; continue;
+    }
+    if (/[A-Za-z_]/.test(ch)) {
+      const start = pos;
+      while (pos < text.length && /[A-Za-z0-9_]/.test(text[pos])) pos++;
+      const value = text.slice(start, pos);
+      const upper = value.toUpperCase();
+      const reserved: Record<string, NexusTokenType> = {
+        BEGIN: NexusTokenType.BEGIN, END: NexusTokenType.END,
+        TAXA: NexusTokenType.TAXA, CHARACTERS: NexusTokenType.CHARACTERS,
+        DATA: NexusTokenType.DATA, BLOCK: NexusTokenType.BLOCK,
+        DIMENSIONS: NexusTokenType.DIMENSIONS, NTAX: NexusTokenType.NTAX,
+        NCHAR: NexusTokenType.NCHAR, FORMAT: NexusTokenType.FORMAT,
+        DATATYPE: NexusTokenType.DATATYPE, MISSING: NexusTokenType.MISSING,
+        GAP: NexusTokenType.GAP, MATRIX: NexusTokenType.MATRIX
+      };
+      push(reserved[upper] ?? NexusTokenType.STRING, value);
+      col += pos - start; continue;
+    }
+    push(NexusTokenType.UNKNOWN, ch); pos++; col++;
+  }
+  push(NexusTokenType.EOF, '');
+  return out;
+}
 
 export interface NexusData {
   taxa: string[];

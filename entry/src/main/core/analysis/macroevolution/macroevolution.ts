@@ -542,3 +542,6 @@ function erf_eq(x: number): number {
   const t = 1 / (1 + p * x);
   return sign * (1 - ((((a5 * t + a4) * t + a3) * t + a2) * t + a1) * t * Math.exp(-x * x));
 }
+
+// ─── Re-exports: Kaplan-Meier survival ─────────────────────────────────────────
+export { kaplanMeier, type SurvivalResult } from './KaplanMeier';
