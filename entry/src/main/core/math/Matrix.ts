@@ -16,7 +16,14 @@ export class Matrix {
   static ones(r: number, c: number): Matrix { const d = new Float64Array(r * c); d.fill(1); return new Matrix(d, r, c); }
   static eye(n: number): Matrix { const m = Matrix.zeros(n, n); for (let i = 0; i < n; i++) m.data[i * n + i] = 1; return m; }
   static from2D(arr: number[][]): Matrix {
-    const r = arr.length, c = arr[0]?.length ?? 0, d = new Float64Array(r * c);
+    const r = arr.length;
+    if (r === 0) return new Matrix(new Float64Array(0), 0, 0);
+    const c = arr[0]?.length ?? 0;
+    // Validate all rows have consistent length
+    for (let i = 1; i < r; i++) {
+      if (arr[i].length !== c) throw new Error(`from2D: row ${i} has ${arr[i].length} cols, expected ${c}`);
+    }
+    const d = new Float64Array(r * c);
     for (let i = 0; i < r; i++) for (let j = 0; j < c; j++) d[i * c + j] = arr[i][j];
     return new Matrix(d, r, c);
   }
@@ -28,7 +35,9 @@ export class Matrix {
   static randn(r: number, c: number): Matrix {
     const d = new Float64Array(r * c);
     for (let i = 0; i < d.length; i += 2) {
-      const u1 = Math.random() || 1e-10, u2 = Math.random();
+      let u1 = Math.random();
+      if (u1 === 0) u1 = Math.random(); // Regenerate if exactly 0
+      const u2 = Math.random();
       const rad = Math.sqrt(-2 * Math.log(u1));
       d[i] = rad * Math.cos(2 * Math.PI * u2);
       if (i + 1 < d.length) d[i + 1] = rad * Math.sin(2 * Math.PI * u2);
@@ -66,6 +75,7 @@ export class Matrix {
   }
 
   sliceRows(s: number, e: number): Matrix {
+    if (s < 0 || e > this.rows || s > e) throw new Error(`sliceRows: invalid range [${s}, ${e}) for ${this.rows} rows`);
     const n = e - s, d = new Float64Array(n * this.cols);
     d.set(this.data.subarray(s * this.cols, e * this.cols));
     return new Matrix(d, n, this.cols);
@@ -97,8 +107,15 @@ export class Matrix {
   }
   div(o: Matrix | number): Matrix {
     const d = new Float64Array(this.data);
-    if (typeof o === 'number') { for (let i = 0; i < d.length; i++) d[i] /= o; }
-    else { for (let i = 0; i < d.length; i++) d[i] /= o.data[i]; }
+    if (typeof o === 'number') {
+      if (o === 0) throw new Error('Division by zero');
+      for (let i = 0; i < d.length; i++) d[i] /= o;
+    } else {
+      for (let i = 0; i < d.length; i++) {
+        if (o.data[i] === 0) throw new Error('Division by zero');
+        d[i] /= o.data[i];
+      }
+    }
     return new Matrix(d, this.rows, this.cols);
   }
   matmul(o: Matrix): Matrix {
@@ -152,23 +169,31 @@ export class Matrix {
       return new Matrix(d, this.rows, 1);
     }
   }
-  meanAxis(axis: number): Matrix { return this.sumAxis(axis).div(axis === 0 ? this.rows : this.cols); }
+  meanAxis(axis: number): Matrix {
+    const divisor = axis === 0 ? this.rows : this.cols;
+    if (divisor === 0) throw new Error('meanAxis: dimension is 0');
+    return this.sumAxis(axis).div(divisor);
+  }
   stdAxis(axis: number, ddof: number = 1): Matrix {
     const mu = this.meanAxis(axis);
     if (axis === 0) {
+      const denom = this.rows - ddof;
+      if (denom <= 0) throw new Error('stdAxis: degrees of freedom >= sample size');
       const d = new Float64Array(this.cols);
       for (let j = 0; j < this.cols; j++) {
         let s = 0;
         for (let i = 0; i < this.rows; i++) { const df = this.data[i * this.cols + j] - mu.data[j]; s += df * df; }
-        d[j] = Math.sqrt(s / (this.rows - ddof));
+        d[j] = Math.sqrt(s / denom);
       }
       return new Matrix(d, 1, this.cols);
     } else {
+      const denom = this.cols - ddof;
+      if (denom <= 0) throw new Error('stdAxis: degrees of freedom >= sample size');
       const d = new Float64Array(this.rows);
       for (let i = 0; i < this.rows; i++) {
         let s = 0;
         for (let j = 0; j < this.cols; j++) { const df = this.data[i * this.cols + j] - mu.data[i]; s += df * df; }
-        d[i] = Math.sqrt(s / (this.cols - ddof));
+        d[i] = Math.sqrt(s / denom);
       }
       return new Matrix(d, this.rows, 1);
     }

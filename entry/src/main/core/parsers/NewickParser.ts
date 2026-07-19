@@ -1,5 +1,5 @@
 /**
- * Newick tree parser �� replaces parsers/newick_parser.py
+ * Newick tree parser — replaces parsers/newick_parser.py
  * Full implementation with branch lengths, support values, comments.
  */
 
@@ -17,22 +17,30 @@ export function parseNewick(s: string): NewickNode {
 
   function skipWs(): void { while (pos < str.length && /\s/.test(str[pos])) pos++; }
 
+  // Fixed: use array for efficient string building
   function readUntil(chars: string): string {
-    let result = '';
-    while (pos < str.length && !chars.includes(str[pos])) { result += str[pos]; pos++; }
-    return result;
+    const charsArr: string[] = [];
+    while (pos < str.length && !chars.includes(str[pos])) { charsArr.push(str[pos]); pos++; }
+    return charsArr.join('');
   }
 
   function readComment(): string {
-    if (str[pos] !== '[') return '';
+    // Fixed: bounds check before accessing str[pos]
+    if (pos >= str.length || str[pos] !== '[') return '';
     pos++;
     const comment = readUntil(']');
-    if (pos < str.length) pos++; // skip ]
+    // Fixed: handle missing closing bracket
+    if (pos < str.length && str[pos] === ']') {
+      pos++; // skip ]
+    }
     return comment;
   }
 
   function parseNode(): NewickNode {
     skipWs();
+    // Fixed: bounds check
+    if (pos >= str.length) return { name: '', branchLength: 0, support: null, comment: '', children: [] };
+
     const node: NewickNode = { name: '', branchLength: 0, support: null, comment: '', children: [] };
 
     if (str[pos] === '(') {
@@ -68,7 +76,8 @@ export function parseNewick(s: string): NewickNode {
       const blStr = readUntil(',);[');
       node.branchLength = parseFloat(blStr) || 0;
     }
-    node.comment += readComment();
+    // Fixed: bounds check before calling readComment
+    if (pos < str.length) node.comment += readComment();
 
     return node;
   }
@@ -84,7 +93,9 @@ export function toNewick(node: NewickNode): string {
   }
   let s = '(' + node.children.map(c => toNewick(c)).join(',') + ')';
   if (node.name) s += node.name;
-  if (node.support !== null) s += node.support;
+  if (node.support !== null) {
+    s += String(node.support);
+  }
   if (node.branchLength > 0) s += ':' + node.branchLength;
   return s;
 }

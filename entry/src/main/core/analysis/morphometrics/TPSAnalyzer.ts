@@ -178,16 +178,17 @@ function _solveBlock(L: number[][], rhs: number[][], n: number, m: number): numb
       for (let c = i; c < dim + d; c++) aug[r][c] -= factor * aug[i][c];
     }
   }
-  // back-substitute
+  // back-substitute - fixed: solve each RHS column independently
   const x: number[][] = [];
   for (let i = 0; i < dim; i++) x.push(new Array(d).fill(0));
   for (let i = dim - 1; i >= 0; i--) {
-    let rhsSum = 0;
-    for (let c = dim; c < dim + d; c++) rhsSum += aug[i][c];
-    for (let j = i + 1; j < dim; j++) {
-      for (let k = 0; k < d; k++) rhsSum -= aug[i][j] * x[j][k];
+    for (let k = 0; k < d; k++) {
+      let sum = aug[i][dim + k]; // RHS for dimension k
+      for (let j = i + 1; j < dim; j++) {
+        sum -= aug[i][j] * x[j][k];
+      }
+      x[i][k] = sum / aug[i][i];
     }
-    for (let k = 0; k < d; k++) x[i][k] = rhsSum / aug[i][i];
   }
   return x;
 }

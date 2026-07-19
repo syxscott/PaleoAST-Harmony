@@ -4,7 +4,7 @@
  */
 @Component
 export struct PCADialog {
-  @State visible: boolean = false;
+  @Prop @Watch('onVisibleChange') visible: boolean = false;
   @State nComponents: number = 3;
   @State methodIdx: number = 0;
   @State errorMsg: string = '';
@@ -15,6 +15,16 @@ export struct PCADialog {
     'Correlation: standardizes to unit variance (good for mixed units)',
   ];
   onConfirm: (params: Record<string, Object>) => void = () => {};
+  onCancel: () => void = () => {};
+
+  onVisibleChange() {
+    if (this.visible) {
+      this.nComponents = 3;
+      this.methodIdx = 0;
+      this.errorMsg = '';
+      this.showAdvanced = false;
+    }
+  }
 
   build() {
     Column() {
@@ -26,8 +36,8 @@ export struct PCADialog {
         TextInput({ text: String(this.nComponents) }).width(80).type(InputType.Number)
           .onChange((v: string) => {
             const n = parseInt(v) || 3;
-            if (n < 1) { this.errorMsg = 'Must be >= 1'; }
-            else if (n > 50) { this.errorMsg = 'Maximum 50'; }
+            if (n < 1) { this.errorMsg = 'Must be >= 1'; this.nComponents = 1; }
+            else if (n > 50) { this.errorMsg = 'Maximum 50'; this.nComponents = 50; }
             else { this.nComponents = n; this.errorMsg = ''; }
           })
       }.width('100%').margin({ bottom: 4 })
@@ -60,12 +70,12 @@ export struct PCADialog {
 
       Row() {
         Button('Cancel').backgroundColor('#95A5A6').fontColor('#FFFFFF')
-          .onClick(() => { this.visible = false; }).margin({ right: 12 })
+          .onClick(() => { this.onCancel(); }).margin({ right: 12 })
         Button('Run Analysis').type(ButtonType.Capsule).backgroundColor('#3498DB').fontColor('#FFFFFF')
           .enabled(this.errorMsg === '')
           .onClick(() => {
             this.onConfirm({ nComponents: this.nComponents, method: this.methodOpts[this.methodIdx] });
-            this.visible = false;
+            this.onCancel();
           })
       }.width('100%').justifyContent(FlexAlign.End)
     }.padding(24).width(480).borderRadius(12)

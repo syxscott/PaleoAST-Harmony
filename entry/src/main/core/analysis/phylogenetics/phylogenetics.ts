@@ -235,7 +235,10 @@ export class PhyloNode {
           const ps = nodeStates.get(node)!, cs = nodeStates.get(child)!;
           let overlap = false;
           for (const x of cs) if (ps.has(x)) { overlap = true; break; }
-          if (!overlap) changes++;
+          if (!overlap) {
+            // Count elements in childSet not in parentSet
+            for (const x of cs) if (!ps.has(x)) changes++;
+          }
           countChanges(child);
         }
       };
@@ -510,28 +513,93 @@ function getAllInternalNodes(node: PhyloNode): PhyloNode[] {
 
 export function strictConsensus(trees: PhyloNode[]): PhyloNode {
   if (trees.length === 0) throw new Error('No trees provided');
-  if (trees.length === 1) return trees[0];
+  if (trees.length === 1) return trees[0].clone();
+
+  // Get all leaves from first tree
+  const firstTreeLeaves = trees[0].getLeaves();
+  const leafNames = firstTreeLeaves.map(l => l.name).sort();
 
   // Get all bipartitions from each tree
   const allBipartitions: Set<string>[] = [];
   for (const tree of trees) {
-    const bips = getBipartitions(tree);
-    allBipartitions.push(bips);
+    allBipartitions.push(getBipartitions(tree));
   }
 
-  // Keep only bipartitions present in ALL trees
-  const common = new Set<string>();
+  // Keep only bipartitions present in ALL trees (strict consensus)
+  const common: Set<string>[] = [];
   for (const bip of allBipartitions[0]) {
     let inAll = true;
     for (let i = 1; i < allBipartitions.length; i++) {
       if (!allBipartitions[i].has(bip)) { inAll = false; break; }
     }
-    if (inAll) common.add(bip);
+    if (inAll) common.push(bip);
   }
 
   // Build consensus tree from common bipartitions
-  // (simplified: return first tree as approximation)
-  return trees[0];
+  // Create leaf nodes for all taxa
+  const leafNodes: Map<string, PhyloNode> = new Map();
+  for (const name of leafNames) {
+    leafNodes.set(name, new PhyloNode(name, 0, true));
+  }
+
+  // If no common bipartitions, return star tree
+  if (common.length === 0) {
+    const root = new PhyloNode('', 0, false);
+    for (const leaf of leafNodes.values()) {
+      root.addChild(leaf);
+    }
+    return root;
+  }
+
+  // Parse bipartitions to build tree structure
+  // Each bipartition splits leaves into two groups
+  const groupA: Set<string>[] = [];
+  for (const bip of common) {
+    const sides = bip.split('|');
+    const sideA = new Set(sides[0].split(','));
+    groupA.push(sideA);
+  }
+
+  // Build tree by iteratively grouping
+  let currentGroups: Set<string>[] = [new Set(leafNames)];
+  let nodes: Map<string, PhyloNode> = new Map(leafNodes);
+
+  for (const group of groupA.reverse()) {
+    // Find if this group is a subset of any current group
+    for (let i = 0; i < currentGroups.length; i++) {
+      const superSet = currentGroups[i];
+      let isSubset = true;
+      for (const elem of group) {
+        if (!superSet.has(elem)) { isSubset = false; break; }
+      }
+      if (isSubset && group.size < superSet.size) {
+        // Create internal node for this group
+        const internalNode = new PhyloNode('', 0, false);
+        for (const name of group) {
+          const node = nodes.get(name);
+          if (node) internalNode.addChild(node);
+        }
+        // Replace superSet with two subgroups
+        const remaining = new Set<string>();
+        for (const name of superSet) {
+          if (!group.has(name)) remaining.add(name);
+        }
+        currentGroups.splice(i, 1, remaining, group);
+        for (const name of group) nodes.set(name, internalNode);
+        break;
+      }
+    }
+  }
+
+  // Build final tree from remaining groups
+  const root = new PhyloNode('', 0, false);
+  for (const node of nodes.values()) {
+    if (node.parent === undefined || node.parent === null) {
+      root.addChild(node);
+    }
+  }
+
+  return root;
 }
 
 function getBipartitions(tree: PhyloNode): Set<string> {
@@ -547,7 +615,8 @@ function getBipartitions(tree: PhyloNode): Set<string> {
       for (const l of childLeaves) descendantLeaves.add(l);
     }
     // Create bipartition: {descendants} vs {all - descendants}
-    if (!node.is_root_local) {
+    // Fixed: check if this is the root node (has no parent), skip root from bipartitions
+    if (node.parent !== undefined && node.parent !== null) {
       const sideA = [...descendantLeaves].sort().join(',');
       const sideB = [...leafNames].filter(l => !descendantLeaves.has(l)).sort().join(',');
       bipartitions.add([sideA, sideB].sort().join('|'));
@@ -555,8 +624,6 @@ function getBipartitions(tree: PhyloNode): Set<string> {
     return descendantLeaves;
   }
 
-  // Add is_root_local property
-  (tree as any).is_root_local = true;
   traverse(tree);
   return bipartitions;
 }
@@ -595,6 +662,9 @@ export function neighborJoining(distMatrix: number[][], taxonNames: string[]): P
     newNode.addChild(nodes[j]);
     nodes[i] = newNode;
 
+    // Save minj index before splice
+    const minIdx = minj;
+
     // Update distance matrix
     for (const k of active) {
       if (k === i || k === j) continue;
@@ -602,7 +672,7 @@ export function neighborJoining(distMatrix: number[][], taxonNames: string[]): P
       D[i][k] = D[k][i] = newDist;
     }
 
-    active.splice(minj, 1);
+    active.splice(minIdx, 1);
   }
 
   // Connect last two
@@ -653,16 +723,25 @@ export function buildUPGMA(distMatrix: number[][], taxonNames: string[]): PhyloN
     nodes[nextId] = newNode;
     sizes[nextId] = newSize;
 
-    for (const k of active) {
+    // Fixed: properly expand D matrix if needed
+    while (D.length < nextId + 1) {
+      D.push(new Array(D.length + 1).fill(0));
+    }
+    for (let k = 0; k < D.length; k++) {
       if (k === i || k === j) continue;
       const newDist = (D[i][k] * sizes[i] + D[j][k] * sizes[j]) / newSize;
-      if (nextId >= D.length) { /* expand */ }
-      D[nextId] = D[nextId] || [];
       D[nextId][k] = D[k][nextId] = newDist;
     }
 
-    active.splice(mj, 1);
-    active[mi] = nextId;
+    // Fixed: rebuild active array properly after splice
+    const newActive: number[] = [];
+    for (const idx of active) {
+      if (idx === i || idx === j) continue;
+      newActive.push(idx);
+    }
+    newActive.push(nextId);
+    active.length = 0;
+    active.push(...newActive);
     nextId++;
   }
 
@@ -671,8 +750,12 @@ export function buildUPGMA(distMatrix: number[][], taxonNames: string[]): PhyloN
 
 function getUPGMAHeight(node: PhyloNode): number {
   if (node.isLeaf) return 0;
-  const childHeight = getUPGMAHeight(node.children[0]);
-  return childHeight + (node.children[0].branchLength || 0);
+  // Fixed: average heights of all children, not just the first
+  let totalHeight = 0;
+  for (const child of node.children) {
+    totalHeight += getUPGMAHeight(child) + (child.branchLength || 0);
+  }
+  return totalHeight / node.children.length;
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -681,11 +764,10 @@ function getUPGMAHeight(node: PhyloNode): number {
 
 export function majorityRuleConsensus(trees: PhyloNode[], threshold: number = 0.5): PhyloNode {
   if (trees.length === 0) throw new Error('No trees');
-  if (trees.length === 1) return trees[0];
+  if (trees.length === 1) return trees[0].clone();
 
   const nTrees = trees.length;
   const allLeaves = trees[0].getLeaves().map(l => l.name);
-  const nLeaves = allLeaves.length;
 
   // Count bipartitions across all trees
   const bipCounts = new Map<string, number>();
@@ -703,12 +785,133 @@ export function majorityRuleConsensus(trees: PhyloNode[], threshold: number = 0.
     const freq = count / nTrees;
     if (freq >= threshold) keptBips.push({ bip, freq });
   }
+
+  // Build leaf nodes for all taxa
+  const leafNodes: Map<string, PhyloNode> = new Map();
+  for (const name of allLeaves) {
+    leafNodes.set(name, new PhyloNode(name, 0, true));
+  }
+
+  // Build consensus tree from kept bipartitions using a Union-Find approach
+  const parent = new Map<string, string | null>();
+  for (const name of allLeaves) parent.set(name, null);
+
+  // Track which internal nodes we've created
+  const internalNodes: PhyloNode[] = [];
+
+  // Sort bipartitions by frequency (highest first) for stable tree building
   keptBips.sort((a, b) => b.freq - a.freq);
 
-  // Build consensus tree from kept bipartitions
-  // (simplified: return first tree with support values)
-  const consensus = trees[0].clone ? (trees[0] as any).clone() : trees[0];
-  return consensus;
+  for (const { bip } of keptBips) {
+    const sides = bip.split('|');
+    const groupA = new Set(sides[0].split(',').filter(s => s.length > 0));
+    const groupB = new Set(sides[1].split(',').filter(s => s.length > 0));
+
+    // Find representatives for each group (may be leaf or internal node)
+    const findRep = (name: string): string => {
+      const p = parent.get(name);
+      if (p === null || p === undefined) return name;
+      const root = findRep(p);
+      parent.set(name, root);
+      return root;
+    };
+
+    // Get all members of each group as flat arrays
+    const groupAMembers = [...groupA];
+    const groupBMembers = [...groupB];
+
+    if (groupAMembers.length === 0 || groupBMembers.length === 0) continue;
+
+    // Check if groups are already connected via parent pointers
+    const repA = findRep(groupAMembers[0]);
+    const repB = findRep(groupBMembers[0]);
+
+    if (repA !== repB) {
+      // Groups are in different components, create a new internal node joining them
+      const newNode = new PhyloNode('', 0, false);
+      newNode.support = keptBips.find(kb => kb.bip === bip)?.freq ?? threshold;
+
+      // Add all members of groupA
+      for (const name of groupAMembers) {
+        const node = leafNodes.get(name);
+        if (node) newNode.addChild(node);
+        else {
+          // name might be an internal node identifier, find corresponding internal node
+          const internal = internalNodes.find(n => n.name === name);
+          if (internal) newNode.addChild(internal);
+        }
+        parent.set(name, name); // point to itself as representative
+      }
+
+      // Add all members of groupB
+      for (const name of groupBMembers) {
+        const node = leafNodes.get(name);
+        if (node) newNode.addChild(node);
+        else {
+          const internal = internalNodes.find(n => n.name === name);
+          if (internal) newNode.addChild(internal);
+        }
+        parent.set(name, name);
+      }
+
+      internalNodes.push(newNode);
+    }
+  }
+
+  // Build the root node from all top-level components
+  const root = new PhyloNode('', 0, false);
+
+  // Collect all nodes that have no parent (top-level)
+  const hasParent = new Set<string>();
+  for (const name of parent.keys()) {
+    const p = parent.get(name);
+    if (p !== null && p !== undefined && p !== name) {
+      hasParent.add(name);
+    }
+  }
+
+  // Find all roots (nodes that are not a child of any other node)
+  for (const name of allLeaves) {
+    if (!hasParent.has(name)) {
+      const node = leafNodes.get(name);
+      if (node) root.addChild(node);
+    }
+  }
+
+  // Add any internal nodes that weren't attached as children
+  for (const internal of internalNodes) {
+    if (internal.parent === null || internal.parent === undefined) {
+      // Check if this internal node is already a descendant of root
+      let isDescendant = false;
+      for (const child of root.children) {
+        if (isDescendantOf(child, internal)) {
+          isDescendant = true;
+          break;
+        }
+      }
+      if (!isDescendant && internal.children.length > 0) {
+        root.addChild(internal);
+      }
+    }
+  }
+
+  // If root has no children, build a star tree from all leaves
+  if (root.children.length === 0) {
+    for (const name of allLeaves) {
+      const node = leafNodes.get(name);
+      if (node) root.addChild(node);
+    }
+  }
+
+  return root;
+}
+
+function isDescendantOf(node: PhyloNode, potentialAncestor: PhyloNode): boolean {
+  if (node === potentialAncestor) return true;
+  for (const child of node.children) {
+    if (isDescendantOf(child, potentialAncestor)) return true;
+  }
+  return false;
 }
 
 function getBipartitionsMR(tree: PhyloNode, allLeaves: Set<string>): Set<string> {

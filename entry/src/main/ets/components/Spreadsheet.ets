@@ -289,8 +289,10 @@ export struct Spreadsheet {
   // ─── Public API ─────────────────────────────────────────────────
 
   loadData(data: number[][], rowLabels: string[], colLabels: string[]): void {
-    const dm = new DataMatrix(Matrix.from2D(data), rowLabels, colLabels);
-    this.rowGroups = Array.from({ length: dm.nSamples }, () => 'Ungrouped');
+    this.dataMatrix = new DataMatrix(Matrix.from2D(data), rowLabels, colLabels);
+    this.rowGroups = Array.from({ length: this.dataMatrix.nSamples }, () => 'Ungrouped');
+    this.selectedRows = new Set<number>();
+    this.selectedRow = -1;
   }
 
   getSelectedData(): number[][] {

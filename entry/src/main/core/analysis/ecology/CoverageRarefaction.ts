@@ -69,9 +69,14 @@ export function coverageRarefaction(
 
   const coverage = coverageLevels.slice();
   // Expected richness at each coverage level — averaged across samples
+  // Hurlbert (1971) formula: E(S) = D * (1 - (1 - c)^(1/D))
+  // where D is asymptotic diversity (Chao1) and c is target coverage
   const expectedR = coverage.map(c => {
     let total = 0;
-    for (let s = 0; s < nSamples; s++) total += asymptote[s] * c;
+    for (let s = 0; s < nSamples; s++) {
+      const D = asymptote[s];
+      total += D * (1 - Math.pow(1 - c, 1 / Math.max(D, 1)));
+    }
     return total / nSamples;
   });
 

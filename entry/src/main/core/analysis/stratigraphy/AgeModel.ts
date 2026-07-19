@@ -42,7 +42,8 @@ export function buildAgeModel(
   for (let i = 1; i < section.heights.length; i++) {
     const dh = section.heights[i] - section.heights[i - 1];
     const da = modeled[i] - modeled[i - 1];
-    if (Math.abs(da) > 1e-12) rates[i] = Math.abs(dh / da);
+    if (Math.abs(da) > 1e-12) rates[i] = Math.abs(dh / da);  // Always positive, magnitude only
+    // Note: using Math.abs() because geological age convention is "Ma before present" (decreasing upward)
     else rates[i] = rates[i - 1];
   }
 

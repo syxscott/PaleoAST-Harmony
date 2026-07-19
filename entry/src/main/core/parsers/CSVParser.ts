@@ -2,8 +2,8 @@ import { Matrix } from '../math/Matrix';
 import { DataMatrix } from '../models/index';
 
 export function parseCSV(text: string, delimiter = ',', hasHeader = true, hasRowLabels = true, naValues: string[] = ['NA','NaN','-','','nan','null']): DataMatrix {
-  const lines = text.trim().split(/?
-/).filter(l => l.trim());
+  // Fixed: use proper regex /\r?\n/ to match optional CR + LF
+  const lines = text.trim().split(/\r?\n/).filter(l => l.trim());
   if (lines.length === 0) throw new Error('Empty CSV');
   const splitRow = (line: string): string[] => {
     const fields: string[] = []; let cur = '', inQ = false;
@@ -46,6 +46,5 @@ export function toCSV(dm: DataMatrix, delimiter = ','): string {
     const vals = dm.data.row(i).map(v => isNaN(v) ? 'NA' : v.toString());
     lines.push([dm.rowLabels[i], ...vals].join(delimiter));
   }
-  return lines.join('
-');
+  return lines.join('\n');
 }

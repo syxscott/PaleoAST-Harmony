@@ -47,7 +47,7 @@ export function rasc(
   for (let iter = 0; iter < nIterations; iter++) {
     let improved = false;
     let bestCost = _cost(order, distanceMatrix);
-    for (let i = 1; i < n - 1; i++) {
+    for (let i = 0; i < n - 1; i++) {
       const swapped = order.slice();
       [swapped[i], swapped[i + 1]] = [swapped[i + 1], swapped[i]];
       const newCost = _cost(swapped, distanceMatrix);

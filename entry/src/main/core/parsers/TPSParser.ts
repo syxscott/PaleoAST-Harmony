@@ -1,5 +1,5 @@
-/**
- * TPS file parser ¡ª replaces parsers/tps_parser.py
+ï»¿/**
+ * TPS file parser ï¿½ï¿½ replaces parsers/tps_parser.py
  * Handles LM, ID, IMAGE, CURVES, COMMENTS fields.
  */
 
@@ -13,8 +13,7 @@ export interface TPSRecord {
 
 export function parseTPS(text: string): TPSRecord[] {
   const records: TPSRecord[] = [];
-  const lines = text.split(/?
-/);
+  const lines = text.split(/\r?\n/);
   let current: Partial<TPSRecord> | null = null;
   let lmCount = 0;
   let landmarks: number[][] = [];
@@ -90,12 +89,17 @@ export function parseTPS(text: string): TPSRecord[] {
 
     // Curve data
     if (collectingCurve) {
+      // Semicolon or empty line ends current curve
+      if (t === ';' || t === '') {
+        if (currentCurve.length > 0) {
+          curves.push(currentCurve);
+          currentCurve = [];
+        }
+        continue;
+      }
       const parts = t.split(/[\s,]+/).map(Number);
       if (parts.length >= 2 && !isNaN(parts[0])) {
         currentCurve.push([parts[0], parts[1]]);
-      } else if (currentCurve.length > 0) {
-        curves.push(currentCurve);
-        currentCurve = [];
       }
       continue;
     }

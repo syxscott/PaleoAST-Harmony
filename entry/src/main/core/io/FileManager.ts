@@ -7,7 +7,7 @@ export class FileManager {
   }
 
   static getBaseName(path: string): string {
-    return path.split('/').pop()?.split('').pop() || path;
+    return path.split('/').pop() || path;
   }
 
   static isTextFile(path: string): boolean {
@@ -25,9 +25,12 @@ export class FileManager {
   }
 
   static async readText(path: string): Promise<string> {
-    return '';
+    // Stub: in HarmonyOS, actual implementation would use @ohos.file.fs
+    throw new Error('FileManager.readText not implemented - use FilePickerHelper instead');
   }
 
   static async writeText(path: string, content: string): Promise<void> {
+    // Stub: in HarmonyOS, actual implementation would use @ohos.file.fs
+    throw new Error('FileManager.writeText not implemented - use FilePickerHelper instead');
   }
 }

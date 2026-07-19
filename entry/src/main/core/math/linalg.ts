@@ -56,8 +56,8 @@ export function eigh(A: Matrix): { eigenvalues: number[]; eigenvectors: Matrix }
   }
   const eigenvalues: number[] = [];
   for (let i = 0; i < n; i++) eigenvalues.push(T.get(i, i));
-  const order = eigenvalues.map((_, i) => i).sort((a, b) => eigenvalues[b] - eigenvalues[a]);
-  const sorted = order.map(i => eigenvalues[i]);
+  const sorted = eigenvalues.map(v => Math.max(0, v)); // Ensure non-negative eigenvalues
+  const order = sorted.map((_, i) => i).sort((a, b) => sorted[b] - sorted[a]);
   const evd = new Float64Array(n * n);
   for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) evd[i * n + j] = Q.get(i, order[j]);
   return { eigenvalues: sorted, eigenvectors: new Matrix(evd, n, n) };

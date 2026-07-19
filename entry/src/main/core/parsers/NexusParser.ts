@@ -1,5 +1,5 @@
 /**
- * Nexus file parser �� replaces parsers/nexus_lexer.py
+ * Nexus file parser — replaces parsers/nexus_lexer.py
  * Handles BEGIN TAXA, BEGIN CHARACTERS, BEGIN DATA blocks.
  */
 
@@ -36,7 +36,9 @@ export function tokenizeNexus(text: string): NexusToken[] {
     if (ch === '[') {
       const start = pos; pos++;
       while (pos < text.length && text[pos] !== ']') pos++;
-      if (pos < text.length) pos++;
+      // Fix: throw error for unclosed comment
+      if (pos >= text.length) throw new Error('Unclosed comment block starting at position ' + start);
+      pos++; // skip ]
       push(NexusTokenType.COMMENT, text.slice(start, pos));
       col++; continue;
     }
@@ -53,8 +55,10 @@ export function tokenizeNexus(text: string): NexusToken[] {
       const quote = ch; pos++;
       const start = pos;
       while (pos < text.length && text[pos] !== quote) pos++;
+      // Fix: throw error for unclosed string
+      if (pos >= text.length) throw new Error('Unclosed string literal starting at position ' + (start - 1));
       const value = text.slice(start, pos);
-      if (pos < text.length) pos++;
+      pos++; // skip closing quote
       push(NexusTokenType.STRING, value);
       col += pos - start + 2; continue;
     }
@@ -92,8 +96,8 @@ export interface NexusData {
 }
 
 export function parseNexus(text: string): NexusData {
-  const lines = text.split(/?
-/);
+  // Fixed: proper regex for line splitting
+  const lines = text.split(/\r?\n/);
   const taxa: string[] = [];
   const charRows: string[][] = [];
   let dataType = 'standard';
@@ -128,7 +132,8 @@ export function parseNexus(text: string): NexusData {
 
     if (inBlock === 'characters' || inBlock === 'data') {
       if (lower.startsWith('format')) {
-        if (lower.includes('datatype=dna') || lower.includes('datatype=dna')) dataType = 'dna';
+        // Fixed: removed duplicate condition
+        if (lower.includes('datatype=dna')) dataType = 'dna';
         else if (lower.includes('datatype=protein')) dataType = 'protein';
         else if (lower.includes('datatype=standard')) dataType = 'standard';
         const mm = lower.match(/missing=(.)/); if (mm) missingChar = mm[1];

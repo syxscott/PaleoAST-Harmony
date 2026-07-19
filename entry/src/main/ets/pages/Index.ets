@@ -100,11 +100,17 @@ struct Index {
   // 鸿蒙特有：AppStorage 持久化暗色模式（单一数据源，不再用 @State darkMode）
   @StorageLink('darkMode') darkMode: boolean = false;
 
-  private stateMgr = StateManager.getInstance();
+  // StateManager singleton stored in AppStorage for reactive UI updates
+  @StorageLink('stateMgr') stateMgr: StateManager = StateManager.getInstance();
   private dataCtrl = new DataController();
   private statCtrl = new StatisticsController();
 
   private tabs: string[] = ['Home', 'Analysis', 'Morphometrics', 'Stratigraphy', 'Macroevolution'];
+
+  aboutToAppear(): void {
+    // Ensure StateManager singleton is stored in AppStorage for reactivity
+    AppStorage.setOrCreate('stateMgr', StateManager.getInstance());
+  }
 
   build() {
     Column() {
@@ -207,7 +213,6 @@ struct Index {
       // Dark mode toggle
       Toggle({ type: ToggleType.Switch, isOn: this.darkMode })
         .onChange((isOn: boolean) => {
-          this.darkMode = isOn
           this.darkMode = isOn
           AppStorage.setOrCreate('darkMode', isOn)
         })
@@ -382,6 +387,7 @@ struct Index {
     if (this.showPCADialog) {
       PCADialog({ visible: this.showPCADialog } as Record<string, Object>)
         .onConfirm((params: Record<string, Object>) => { this.runAnalysisWithParams('PCA', params); })
+        .onCancel(() => { this.showPCADialog = false; })
         .transition(TransitionEffect.scale({ x: 0.9, y: 0.9 }).combine(TransitionEffect.OPACITY))
     }
     if (this.showPCoADialog) {
@@ -442,9 +448,21 @@ struct Index {
   private loadFile(params: Record<string, Object>): void {
     this.isLoading = true;
     this.statusText = 'Loading...';
-    const csv = 'Sample,Var1,Var2,Var3,Var4\nA,5.1,3.5,1.4,0.2\nB,4.9,3.0,1.4,0.2\nC,4.7,3.2,1.3,0.2\nD,4.6,3.1,1.5,0.2\nE,5.0,3.6,1.4,0.2';
+    const filePath = params['filePath'] as string ?? '';
     try {
+      let csv: string;
+      if (filePath && filePath.length > 0 && !filePath.includes('Sample,Var1')) {
+        // Use @ohos.file.fs to read the selected file
+        import fs from '@ohos.file.fs';
+        const fileData = fs.readTextSync(filePath);
+        csv = fileData;
+      } else {
+        csv = filePath || 'Sample,Var1,Var2,Var3,Var4\nA,5.1,3.5,1.4,0.2\nB,4.9,3.0,1.4,0.2\nC,4.7,3.2,1.3,0.2\nD,4.6,3.1,1.5,0.2\nE,5.0,3.6,1.4,0.2';
+      }
       const dm = parseCSV(csv);
+      if (!dm || dm.nSamples === 0) {
+        throw new Error('No data parsed');
+      }
       this.stateMgr.setData(dm);
       this.hasData = true;
       this.dataInfo = dm.nSamples + ' x ' + dm.nVariables;
@@ -454,7 +472,7 @@ struct Index {
       this.canUndo = false;
       this.canRedo = false;
     } catch (e) {
-      this.statusText = 'Error: ' + e;
+      this.statusText = 'Error: ' + String(e).substring(0, 100);
     }
     this.isLoading = false;
   }
@@ -471,7 +489,8 @@ struct Index {
     this.isLoading = true;
     this.statusText = 'Running: ' + name + '...';
     try {
-      const data = this.stateMgr.dataMatrix!.data;
+      if (!this.stateMgr.dataMatrix) { throw new Error('No data loaded'); }
+      const data = this.stateMgr.dataMatrix.data;
       let result: any;
 
       switch (name) {
@@ -572,8 +591,9 @@ struct Index {
 
     this.statusText = 'Running: ' + name + '...';
     try {
-      const data = this.stateMgr.dataMatrix!.data;
-      const groups = this.stateMgr.dataMatrix?.getGroups();
+      if (!this.stateMgr.dataMatrix) { throw new Error('No data loaded'); }
+      const data = this.stateMgr.dataMatrix.data;
+      const groups = this.stateMgr.dataMatrix.getGroups();
       let result: any;
 
       switch (name) {
@@ -662,7 +682,7 @@ struct Index {
         case 'Detect Excursions': result = this.statCtrl.runDetectExcursions(data.col(0), data.col(1)); break;
         case 'Filter Endemic': result = this.statCtrl.runFilterEndemic(data.to2D()); break;
         case 'Build ARMA': result = this.statCtrl.runBuildARMA(data.col(0)); break;
-        case 'ARMA Predict': result = this.statCtrl.runARMAPredict({}, 5); break;
+        case 'ARMA Predict': result = this.statCtrl.runARMAPredict(this.stateMgr.dataMatrix?.data?.col(0) ?? [], 5); break;
         case 'Cox PH': this.statusText = 'Cox PH: needs durations + events + covariates'; break;
         case 'Log-rank': this.statusText = 'Log-rank: needs two survival groups'; break;
         case 'Kaplan-Meier': result = this.statCtrl.runKaplanMeier(data.col(0), data.col(0).map(_ => 1)); break;

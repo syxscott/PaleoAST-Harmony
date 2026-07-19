@@ -1,6 +1,6 @@
 import { Matrix } from '../../math/Matrix';
 import { svd, eigh } from '../../math/linalg';
-import { mean, std, rankdata } from '../../math/stats';
+import { mean, std, rankdata, skewness, kurtosis } from '../../math/stats';
 import { randnArray } from '../../math/random';
 
 /**
@@ -299,10 +299,13 @@ export function univariateSummary(data: Matrix, colNames: string[]): ColumnStats
     if (vals.length === 0) { results.push({ name: colNames[j] || `Var${j}`, n: 0, mean: 0, std: 0, variance: 0, min: 0, max: 0, median: 0, skewness: 0, kurtosis: 0, se: 0, ci95: [0, 0] }); continue; }
     const m = mean(vals), s = std(vals), v = s * s, med = [...vals].sort((a, b) => a - b)[Math.floor(vals.length / 2)];
     const se_val = s / Math.sqrt(vals.length);
+    // Fixed: compute actual skewness and kurtosis instead of hardcoding to 0
+    const skew_val = skewness(vals);
+    const kurt_val = kurtosis(vals);
     results.push({
       name: colNames[j] || `Var${j}`, n: vals.length,
       mean: m, std: s, variance: v, min: Math.min(...vals), max: Math.max(...vals),
-      median: med, skewness: 0, kurtosis: 0, se: se_val,
+      median: med, skewness: skew_val, kurtosis: kurt_val, se: se_val,
       ci95: [m - 1.96 * se_val, m + 1.96 * se_val],
     });
   }
@@ -861,7 +864,7 @@ export function hierarchicalClustering(data: Matrix, method: string = 'ward', me
       else { // ward
         let ss = 0;
         for (let k = 0; k < clusters[i].centroid.length; k++) ss += (clusters[i].centroid[k] - clusters[j].centroid[k]) ** 2;
-        dist = (ni * nj) / (ni + nj) * ss;
+        dist = Math.sqrt((ni * nj) / (ni + nj) * ss); // Fixed: missing sqrt
       }
       if (dist < minDist) { minDist = dist; mi = i; mj = j; }
     }
@@ -989,37 +992,71 @@ export interface PhyloANOVAResult {
 }
 
 export function phyloANOVA(root: any, traitValues: Record<string, number>, groupLabels: Record<string, string>, nPermutations: number = 999): PhyloANOVAResult {
-  const { contrasts } = computePIC(root, traitValues);
-  // Classify contrasts as between/within group
+  // Compute PIC contrasts while tracking node identity
   const betweenContrasts: number[] = [];
   const withinContrasts: number[] = [];
 
-  function getDominantGroup(node: any): string | null {
+  function getGroup(node: any): string | null {
     const leaves = getLeaves(node);
     const counts: Record<string, number> = {};
-    for (const l of leaves) { const g = groupLabels[l.name]; if (g) counts[g] = (counts[g] || 0) + 1; }
+    for (const l of leaves) {
+      const g = groupLabels[l.name];
+      if (g) counts[g] = (counts[g] || 0) + 1;
+    }
     if (Object.keys(counts).length === 0) return null;
     return Object.entries(counts).sort((a, b) => b[1] - a[1])[0][0];
   }
 
-  function classifyContrasts(node: any): void {
-    if (node.isLeaf || node.children.length < 2) return;
-    const g1 = getDominantGroup(node.children[0]);
-    const g2 = getDominantGroup(node.children[1]);
-    if (g1 && g2 && g1 !== g2) betweenContrasts.push(0); // placeholder
-    else withinContrasts.push(0);
-    for (const c of node.children) classifyContrasts(c);
+  function computeWithClassification(node: any): { value: number | null; cumVar: number } {
+    if (node.isLeaf) return { value: traitValues[node.name] ?? null, cumVar: 0 };
+
+    const childResults = node.children.map((c: any) => computeWithClassification(c)).filter((r: any) => r.value !== null);
+    if (childResults.length < 2) return { value: childResults[0]?.value ?? null, cumVar: 0 };
+
+    const c1 = childResults[0], c2 = childResults[1];
+    const v1 = c1.cumVar + (node.children[0].branchLength || 0);
+    const v2 = c2.cumVar + (node.children[1].branchLength || 0);
+    const contrast = (c1.value! - c2.value!) / Math.sqrt(v1 + v2);
+
+    // Classify this contrast based on child groups
+    const g1 = getGroup(node.children[0]);
+    const g2 = getGroup(node.children[1]);
+    if (g1 && g2 && g1 !== g2) {
+      betweenContrasts.push(contrast);
+    } else {
+      withinContrasts.push(contrast);
+    }
+
+    const w1 = 1 / Math.max(v1, 0.0001), w2 = 1 / Math.max(v2, 0.0001);
+    return { value: (w1 * c1.value! + w2 * c2.value!) / (w1 + w2), cumVar: v1 + v2 };
   }
-  classifyContrasts(root);
 
-  // Use actual PIC values
-  const picResult = computePIC(root, traitValues);
-  // Simplified: use all contrasts
-  const ssBetween = betweenContrasts.length > 0 ? contrasts.slice(0, betweenContrasts.length).reduce((s, c) => s + c ** 2, 0) : 0;
-  const ssWithin = withinContrasts.length > 0 ? contrasts.slice(betweenContrasts.length).reduce((s, c) => s + c ** 2, 0) : 0;
-  const F = ssWithin > 0 ? (ssBetween / Math.max(betweenContrasts.length, 1)) / (ssWithin / Math.max(withinContrasts.length, 1)) : 0;
+  computeWithClassification(root);
 
-  return { fStatistic: F, pValue: 0.5, ssBetween, ssWithin, nPermutations };
+  // Compute sum of squares
+  const ssBetween = betweenContrasts.reduce((s, c) => s + c * c, 0);
+  const ssWithin = withinContrasts.reduce((s, c) => s + c * c, 0);
+  const dfBetween = Math.max(betweenContrasts.length, 1);
+  const dfWithin = Math.max(withinContrasts.length, 1);
+  const msBetween = ssBetween / dfBetween;
+  const msWithin = ssWithin / dfWithin;
+  const F = msWithin > 0 ? msBetween / msWithin : 0;
+
+  // Permutation test
+  let count = 0;
+  for (let perm = 0; perm < nPermutations; perm++) {
+    // Simple permutation: shuffle trait values
+    const shuffled = Object.values(traitValues).sort(() => Math.random() - 0.5);
+    const shuffledMap: Record<string, number> = {};
+    Object.keys(traitValues).forEach((k, i) => shuffledMap[k] = shuffled[i]);
+    const { contrasts: permContrasts } = computePIC(root, shuffledMap);
+    // Count permutations with larger F
+    const permSS = permContrasts.reduce((s, c) => s + c * c, 0);
+    if (permSS >= ssBetween + ssWithin) count++;
+  }
+  const pValue = (count + 1) / (nPermutations + 1);
+
+  return { fStatistic: F, pValue, ssBetween, ssWithin, nPermutations };
 }
 
 // ═══════════════════════════════════════════════════════════════════

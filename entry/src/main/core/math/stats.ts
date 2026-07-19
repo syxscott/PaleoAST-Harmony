@@ -122,10 +122,12 @@ export function dnorm(x: number, mu: number = 0, sigma: number = 1): number {
  * Standard normal CDF using Abramowitz & Stegun 7.1.26 approximation
  * (max error ≈ 1.5e-7).
  */
-export function pnorm(x: number, _mu: number = 0, _sigma: number = 1): number {
+export function pnorm(x: number, mu: number = 0, sigma: number = 1): number {
+  if (sigma <= 0) throw new Error('pnorm: sigma must be positive');
   // Sign symmetric: compute for |x| then handle sign
-  const sign = x < 0 ? -1 : 1;
-  const ax = Math.abs(x) / Math.sqrt(2);
+  const z = (x - mu) / sigma;
+  const sign = z < 0 ? -1 : 1;
+  const ax = Math.abs(z) / Math.sqrt(2);
   const t = 1 / (1 + 0.3275911 * ax);
   const a1 = 0.254829592, a2 = -0.284496736, a3 = 1.421413741,
         a4 = -1.453152027, a5 = 1.061405429;

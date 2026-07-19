@@ -134,11 +134,11 @@ export function simulateFBD(
     currentTime += tau;
 
     const r = Math.random();
-    const probs = [lambda, mu, psi];
-    const cumProb = [probs[0], probs[0] + probs[1], probs[0] + probs[1] + probs[2]];
+    const birthProb = lambda / totalRate;
+    const deathProb = (lambda + mu) / totalRate;
     let eventType: string;
-    if (r < cumProb[0] / totalRate * totalRate) eventType = 'birth';
-    else if (r < cumProb[1] / totalRate * totalRate) eventType = 'death';
+    if (r < birthProb) eventType = 'birth';
+    else if (r < deathProb) eventType = 'death';
     else eventType = 'fossil';
 
     const idx = Math.floor(Math.random() * alive.length);
@@ -253,27 +253,75 @@ export function coxPH(durations: number[], events: number[], covariates: number[
     if (converged) break;
   }
 
-  // Standard errors from inverse Hessian
-  const se = new Array(p).fill(0.5);
+  // Standard errors from inverse Hessian - compute properly from hessian matrix
+  // SE = sqrt(diag(inverse(Hessian)))
+  const invHess = invertMatrix(hess);
+  const se = invHess.map((row, i) => Math.sqrt(Math.max(0, row[i])));
   const hazardRatios = beta.map(b => Math.exp(b));
   const zScores = beta.map((b, i) => se[i] > 0 ? b / se[i] : 0);
   const pValues = zScores.map(z => 2 * (1 - normCDF_cox(Math.abs(z))));
 
-  // Concordance index (simplified)
+  // Concordance index (Harrell's C) - count all comparable pairs
   let concordant = 0, total = 0;
-  for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) {
-    if (events[i] === 1 && durations[i] < durations[j]) {
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      // Comparable if: one event, other could be event or censored
+      const comparable = (events[i] === 1 && durations[i] < durations[j]) ||
+                        (events[j] === 1 && durations[j] < durations[i]);
+      if (!comparable) continue;
+
+      // Calculate linear predictors
       let lp_i = 0, lp_j = 0;
-      for (let k = 0; k < p; k++) { lp_i += beta[k] * X[i][k]; lp_j += beta[k] * X[j][k]; }
-      if (lp_i > lp_j) concordant++;
-      total++;
+      for (let k = 0; k < p; k++) {
+        lp_i += beta[k] * X[i][k];
+        lp_j += beta[k] * X[j][k];
+      }
+
+      // Higher lp means higher risk (shorter survival)
+      if (events[i] === 1 && durations[i] < durations[j]) {
+        if (lp_i > lp_j) concordant++; // i failed first and had higher risk
+        total++;
+      } else if (events[j] === 1 && durations[j] < durations[i]) {
+        if (lp_j > lp_i) concordant++; // j failed first and had higher risk
+        total++;
+      }
     }
+  }
+
+  // Compute log-likelihood at convergence
+  let logLik = 0;
+  for (let i = 0; i < n; i++) {
+    let lp = 0;
+    for (let k = 0; k < p; k++) lp += beta[k] * X[i][k];
+    const riskSum = riskSets[i].reduce((s, j) =>
+      s + Math.exp(Math.min(beta.reduce((sp, b, k) => sp + b * X[j][k], 0), 20)), 0);
+    logLik += events[i] * lp - Math.log(riskSum);
   }
 
   return {
     coefficients: beta, standardErrors: se, hazardRatios, zScores, pValues,
-    logLikelihood: 0, concordance: total > 0 ? concordant / total : 0.5,
+    logLikelihood: logLik, concordance: total > 0 ? concordant / total : 0.5,
   };
+}
+
+/** Invert a square matrix using Gaussian elimination. Returns identity on singular matrix. */
+function invertMatrix(A: number[][]): number[][] {
+  const n = A.length;
+  const aug: number[][][] = A.map((row, i) => [...row, ...new Array(n).fill(0).map((_, j) => i === j ? 1 : 0)]);
+  for (let col = 0; col < n; col++) {
+    let maxRow = col;
+    for (let row = col + 1; row < n; row++) if (Math.abs(aug[row][col]) > Math.abs(aug[maxRow][col])) maxRow = row;
+    [aug[col], aug[maxRow]] = [aug[maxRow], aug[col]];
+    const pivot = aug[col][col];
+    if (Math.abs(pivot) < 1e-15) continue; // singular - return 0s
+    for (let j = 0; j < 2 * n; j++) aug[col][j] /= pivot;
+    for (let row = 0; row < n; row++) {
+      if (row === col) continue;
+      const factor = aug[row][col];
+      for (let j = 0; j < 2 * n; j++) aug[row][j] -= factor * aug[col][j];
+    }
+  }
+  return aug.map(row => row.slice(n));
 }
 
 function solveLinearSystem_cox(A: number[][], b: number[]): number[] {

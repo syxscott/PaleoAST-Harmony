@@ -1,5 +1,5 @@
 /**
- * General-purpose lexer ¡ª replaces parsers/lexer.py
+ * General-purpose lexer â€” replaces parsers/lexer.py
  * Tokenizes text input for structured data parsing.
  */
 
@@ -23,16 +23,14 @@ export class Lexer {
   private _line = 1;
   private _col = 1;
 
-  constructor(private _input: string, private _delimiters: string = ',	') {}
+  constructor(private _input: string, private _delimiters: string = ',\t') {}
 
   tokenize(): Token[] {
     const tokens: Token[] = [];
     while (this._pos < this._input.length) {
       const ch = this._input[this._pos];
-      if (ch === '
-') {
-        tokens.push({ type: TokenType.NEWLINE, value: '
-', line: this._line, column: this._col });
+      if (ch === '\n') {
+        tokens.push({ type: TokenType.NEWLINE, value: '\n', line: this._line, column: this._col });
         this._line++; this._col = 1; this._pos++;
       } else if (this._delimiters.includes(ch)) {
         tokens.push({ type: TokenType.DELIMITER, value: ch, line: this._line, column: this._col });
@@ -46,8 +44,7 @@ export class Lexer {
         this._col += this._pos - start;
       } else {
         const start = this._pos;
-        while (this._pos < this._input.length && !this._delimiters.includes(this._input[this._pos]) && this._input[this._pos] !== '
-') this._pos++;
+        while (this._pos < this._input.length && !this._delimiters.includes(this._input[this._pos]) && this._input[this._pos] !== '\n') this._pos++;
         tokens.push({ type: TokenType.STRING, value: this._input.slice(start, this._pos), line: this._line, column: this._col });
         this._col += this._pos - start;
       }

@@ -19,14 +19,17 @@ export class Quaternion {
       const s = 0.5 / Math.sqrt(trace + 1);
       return new Quaternion(0.25/s, (R[2][1]-R[1][2])*s, (R[0][2]-R[2][0])*s, (R[1][0]-R[0][1])*s);
     }
+    // Branch 2: R[0][0] largest
     if (R[0][0] > R[1][1] && R[0][0] > R[2][2]) {
       const s = 2 * Math.sqrt(1 + R[0][0] - R[1][1] - R[2][2]);
-      return new Quaternion((R[2][1]-R[1][2])/s, 0.25*s, (R[0][1]+R[1][0])/s, (R[0][2]+R[2][0])/s);
+      return new Quaternion(0.25*s, (R[2][1]-R[1][2])/s, (R[0][1]+R[1][0])/s, (R[0][2]+R[2][0])/s);
     }
+    // Branch 3: R[1][1] largest
     if (R[1][1] > R[2][2]) {
       const s = 2 * Math.sqrt(1 + R[1][1] - R[0][0] - R[2][2]);
       return new Quaternion((R[0][2]-R[2][0])/s, (R[0][1]+R[1][0])/s, 0.25*s, (R[1][2]+R[2][1])/s);
     }
+    // Branch 4: R[2][2] largest
     const s = 2 * Math.sqrt(1 + R[2][2] - R[0][0] - R[1][1]);
     return new Quaternion((R[1][0]-R[0][1])/s, (R[0][2]+R[2][0])/s, (R[1][2]+R[2][1])/s, 0.25*s);
   }
@@ -116,7 +119,7 @@ export class RotationMatrix {
     const V = svd.V, U = svd.U;
     const R: number[][] = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
     for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) {
-      for (let k = 0; k < 3; k++) R[i][j] += V[i][k] * U[j][k];
+      for (let k = 0; k < 3; k++) R[i][j] += V[i][k] * U[k][j];  // V@U^T
     }
     if (det3(R) < 0) {
       for (let i = 0; i < 3; i++) R[i][2] = -R[i][2];

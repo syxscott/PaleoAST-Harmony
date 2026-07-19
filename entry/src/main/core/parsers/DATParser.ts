@@ -1,5 +1,5 @@
-/**
- * DAT file parser ¡ª replaces parsers/dat_parser.py
+ï»¿/**
+ * DAT file parser ï¿½ï¿½ replaces parsers/dat_parser.py
  * Handles various delimiters and formats.
  */
 
@@ -12,7 +12,8 @@ export interface DATData {
 }
 
 export function parseDAT(text: string, delimiter = ',', hasHeader = true, hasRowLabels = true): DATData {
-  const lines = text.trim().split(/?
+  const lines = text.trim().split(/\r?\n/).filter(l => l.trim());
+?
 /).filter(l => l.trim());
   if (lines.length === 0) return { data: [], rowLabels: [], colLabels: [], nRows: 0, nCols: 0 };
 

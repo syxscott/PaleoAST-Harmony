@@ -5,7 +5,8 @@ export struct ImportDialog {
   @State hasHeader: boolean = true;
   @State hasRowLabels: boolean = true;
   @State delimiterIdx: number = 0;
-  delimiterOpts: string[] = ['Comma (,)', 'Tab (	)', 'Space'];
+  delimiterOpts: string[] = ['Comma (,)', 'Tab (\t)', 'Space'];
+  delimiterVals: string[] = [',', '\t', ' '];
   onConfirm: (params: Record<string, Object>) => void = () => {};
 
   build() {
@@ -22,5 +23,5 @@ export struct ImportDialog {
       }.width('100%').justifyContent(FlexAlign.End)
     }.padding(24).width(480).borderRadius(12)
   }
-  doRun(): void { this.onConfirm({ filePath: this.filePath, hasHeader: this.hasHeader, hasRowLabels: this.hasRowLabels, delimiter: this.delimiterOpts[this.delimiterIdx] }); }
+  doRun(): void { this.onConfirm({ filePath: this.filePath, hasHeader: this.hasHeader, hasRowLabels: this.hasRowLabels, delimiter: this.delimiterVals[this.delimiterIdx] }); }
 }

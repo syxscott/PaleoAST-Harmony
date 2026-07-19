@@ -245,7 +245,8 @@ export function dtw(seq1: number[], seq2: number[], window?: number): DTWResult 
   for (let j = 1; j < n2; j++) D[0][j] = D[0][j - 1] + Math.abs(seq1[0] - seq2[j]);
 
   for (let i = 1; i < n1; i++) for (let j = 1; j < n2; j++) {
-    if (window !== undefined && Math.abs(i - j) > window) continue;
+    // Fixed: use large finite value instead of Infinity to avoid backtracking issues
+    if (window !== undefined && Math.abs(i - j) > window) { D[i][j] = 1e10; continue; }
     D[i][j] = Math.abs(seq1[i] - seq2[j]) + Math.min(D[i - 1][j], D[i][j - 1], D[i - 1][j - 1]);
   }
 
@@ -355,7 +356,7 @@ export function sheAnalysis(abundanceMatrix: number[][], sampleNames?: string[])
     logE.push(Math.log(E + 0.001));
   }
 
-  return { logS, logH, logE, sampleNames: names.map(i => names[totals[i]?.idx ?? 0]) };
+  return { logS, logH, logE, sampleNames: totals.map(t => names[t.idx]) }; // Fixed: use totals[i].idx correctly
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -453,7 +454,8 @@ export function fitLogSeries(abundances: number[]): LogSeriesResult {
     const S_pred = -alpha * Math.log(1 - x);
     const N_pred = alpha * x / (1 - x);
     const dS = -Math.log(1 - x);
-    const dN = alpha / (1 - x) ** 2;
+    // Fixed: derivative of N = alpha*x/(1-x) w.r.t. alpha is x/(1-x), not alpha/(1-x)^2
+    const dN = x / (1 - x);
     const err_S = S - S_pred, err_N = N - N_pred;
     const delta_alpha = (err_S * dN - err_N * dS) / (dS * dN - dN * dS || 1);
     alpha += delta_alpha * 0.1;

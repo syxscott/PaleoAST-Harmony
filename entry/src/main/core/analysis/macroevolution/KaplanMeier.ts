@@ -105,12 +105,10 @@ export function kaplanMeier(
     }
   }
 
-  // Median survival
+  // Median survival - fixed: find first time survival drops to or below 0.5
   let medianSurvival: number | null = null;
-  if (outS[outS.length - 1] <= 0.5) {
-    const firstBelow = outS.findIndex(s => s <= 0.5);
-    if (firstBelow >= 0) medianSurvival = outTimes[firstBelow];
-  }
+  const firstBelow = outS.findIndex(s => s <= 0.5);
+  if (firstBelow >= 0) medianSurvival = outTimes[firstBelow];
 
   return {
     times: outTimes,

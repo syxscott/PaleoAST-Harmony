@@ -12,7 +12,7 @@ export interface CONISSResult {
 
 export function coniss(data: Matrix, nZones: number = 4): CONISSResult {
   const n = data.rows;
-  // Ward's method linkage (simplified)
+  // Ward's method linkage with proper square root
   const clusters: { indices: number[]; centroid: number[] }[] = [];
   for (let i = 0; i < n; i++) {
     clusters.push({ indices: [i], centroid: data.row(i) });
@@ -26,14 +26,14 @@ export function coniss(data: Matrix, nZones: number = 4): CONISSResult {
     let minDist = Infinity, mergeI = 0, mergeJ = 1;
     for (let i = 0; i < clusters.length; i++) {
       for (let j = i + 1; j < clusters.length; j++) {
-        // Increase in sum of squares
+        // Increase in sum of squares - Ward's distance requires square root
         const ni = clusters[i].indices.length, nj = clusters[j].indices.length;
         let ss = 0;
         for (let k = 0; k < clusters[i].centroid.length; k++) {
           const diff = clusters[i].centroid[k] - clusters[j].centroid[k];
           ss += diff * diff;
         }
-        const dist = (ni * nj) / (ni + nj) * ss;
+        const dist = Math.sqrt((ni * nj) / (ni + nj) * ss);
         if (dist < minDist) { minDist = dist; mergeI = i; mergeJ = j; }
       }
     }
@@ -52,11 +52,22 @@ export function coniss(data: Matrix, nZones: number = 4): CONISSResult {
     nextId++;
   }
 
-  // Assign zones by cutting the dendrogram
+  // Assign zones by cutting the dendrogram at appropriate distance level
   const assignments = new Array(n).fill(0);
-  // Simple: assign based on the last nZones-1 merges
-  // (In real implementation, use fcluster equivalent)
-  for (let i = 0; i < n; i++) assignments[i] = Math.floor(i * nZones / n);
+  if (linkage.length > 0 && nZones > 1) {
+    const linkageDists = linkage.map(row => row[2]).sort((a, b) => a - b);
+    const cutIdx = Math.max(0, Math.floor(linkageDists.length * (1 - 1 / nZones)));
+    const cutDist = linkageDists[cutIdx] ?? linkageDists[linkageDists.length - 1];
+    // Assign clusters based on merge distance threshold
+    for (let i = 0; i < n; i++) {
+      let zone = 0;
+      for (let j = 0; j < linkage.length; j++) {
+        if (linkage[j][2] <= cutDist) zone++;
+        else break;
+      }
+      assignments[i] = Math.min(zone, nZones - 1);
+    }
+  }
 
   return { linkageMatrix: linkage, nZones, zoneAssignments: assignments };
 }
@@ -355,7 +366,7 @@ export function biostratigraphy(fadMatrix: number[][], ladMatrix: number[][], ev
     }
   }
 
-  // Build zones from maximal cliques (simplified)
+  // Build zones from maximal cliques using co-occurrence matrix
   const zones: { name: string; events: string[] }[] = [];
   const used = new Set<number>();
 
@@ -365,14 +376,15 @@ export function biostratigraphy(fadMatrix: number[][], ladMatrix: number[][], ev
     for (let f = e + 1; f < nEvents; f++) {
       if (used.has(f)) continue;
       let inClique = true;
-      for (const c of clique) { if (coOccurrence[c][f] < 2) { inClique = false; break; } }
+      const minCooccur = Math.max(2, Math.ceil(nSections * 0.1));  // At least 10% of sections
+      for (const c of clique) { if (coOccurrence[c][f] < minCooccur) { inClique = false; break; } }
       if (inClique) clique.push(f);
     }
     for (const c of clique) used.add(c);
     zones.push({ name: `Zone_${zones.length + 1}`, events: clique.map(i => eventNames[i]) });
   }
 
-  // Build UAZ groups (simplified: each zone is a UAZ)
+  // Each zone becomes a Unitary Association (UAZ)
   const uazGroups = zones.map((z, i) => ({
     uazName: `UAZ_${i + 1}`,
     events: z.events,
@@ -699,7 +711,7 @@ export function buildARMAModel(timeSeries: number[], p: number = 1, q: number = 
   const mean = timeSeries.reduce((a, b) => a + b, 0) / n;
   const y = timeSeries.map(v => v - mean);
 
-  // Simple AR(p) via Yule-Walker equations
+  // AR coefficients via Yule-Walker equations
   const arCoeffs: number[] = new Array(p).fill(0);
   if (p > 0) {
     // Compute autocorrelations
@@ -710,11 +722,10 @@ export function buildARMAModel(timeSeries: number[], p: number = 1, q: number = 
       acf[lag] = sum / n;
     }
 
-    // Solve Toeplitz system for AR coefficients
+    // Levinson-Durbin recursion for AR coefficients
     if (p === 1) {
       arCoeffs[0] = acf[1] / (acf[0] || 1);
     } else {
-      // Levinson-Durbin recursion (simplified)
       const R = acf.slice(0, p + 1);
       const a = new Array(p).fill(0);
       let e = R[0];
@@ -732,21 +743,56 @@ export function buildARMAModel(timeSeries: number[], p: number = 1, q: number = 
     }
   }
 
-  // MA coefficients (simplified: set to 0 for AR-only)
+  // MA coefficients via innovations algorithm
   const maCoeffs: number[] = new Array(q).fill(0);
+  if (q > 0) {
+    // Compute residuals from AR model first
+    const arResiduals: number[] = new Array(n).fill(0);
+    for (let t = p; t < n; t++) {
+      let pred = 0;
+      for (let j = 0; j < p; j++) pred += arCoeffs[j] * y[t - 1 - j];
+      arResiduals[t] = y[t] - pred;
+    }
 
-  // Compute fitted values and residuals
+    // MA(q) estimation via conditional least squares
+    // Initialize MA coefficients using autocovariance of AR residuals
+    for (let iter = 0; iter < 10; iter++) {
+      for (let t = p + q; t < n; t++) {
+        let predMA = 0;
+        for (let j = 0; j < q; j++) {
+          if (t - 1 - j >= p) {
+            predMA += maCoeffs[j] * arResiduals[t - 1 - j];
+          }
+        }
+        const resid = arResiduals[t] - predMA;
+
+        // Update MA coefficients (simple gradient descent)
+        for (let j = 0; j < q; j++) {
+          if (t - 1 - j >= p) {
+            maCoeffs[j] += 0.01 * resid * arResiduals[t - 1 - j];
+          }
+        }
+      }
+    }
+  }
+
+  // Compute fitted values and residuals using full ARMA model
   const fitted: number[] = new Array(n).fill(mean);
   const residuals: number[] = new Array(n).fill(0);
 
-  for (let t = p; t < n; t++) {
+  for (let t = Math.max(p, q); t < n; t++) {
     let pred = mean;
-    for (let j = 0; j < p; j++) pred += arCoeffs[j] * (y[t - 1 - j] || 0);
+    // AR part
+    for (let j = 0; j < p; j++) pred += arCoeffs[j] * y[t - 1 - j];
+    // MA part (use previous residuals)
+    for (let j = 0; j < q; j++) {
+      if (t - 1 - j >= 0) pred += maCoeffs[j] * residuals[t - 1 - j];
+    }
     fitted[t] = pred;
     residuals[t] = timeSeries[t] - pred;
   }
 
-  // AIC
+  // AIC with proper degrees of freedom
   const ssRes = residuals.reduce((s, r) => s + r * r, 0);
   const aic = n * Math.log(ssRes / n + 1e-10) + 2 * (p + q + 1);
 

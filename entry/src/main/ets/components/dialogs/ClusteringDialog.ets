@@ -25,7 +25,7 @@ export struct ClusteringDialog {
       Text('Hierarchical Clustering').fontSize(18).fontWeight(FontWeight.Bold).margin({ bottom: 8 })
       Text('Groups samples based on distance similarity.').fontSize(11).fontColor('#7F8C8D').margin({ bottom: 16 })
 
-      Row() { Text('Number of clusters:').width(160).fontSize(13); TextInput({ text: String(this.n_clusters) }).width(80).type(InputType.Number).onChange((v: string) => { const n = parseInt(v) || 3; if (n < 2) { this.errorMsg = 'Need at least 2 clusters'; } else if (n > 20) { this.errorMsg = 'Maximum 20 clusters'; } else { this.n_clusters = n; this.errorMsg = ''; } }) }.width('100%').margin({ bottom: 4 })
+      Row() { Text('Number of clusters:').width(160).fontSize(13); TextInput({ text: String(this.n_clusters) }).width(80).type(InputType.Number).onChange((v: string) => { const n = parseInt(v) || 3; if (n < 2) { this.errorMsg = 'Need at least 2 clusters'; this.n_clusters = 2; } else if (n > 20) { this.errorMsg = 'Maximum 20 clusters'; this.n_clusters = 20; } else { this.n_clusters = n; this.errorMsg = ''; } }) }.width('100%').margin({ bottom: 4 })
       if (this.errorMsg) { Text(this.errorMsg).fontSize(10).fontColor('#E74C3C').margin({ bottom: 8 }) }
 
       Row() { Text('Linkage method:').width(160).fontSize(13); Select(this.methodOpts.map((v, i) => ({ value: v }))).selected(this.methodIdx).onSelect((idx: number) => { this.methodIdx = idx; }) }.width('100%').margin({ bottom: 4 })

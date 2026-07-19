@@ -19,7 +19,7 @@ export struct NMDSDialog {
       Text('NMDS — Non-metric Multidimensional Scaling').fontSize(18).fontWeight(FontWeight.Bold).margin({ bottom: 8 })
       Text('Robust ordination that preserves rank order of distances.').fontSize(11).fontColor('#7F8C8D').margin({ bottom: 16 })
 
-      Row() { Text('Dimensions:').width(160).fontSize(13); TextInput({ text: String(this.n_dimensions) }).width(80).type(InputType.Number).onChange((v: string) => { const n = parseInt(v) || 2; if (n < 1 || n > 5) { this.errorMsg = 'Dimensions must be 1-5'; } else { this.n_dimensions = n; this.errorMsg = ''; } }) }.width('100%').margin({ bottom: 4 })
+      Row() { Text('Dimensions:').width(160).fontSize(13); TextInput({ text: String(this.n_dimensions) }).width(80).type(InputType.Number).onChange((v: string) => { const n = parseInt(v) || 2; if (n < 1 || n > 5) { this.errorMsg = 'Dimensions must be 1-5'; this.n_dimensions = 2; } else { this.n_dimensions = n; this.errorMsg = ''; } }) }.width('100%').margin({ bottom: 4 })
       if (this.errorMsg) { Text(this.errorMsg).fontSize(10).fontColor('#E74C3C').margin({ bottom: 8 }) }
 
       Row() { Text('Random restarts:').width(160).fontSize(13); TextInput({ text: String(this.n_restarts) }).width(80).type(InputType.Number).onChange((v: string) => { this.n_restarts = Math.max(1, Math.min(50, parseInt(v) || 10)); }) }.width('100%').margin({ bottom: 8 })

@@ -21,9 +21,12 @@ export struct PlotCanvas {
   @State tooltipText: string = '';
   @State mouseX: number = 0;
   @State mouseY: number = 0;
+  @State canvasWidth: number = 800;
+  @State canvasHeight: number = 600;
 
   private plotData: PlotData | null = null;
   private ctx: CanvasRenderingContext2D | null = null;
+  onStatus: (msg: string) => void = (_msg: string) => {};
 
   // Cached coordinate mapping
   private xMin: number = 0;
@@ -61,6 +64,11 @@ export struct PlotCanvas {
         this.redraw();
       })
       .width('100%').layoutWeight(1)
+      .onAreaChange((_: Area, newArea: Area) => {
+        this.canvasWidth = newArea.width as number;
+        this.canvasHeight = newArea.height as number;
+        this.redraw();
+      })
       .onMouseAction((event: MouseEventAction) => {
         this.mouseX = event.x;
         this.mouseY = event.y;
@@ -115,7 +123,8 @@ export struct PlotCanvas {
   }
 
   setHistogramData(data: number[], nBins: number = 30): void {
-    const min = Math.min(...data), max = Math.max(...data);
+    const min = data.reduce((a, b) => Math.min(a, b), Infinity);
+    const max = data.reduce((a, b) => Math.max(a, b), -Infinity);
     const binW = (max - min) / nBins || 1;
     const bins = new Array(nBins).fill(0);
     for (const v of data) { const idx = Math.min(Math.floor((v - min) / binW), nBins - 1); if (idx >= 0) bins[idx]++; }
@@ -143,14 +152,14 @@ export struct PlotCanvas {
 
   private updateRanges(): void {
     if (!this.plotData?.x) return;
-    this.xMin = Math.min(...this.plotData.x);
-    this.xMax = Math.max(...this.plotData.x);
-    this.yMin = Math.min(...this.plotData.y!);
-    this.yMax = Math.max(...this.plotData.y!);
+    this.xMin = this.plotData.x.reduce((a, b) => Math.min(a, b), Infinity);
+    this.xMax = this.plotData.x.reduce((a, b) => Math.max(a, b), -Infinity);
+    this.yMin = this.plotData.y!.reduce((a, b) => Math.min(a, b), Infinity);
+    this.yMax = this.plotData.y!.reduce((a, b) => Math.max(a, b), -Infinity);
   }
 
   private mapX(v: number): number {
-    const w = 800;
+    const w = this.canvasWidth || 800;
     const pw = w - this.margin.left - this.margin.right;
     const xPad = (this.xMax - this.xMin) * 0.1 || 1;
     const range = (this.xMax - this.xMin + 2 * xPad);
@@ -161,13 +170,14 @@ export struct PlotCanvas {
   }
 
   private mapY(v: number): number {
-    const h = 600;
+    const h = this.canvasHeight || 600;
     const ph = h - this.margin.top - this.margin.bottom;
     const yPad = (this.yMax - this.yMin) * 0.1 || 1;
     const range = (this.yMax - this.yMin + 2 * yPad);
+    // Y-axis: higher data values → higher screen position (lower pixel Y)
     const dataY = ((v - this.yMin + yPad) / range) * ph;
     const centerY = ph / 2;
-    return this.margin.top + centerY + (dataY - centerY) * this.zoomLevel + this.panY;
+    return this.margin.top + centerY - (dataY - centerY) * this.zoomLevel + this.panY;
   }
 
   // ─── Rendering ─────────────────────────────────────────────────
@@ -175,7 +185,8 @@ export struct PlotCanvas {
   private redraw(): void {
     if (!this.ctx || !this.plotData) return;
     const ctx = this.ctx;
-    const w = 800, h = 600;
+    const w = this.canvasWidth || 800;
+    const h = this.canvasHeight || 600;
     const pw = w - this.margin.left - this.margin.right;
     const ph = h - this.margin.top - this.margin.bottom;
 
@@ -338,7 +349,7 @@ export struct PlotCanvas {
   private drawBar(ctx: CanvasRenderingContext2D, pw: number, ph: number): void {
     const data = this.plotData!;
     const labels = data.labels!, values = data.values!;
-    const maxVal = Math.max(...values, 1);
+    const maxVal = values.reduce((a, b) => Math.max(a, b), 1);
     const barW = pw / labels.length * 0.7;
     const gap = pw / labels.length * 0.3;
     const colors = ['#3498DB', '#E74C3C', '#27AE60', '#F39C12', '#9B59B6'];
@@ -370,7 +381,8 @@ export struct PlotCanvas {
     const data = this.plotData!;
     const groups = data.groups!;
     const allVals = groups.flatMap(g => g.values);
-    const yMin = Math.min(...allVals), yMax = Math.max(...allVals);
+    const yMin = allVals.reduce((a, b) => Math.min(a, b), Infinity);
+    const yMax = allVals.reduce((a, b) => Math.max(a, b), -Infinity);
     const yPad = (yMax - yMin) * 0.1 || 1;
     const mapY = (v: number) => this.margin.top + ph - ((v - (yMin - yPad)) / ((yMax + yPad) - (yMin - yPad))) * ph;
     const boxW = pw / groups.length * 0.6;

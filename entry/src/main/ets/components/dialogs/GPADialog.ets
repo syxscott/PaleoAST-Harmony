@@ -8,7 +8,7 @@ export struct GPADialog {
   build() {
     Column() {
       Text("GPA").fontSize(18).fontWeight(FontWeight.Bold).margin({ bottom: 16 })
-      Row() { Text("Max iterations:").width(140).fontSize(13); TextInput({ text: String(this.max_iterations) }).width(100).type(InputType.Number).onChange((v: string) => { this.max_iterations = parseInt(v) || 100; }) }.width("100%").margin({ bottom: 8 })
+      Row() { Text("Max iterations:").width(140).fontSize(13); TextInput({ text: String(this.max_iterations) }).width(100).type(InputType.Number).onChange((v: string) => { this.max_iterations = Math.max(10, Math.min(1000, parseInt(v) || 100)); }) }.width("100%").margin({ bottom: 8 })
             Row() { Text("[+] Tips").fontSize(11).fontColor("#3498DB").onClick(() => { this.showTips = !this.showTips; }) }.width("100%").margin({ bottom: 8 })
       if (this.showTips) { Column() {
           Text("Dist < 0.1: converged").fontSize(10).fontColor("#7F8C8D").margin({ bottom: 2 })

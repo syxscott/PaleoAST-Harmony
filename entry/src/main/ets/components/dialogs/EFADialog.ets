@@ -21,8 +21,8 @@ export struct EFADialog {
         TextInput({ text: String(this.n_harmonics) }).width(80).type(InputType.Number)
           .onChange((v: string) => {
             const n = parseInt(v) || 10;
-            if (n < 2) { this.errorMsg = 'Need at least 2 harmonics'; }
-            else if (n > 50) { this.errorMsg = 'Maximum 50 harmonics'; }
+            if (n < 2) { this.errorMsg = 'Need at least 2 harmonics'; this.n_harmonics = 2; }
+            else if (n > 50) { this.errorMsg = 'Maximum 50 harmonics'; this.n_harmonics = 50; }
             else { this.n_harmonics = n; this.errorMsg = ''; }
           })
       }.width('100%').margin({ bottom: 4 })

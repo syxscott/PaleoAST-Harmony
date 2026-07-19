@@ -115,7 +115,7 @@ function _computeK(pts: number[][], rValues: number[], area: number): number[] {
         if (dx * dx + dy * dy < r * r) count++;
       }
     }
-    out.push(n > 1 ? (area * 2 * count) / (n * n) : 0);
+    out.push(n > 1 ? (area * count) / (n * (n - 1)) : 0); // Fixed: removed erroneous factor of 2
   }
   return out;
 }

@@ -108,11 +108,13 @@ export struct NavigationTree {
   }
 
   private toggleSection(name: string): void {
-    if (this.expandedSections.has(name)) {
-      this.expandedSections.delete(name);
+    const newSet = new Set(this.expandedSections);
+    if (newSet.has(name)) {
+      newSet.delete(name);
     } else {
-      this.expandedSections.add(name);
+      newSet.add(name);
     }
+    this.expandedSections = newSet;
   }
 
   private getFilteredSections(): NavSection[] {
