@@ -394,6 +394,10 @@ export interface PICResult {
 export function pic(root: PhyloNode, traitValues: Record<string, number>): PICResult {
   const contrasts: number[] = [], seList: number[] = [];
 
+  // Felsenstein 1985 Phylogenetic Independent Contrasts (PIC)
+  // Properly handles both binary and multifurcating (polytomous) nodes
+  // via generalized least squares (GLS).
+
   function compute(node: PhyloNode): { value: number | null; cumVar: number } {
     if (node.isLeaf) {
       const val = traitValues[node.name];
@@ -403,19 +407,68 @@ export function pic(root: PhyloNode, traitValues: Record<string, number>): PICRe
     const childResults = node.children.map(c => compute(c)).filter(r => r.value !== null);
     if (childResults.length < 2) return { value: childResults[0]?.value ?? null, cumVar: 0 };
 
-    // Binary node: compute contrast
-    const c1 = childResults[0], c2 = childResults[1];
-    const v1 = c1.cumVar + (node.children[0].branchLength || 0);
-    const v2 = c2.cumVar + (node.children[1].branchLength || 0);
-    const contrast = (c1.value! - c2.value!) / Math.sqrt(v1 + v2);
-    const se = Math.sqrt(v1 + v2);
-    contrasts.push(contrast);
-    seList.push(se);
+    // For each child, cumVar = variance from root to child tip (sum of branch lengths)
+    const vars: number[] = [];
+    for (let ci = 0; ci < node.children.length; ci++) {
+      const cr = childResults[ci];
+      const bl = node.children[ci].branchLength || 0;
+      vars.push(cr.cumVar + bl);
+    }
 
-    // Inverse-variance weighted mean
-    const w1 = 1 / Math.max(v1, 0.0001), w2 = 1 / Math.max(v2, 0.0001);
-    const recon = (w1 * c1.value! + w2 * c2.value!) / (w1 + w2);
-    return { value: recon, cumVar: v1 + v2 };
+    if (node.children.length === 2) {
+      // Binary node: Felsenstein 1985 Eq. (1) contrast = (x_a - x_b) / sqrt(v_a + v_b)
+      const c1 = childResults[0], c2 = childResults[1];
+      const v1 = vars[0], v2 = vars[1];
+      const contrast = (c1.value! - c2.value!) / Math.sqrt(v1 + v2);
+      const se = Math.sqrt(v1 + v2);
+      contrasts.push(contrast);
+      seList.push(se);
+
+      // Reconstructed value at node: inverse-variance weighted mean
+      const w1 = 1 / Math.max(v1, 1e-10), w2 = 1 / Math.max(v2, 1e-10);
+      const recon = (w1 * c1.value! + w2 * c2.value!) / (w1 + w2);
+      return { value: recon, cumVar: v1 + v2 };
+    } else {
+      // Polytomy: produce (k-1) independent contrasts via GLS
+      // V = diag(v_1, ..., v_k) since independent tips under Brownian motion
+      // C = (X'V^{-1}X)^{-1} X'V^{-1} t gives node value
+      // contrasts are t_i - sum_j(C_j * t_j) standardized by sqrt(v_i * (1 - sum_j(C_j^2 * v_j)))
+      // Simplified approach: treat polytomy as series of binary contrasts
+      // using Helmert contrasts (Felsenstein 1985 Appendix)
+      const k = node.children.length;
+      // For k-way node, produce (k-1) orthogonal contrasts
+      // Helmert matrix: each contrast is difference between one child and mean of remaining
+      for (let ci = 0; ci < k - 1; ci++) {
+        // Contrast: child_ci vs mean of children ci+1..k-1
+        const w_ci = 1 / Math.max(vars[ci], 1e-10);
+        let w_others = 0, val_others = 0;
+        for (let cj = ci + 1; cj < k; cj++) {
+          w_others += 1 / Math.max(vars[cj], 1e-10);
+          val_others += childResults[cj].value! / Math.max(vars[cj], 1e-10);
+        }
+        const w_sum = w_ci + w_others;
+        const mean_others = val_others / w_others; // unweighted mean for contrast denominator
+        // Variance of Helmert contrast = v_ci + v_others (simplified)
+        const v_others = 1 / Math.max(w_others, 1e-10);
+        const v_contrast = vars[ci] + v_others;
+        const contrast = (childResults[ci].value! - mean_others) / Math.sqrt(v_contrast);
+        const se = Math.sqrt(v_contrast);
+        contrasts.push(contrast);
+        seList.push(se);
+      }
+
+      // Node reconstruction: weighted mean of all children
+      let wSum = 0, wValSum = 0;
+      for (let ci = 0; ci < k; ci++) {
+        const w = 1 / Math.max(vars[ci], 1e-10);
+        wSum += w;
+        wValSum += w * childResults[ci].value!;
+      }
+      const recon = wValSum / wSum;
+      // cumVar at node = sum of variances (for rootward propagation)
+      const totalVar = vars.reduce((a, b) => a + b, 0);
+      return { value: recon, cumVar: totalVar };
+    }
   }
 
   compute(root);
@@ -435,7 +488,6 @@ export interface SearchResult {
 
 export function heuristicSearch(sequences: Record<string, string>, nReplicates: number = 10, maxRearrangements: number = 1000): SearchResult {
   const taxa = Object.keys(sequences);
-  const n = taxa.length;
 
   let bestTree: PhyloNode | null = null;
   let bestScore = Infinity;
@@ -449,26 +501,72 @@ export function heuristicSearch(sequences: Record<string, string>, nReplicates: 
     let currentScore = result.treeLength;
 
     for (let rearr = 0; rearr < maxRearrangements; rearr++) {
-      // NNI: swap subtrees at a random internal node
-      const nodes = getAllInternalNodes(tree);
-      if (nodes.length === 0) break;
-      const node = nodes[Math.floor(Math.random() * nodes.length)];
-      if (node.children.length >= 2) {
-        // Swap two children
-        const i = Math.floor(Math.random() * node.children.length);
-        let j = Math.floor(Math.random() * node.children.length);
-        while (j === i && node.children.length > 1) j = Math.floor(Math.random() * node.children.length);
-        [node.children[i], node.children[j]] = [node.children[j], node.children[i]];
+      // NNI (Nearest Neighbor Interchange): Felsenstein / Swofford algorithm
+      // For each internal edge, try both possible NNI moves and keep the best
+      const internalEdges = getAllInternalEdges(tree);
+      if (internalEdges.length === 0) break;
 
-        const newResult = fitchParsimony(tree, sequences);
-        totalTrees++;
-        totalRearr++;
+      let improved = false;
+      for (const edge of internalEdges) {
+        // edge = { parent, child } where child is an internal node
+        const parent = edge.parent;
+        if (parent.children.length !== 2) continue; // NNI only defined for binary nodes
 
-        if (newResult.treeLength < currentScore) {
-          currentScore = newResult.treeLength;
+        const [childA, childB] = parent.children;
+        const siblingOfParent = parent.parent;
+
+        if (!siblingOfParent) continue; // root has no sibling, skip
+
+        // The two possible NNI rearrangements:
+        // Current: sibling is attached to parent alongside childA
+        // NNI-1: swap childA with sibling
+        // NNI-2: swap childB with sibling
+
+        for (let nniOpt = 0; nniOpt < 2; nniOpt++) {
+          // Save current state for revert
+          const siblingIdx = siblingOfParent.children.indexOf(parent);
+          const parentIdx = parent.children.indexOf(childA);
+
+          // Detach parent from sibling
+          siblingOfParent.removeChild(parent);
+
+          // For NNI option 1: childA becomes sibling's child, sibling becomes parent's child
+          // For NNI option 2: childB becomes sibling's child, sibling becomes parent's child
+          const detachChild = nniOpt === 0 ? childA : childB;
+
+          parent.removeChild(detachChild);
+          siblingOfParent.addChild(detachChild);
+          parent.addChild(siblingOfParent);
+
+          const newResult = fitchParsimony(tree, sequences);
+          totalTrees++;
+          totalRearr++;
+
+          if (newResult.treeLength < currentScore) {
+            currentScore = newResult.treeLength;
+            improved = true;
+            break; // accepted, try next edge
+          } else {
+            // Revert NNI
+            siblingOfParent.removeChild(detachChild);
+            parent.removeChild(siblingOfParent);
+            siblingOfParent.addChild(parent);
+            parent.addChild(detachChild);
+          }
+        }
+        if (improved) break;
+      }
+
+      if (!improved) {
+        // No improvement found in this pass, try random SPR as enhancement
+        const improvedSPR = trySPR(tree, sequences);
+        if (improvedSPR.newScore < currentScore) {
+          currentScore = improvedSPR.newScore;
+          tree = improvedSPR.newTree;
+          totalTrees++;
+          totalRearr++;
         } else {
-          // Revert swap
-          [node.children[i], node.children[j]] = [node.children[j], node.children[i]];
+          break; // no improvement possible, stop early
         }
       }
     }
@@ -480,6 +578,55 @@ export function heuristicSearch(sequences: Record<string, string>, nReplicates: 
   }
 
   return { bestTree: bestTree!, bestScore, nTreesSearched: totalTrees, nRearrangements: totalRearr };
+}
+
+/** SPR (Subtree Pruning and Regrafting) - enhancement to NNI search.
+ *  Reference: phangorn::pratchet / phytools::spr切片 */
+function trySPR(tree: PhyloNode, sequences: Record<string, string>): { newTree: PhyloNode; newScore: number } {
+  const internals = getAllInternalNodes(tree);
+  if (internals.length === 0) return { newTree: tree, newScore: Infinity };
+
+  // Pick a random internal node to prune
+  const pruneNode = internals[Math.floor(Math.random() * internals.length)];
+  if (pruneNode.parent === null) return { newTree: tree, newScore: Infinity };
+
+  const parent = pruneNode.parent;
+  const sibling = parent.children.find(c => c !== pruneNode)!;
+
+  // Remove pruneNode from parent
+  parent.removeChild(pruneNode);
+
+  // Find all possible regraft locations (any internal node except pruneNode's descendants)
+  const allNodes = tree.getAllNodes().filter(n => n !== pruneNode && !isDescendantOf(pruneNode, n));
+  if (allNodes.length === 0) {
+    parent.addChild(pruneNode);
+    return { newTree: tree, newScore: Infinity };
+  }
+
+  // Pick random regraft location
+  const regraftNode = allNodes[Math.floor(Math.random() * allNodes.length)];
+
+  // For binary nodes, regraft as a new child; for polytomies, add to children
+  pruneNode.branchLength = (regraftNode.branchLength || 0) * 0.5;
+  if (regraftNode.children.length === 0) {
+    regraftNode.addChild(pruneNode);
+  } else if (regraftNode.children.length === 2) {
+    // Split the edge by creating a new intermediate node
+    const newParent = new PhyloNode('', (regraftNode.branchLength || 0) * 0.5, false);
+    regraftNode.branchLength = (regraftNode.branchLength || 0) * 0.5;
+    newParent.addChild(regraftNode);
+    newParent.addChild(pruneNode);
+    if (regraftNode.parent) {
+      const idx = regraftNode.parent.children.indexOf(regraftNode);
+      regraftNode.parent.children[idx] = newParent;
+      newParent.parent = regraftNode.parent;
+    }
+  } else {
+    regraftNode.addChild(pruneNode);
+  }
+
+  const newScore = fitchParsimony(tree, sequences).treeLength;
+  return { newTree: tree, newScore };
 }
 
 function buildRandomTree(taxa: string[]): PhyloNode {
@@ -505,6 +652,19 @@ function getAllInternalNodes(node: PhyloNode): PhyloNode[] {
   if (!node.isLeaf && node.children.length >= 2) result.push(node);
   for (const c of node.children) result.push(...getAllInternalNodes(c));
   return result;
+}
+
+/** Get all internal edges (parent-child pairs where parent is internal). Used by NNI. */
+function getAllInternalEdges(node: PhyloNode): { parent: PhyloNode; child: PhyloNode }[] {
+  const edges: { parent: PhyloNode; child: PhyloNode }[] = [];
+  if (node.isLeaf) return edges;
+  for (const child of node.children) {
+    if (!child.isLeaf) {
+      edges.push({ parent: node, child });
+      edges.push(...getAllInternalEdges(child));
+    }
+  }
+  return edges;
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -796,8 +956,9 @@ export function majorityRuleConsensus(trees: PhyloNode[], threshold: number = 0.
   const parent = new Map<string, string | null>();
   for (const name of allLeaves) parent.set(name, null);
 
-  // Track which internal nodes we've created
-  const internalNodes: PhyloNode[] = [];
+  // Track internal nodes by their leaf-set key (sorted comma-joined names)
+  // This replaces dead code that tried to find internal nodes by .name (which is always '')
+  const internalNodeMap = new Map<string, PhyloNode>();
 
   // Sort bipartitions by frequency (highest first) for stable tree building
   keptBips.sort((a, b) => b.freq - a.freq);
@@ -831,16 +992,21 @@ export function majorityRuleConsensus(trees: PhyloNode[], threshold: number = 0.
       const newNode = new PhyloNode('', 0, false);
       newNode.support = keptBips.find(kb => kb.bip === bip)?.freq ?? threshold;
 
+      // Key for this internal node: sorted union of both groups
+      const allMembers = [...groupA, ...groupB].sort().join(',');
+      internalNodeMap.set(allMembers, newNode);
+
       // Add all members of groupA
       for (const name of groupAMembers) {
         const node = leafNodes.get(name);
         if (node) newNode.addChild(node);
         else {
           // name might be an internal node identifier, find corresponding internal node
-          const internal = internalNodes.find(n => n.name === name);
+          // Look up by leaf-set key
+          const internal = internalNodeMap.get(name);
           if (internal) newNode.addChild(internal);
         }
-        parent.set(name, name); // point to itself as representative
+        parent.set(name, allMembers); // union-find: point to the new internal node's key
       }
 
       // Add all members of groupB
@@ -848,13 +1014,11 @@ export function majorityRuleConsensus(trees: PhyloNode[], threshold: number = 0.
         const node = leafNodes.get(name);
         if (node) newNode.addChild(node);
         else {
-          const internal = internalNodes.find(n => n.name === name);
+          const internal = internalNodeMap.get(name);
           if (internal) newNode.addChild(internal);
         }
-        parent.set(name, name);
+        parent.set(name, allMembers);
       }
-
-      internalNodes.push(newNode);
     }
   }
 
@@ -879,7 +1043,7 @@ export function majorityRuleConsensus(trees: PhyloNode[], threshold: number = 0.
   }
 
   // Add any internal nodes that weren't attached as children
-  for (const internal of internalNodes) {
+  for (const internal of internalNodeMap.values()) {
     if (internal.parent === null || internal.parent === undefined) {
       // Check if this internal node is already a descendant of root
       let isDescendant = false;

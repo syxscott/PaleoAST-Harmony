@@ -9,6 +9,7 @@
  */
 import { Matrix } from '../../math/Matrix';
 import * as linalg from '../../math/linalg';
+import { seed, rand, randint } from '../../math/random';
 
 export interface PLSResult {
   singularValues: number[];
@@ -18,6 +19,7 @@ export interface PLSResult {
   pValue: number;                // permutation p-value
   correlation: number[];         // correlation of each LV pair
   nPermutations: number;
+  alternative: 'two-sided' | 'greater' | 'less';
 }
 
 /**
@@ -27,12 +29,16 @@ export interface PLSResult {
  * @param blockB         (n_obs, q) block B
  * @param nComponents    number of LV pairs (default min(p, q))
  * @param nPermutations  permutation iterations for p-value
+ * @param alternative    'two-sided' (default), 'greater', or 'less' for p-value
+ * @param rngSeed        seed for reproducible permutations (default 42)
  */
 export function plsIntegration(
   blockA: Matrix | number[][],
   blockB: Matrix | number[][],
   nComponents?: number,
-  nPermutations: number = 999
+  nPermutations: number = 999,
+  alternative: 'two-sided' | 'greater' | 'less' = 'two-sided',
+  rngSeed: number = 42
 ): PLSResult {
   const A = blockA instanceof Matrix ? blockA : _matrixFromArray(blockA);
   const B = blockB instanceof Matrix ? blockB : _matrixFromArray(blockB);
@@ -80,12 +86,12 @@ export function plsIntegration(
   }
 
   // Permutation test
-  let count = 0;
-  const rng = _rng(42);
+  let countGreater = 0, countLess = 0;
+  seed(rngSeed);
   for (let p = 0; p < nPermutations; p++) {
     const perm = new Array(Ac.rows).fill(0).map((_, i) => i);
     for (let i = perm.length - 1; i > 0; i--) {
-      const j = Math.floor(rng() * (i + 1));
+      const j = randint(0, i + 1);
       [perm[i], perm[j]] = [perm[j], perm[i]];
     }
     const Ap = new Matrix(new Float64Array(Ac.length * A.cols), Ac.length, A.cols);
@@ -97,11 +103,20 @@ export function plsIntegration(
     const Cp = Ap.transpose().matmul(Bp).div(Math.max(1, A.rows - 1));
     let tr = 0;
     for (let ii = 0; ii < Cp.rows; ii++) for (let jj = 0; jj < Cp.cols; jj++) tr += Cp.get(ii, jj) * Cp.get(ii, jj);
-    if (tr >= trCabCba) count++;
+    if (tr >= trCabCba) countGreater++;
+    if (tr <= trCabCba) countLess++;
   }
-  const pValue = (count + 1) / (nPermutations + 1);
+  // Compute p-value per alternative hypothesis
+  let pValue: number;
+  if (alternative === 'greater') pValue = (countGreater + 1) / (nPermutations + 1);
+  else if (alternative === 'less') pValue = (countLess + 1) / (nPermutations + 1);
+  else {
+    // Two-sided: count deviations as extreme in either tail
+    const twoSidedCount = Math.min(countGreater, countLess);
+    pValue = (twoSidedCount * 2 + 1) / (nPermutations + 1);
+  }
 
-  return { singularValues: sv, LVa, LVb, integrationIndex: RV, pValue, correlation: corr, nPermutations };
+  return { singularValues: sv, LVa, LVb, integrationIndex: RV, pValue, correlation: corr, nPermutations, alternative };
 }
 
 // ─── helpers ───────────────────────────────────────────────────────────────────
@@ -140,12 +155,4 @@ function _sliceVTColumns(Vt: Matrix, k: number): Matrix {
     for (let j = 0; j < rows; j++)
       d[i * rows + j] = Vt.data[j * Vt.cols + i];
   return new Matrix(d, Vt.cols, rows);
-}
-
-function _rng(seed: number): () => number {
-  let s = seed | 1;
-  return () => {
-    s = (s * 9301 + 49297) % 233280;
-    return s / 233280;
-  };
 }

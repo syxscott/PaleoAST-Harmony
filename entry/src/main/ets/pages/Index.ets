@@ -17,6 +17,7 @@ import { ExtinctionDialog } from '../components/dialogs/ExtinctionDialog';
 import { EFADialog } from '../components/dialogs/EFADialog';
 import { ImportDialog } from '../components/dialogs/ImportDialog';
 import { ExportDialog } from '../components/dialogs/ExportDialog';
+import { taskpool } from '@kit.ArkTS';
 
 // ─── 鸿蒙特有样式定义 ──────────────────────────────────────────
 
@@ -101,7 +102,7 @@ struct Index {
   @StorageLink('darkMode') darkMode: boolean = false;
 
   // StateManager singleton stored in AppStorage for reactive UI updates
-  @StorageLink('stateMgr') stateMgr: StateManager = StateManager.getInstance();
+  @StorageLink('stateMgr') stateMgr: StateManager | null = StateManager.getInstance();
   private dataCtrl = new DataController();
   private statCtrl = new StatisticsController();
 
@@ -485,82 +486,100 @@ struct Index {
     } catch (e) { this.statusText = 'Export error: ' + e; }
   }
 
-  private runAnalysisWithParams(name: string, params: Record<string, Object>): void {
+  private async runAnalysisWithParams(name: string, params: Record<string, Object>): Promise<void> {
     this.isLoading = true;
     this.statusText = 'Running: ' + name + '...';
     try {
-      if (!this.stateMgr.dataMatrix) { throw new Error('No data loaded'); }
+      if (!this.stateMgr?.dataMatrix) { throw new Error('No data loaded'); }
       const data = this.stateMgr.dataMatrix.data;
       let result: any;
 
+      // Use taskpool for heavy computations to avoid blocking UI thread
+      const task = taskpool.execute(() => {
+        switch (name) {
+          case 'PCA':
+            return this.statCtrl.runPCA(
+              params['nComponents'] as number ?? 3,
+              params['method'] as string ?? 'covariance'
+            );
+          case 'PCoA':
+            return this.statCtrl.runPCoA(
+              params['metric'] as string ?? 'bray_curtis',
+              params['n_components'] as number ?? 10
+            );
+          case 'NMDS':
+            return this.statCtrl.runNMDS(
+              params['metric'] as string ?? 'bray_curtis',
+              params['n_dimensions'] as number ?? 2,
+              params['max_iterations'] as number ?? 300,
+              params['n_restarts'] as number ?? 10
+            );
+          case 'Clustering':
+            return this.statCtrl.runClustering(
+              params['n_clusters'] as number ?? 3,
+              params['method'] as string ?? 'ward',
+              params['metric'] as string ?? 'euclidean'
+            );
+          case 'CONISS':
+            return this.statCtrl.runCONISS(params['n_zones'] as number ?? 4);
+          case 'NullModel':
+            return this.statCtrl.runNullModel(
+              params['metric'] as string ?? 'c_score',
+              params['n_permutations'] as number ?? 999
+            );
+          case 'Extinction':
+            return this.statCtrl.runExtinctionCI(
+              params['method'] as string ?? 'marshall',
+              params['confidence_level'] as number ?? 0.95
+            );
+          case 'EFA':
+            return this.statCtrl.runEFA(
+              params['n_harmonics'] as number ?? 10,
+              params['n_points'] as number ?? 200
+            );
+          default:
+            return null;
+        }
+      });
+
+      result = await task;
+
       switch (name) {
         case 'PCA':
-          result = this.statCtrl.runPCA(
-            params['nComponents'] as number ?? 3,
-            params['method'] as string ?? 'covariance'
-          );
           this.plotDataX = result.scores.col(0);
           this.plotDataY = result.scores.col(1);
           this.plotTitle = 'PCA Score Plot';
           this.plotType = 'scatter';
           break;
         case 'PCoA':
-          result = this.statCtrl.runPCoA(
-            params['metric'] as string ?? 'bray_curtis',
-            params['n_components'] as number ?? 10
-          );
           this.plotDataX = result.coordinates.col(0);
           this.plotDataY = result.coordinates.col(1);
           this.plotTitle = 'PCoA Plot';
           this.plotType = 'scatter';
           break;
         case 'NMDS':
-          result = this.statCtrl.runNMDS(
-            params['metric'] as string ?? 'bray_curtis',
-            params['n_dimensions'] as number ?? 2,
-            params['max_iterations'] as number ?? 300,
-            params['n_restarts'] as number ?? 10
-          );
           this.plotDataX = result.coordinates.col(0);
           this.plotDataY = result.coordinates.col(1);
           this.plotTitle = 'NMDS Plot (stress=' + result.stress.toFixed(3) + ')';
           this.plotType = 'scatter';
           break;
         case 'Clustering':
-          result = this.statCtrl.runClustering(
-            params['n_clusters'] as number ?? 3,
-            params['method'] as string ?? 'ward',
-            params['metric'] as string ?? 'euclidean'
-          );
           this.plotTitle = 'Clustering Dendrogram';
           this.plotType = 'dendrogram';
           break;
         case 'CONISS':
-          result = this.statCtrl.runCONISS(params['n_zones'] as number ?? 4);
           this.plotTitle = 'CONISS Dendrogram';
           this.plotType = 'dendrogram';
           break;
         case 'NullModel':
-          result = this.statCtrl.runNullModel(
-            params['metric'] as string ?? 'c_score',
-            params['n_permutations'] as number ?? 999
-          );
           this.plotTitle = 'Null Model (SES=' + result.ses.toFixed(2) + ')';
           this.plotType = 'histogram';
           break;
         case 'Extinction':
-          result = this.statCtrl.runExtinctionCI(
-            params['method'] as string ?? 'marshall',
-            params['confidence_level'] as number ?? 0.95
-          );
           this.plotTitle = 'Extinction CI';
           this.plotType = 'range';
           break;
         case 'EFA':
-          result = this.statCtrl.runEFA(
-            params['n_harmonics'] as number ?? 10,
-            params['n_points'] as number ?? 200
-          );
           this.plotTitle = 'EFA Contours';
           this.plotType = 'line';
           break;
@@ -574,7 +593,7 @@ struct Index {
     this.isLoading = false;
   }
 
-  private handleAnalysis(name: string): void {
+  private async handleAnalysis(name: string): Promise<void> {
     if (!this.hasData) { this.statusText = 'Please load data first'; return; }
 
     switch (name) {
@@ -586,110 +605,139 @@ struct Index {
       case 'Null Models': this.showNullModelDialog = true; return;
       case 'Extinction CI': this.showExtinctionDialog = true; return;
       case 'EFA': this.showEFADialog = true; return;
-      case 'Eigenshape': this.showEFADialog = true; return;
+      case 'Eigenshape': this.statusText = 'Eigenshape: use EFA dialog first to generate coefficients'; return;
     }
 
     this.statusText = 'Running: ' + name + '...';
+    this.isLoading = true;
     try {
-      if (!this.stateMgr.dataMatrix) { throw new Error('No data loaded'); }
+      if (!this.stateMgr?.dataMatrix) { throw new Error('No data loaded'); }
       const data = this.stateMgr.dataMatrix.data;
       const groups = this.stateMgr.dataMatrix.getGroups();
       let result: any;
 
+      // Helper to check empty columns
+      const safeCol = (colIdx: number): number[] => {
+        const c = data.col(colIdx);
+        return c.length === 0 ? [0] : c; // Return [0] as fallback for empty columns
+      };
+
+      // Use taskpool for heavy computations
+      const task = taskpool.execute(() => {
+        switch (name) {
+          case 'LDA': return this.statCtrl.runLDA(groups ?? []);
+          case 'CCA': return this.statCtrl.runCCA(data, data);
+          case 'Summary': return this.statCtrl.runSummary();
+          case 'Normality': return this.statCtrl.runNormalityTest(0);
+          case 't-test': return this.statCtrl.runTTest(safeCol(0), safeCol(1));
+          case 'ANOVA': return this.statCtrl.runANOVA([safeCol(0), safeCol(1)]);
+          case 'Kruskal-Wallis': return this.statCtrl.runKruskal([safeCol(0), safeCol(1)]);
+          case 'Diversity Indices':
+            return this.statCtrl.runDiversity(data.row(0));
+          case 'Rarefaction':
+            return this.statCtrl.runRarefaction(data.row(0));
+          case 'SHE Analysis': return this.statCtrl.runSHE();
+          case 'Clustering': return this.statCtrl.runClustering(3);
+          case 'ANOSIM': return this.statCtrl.runANOSIM(groups ?? []);
+          case 'PERMANOVA': return this.statCtrl.runPERMANOVA(groups ?? []);
+          case 'SIMPER': return this.statCtrl.runSIMPER(groups ?? []);
+          case 'GPA': return this.statCtrl.runGPA();
+          case 'TPS Grid': return this.statCtrl.runGPA();
+          case 'Allometry': return this.statCtrl.runAllometry();
+          case 'Evolution Rate': return this.statCtrl.runEvoRate();
+          case 'Spectral':
+            return this.statCtrl.runSpectral();
+          case 'Markov': return this.statCtrl.runMarkov();
+          case 'Directional': return this.statCtrl.runDirectional();
+          case 'Wavelet': return this.statCtrl.runWavelet();
+          case 'Isotope': return this.statCtrl.runIsotope();
+          case 'Stratigraphic Correlation': return this.statCtrl.runSpectral();
+          case 'Biostratigraphy': return this.statCtrl.runSpectral();
+          case 'Paleo-Environment': return this.statCtrl.runPaleoEnv();
+          case 'Fitch Parsimony': return this.statCtrl.runSummary();
+          case 'PIC': return this.statCtrl.runSummary();
+          case 'Phylo Signal': return this.statCtrl.runSummary();
+          case 'Phylo ANOVA': return this.statCtrl.runSummary();
+          case 'Cohort Survival': return this.statCtrl.runSummary();
+          case 'Diversity Dynamics': return this.statCtrl.runSummary();
+          case 'FBD Process':
+            return this.statCtrl.runFBD(0.5, 0.2, 0.1, 10);
+          case 'Beta Diversity': return this.statCtrl.runBetaDiv();
+          case 'Mann-Whitney U': {
+            const g1 = safeCol(0), g2 = safeCol(1);
+            if (g1.length === 0 || g2.length === 0) {
+              return { U: 0, p: 1, warning: 'Empty column(s)' };
+            }
+            return this.statCtrl.runMannWhitney(g1, g2);
+          }
+          case 'PLS Integration':
+            return null;
+          case 'Relative Warps': return this.statCtrl.runRelativeWarps();
+          case 'Morphospace Disparity': return this.statCtrl.runMorphospaceDisparity();
+          case 'Convex Hull': return this.statCtrl.runConvexHull(data.to2D());
+          case 'Minimum Spanning Tree': return this.statCtrl.runMST();
+          case 'Coverage Rarefaction': return this.statCtrl.runCoverageRarefaction();
+          case 'Abundance Models': return this.statCtrl.runAbundanceModels();
+          case 'Compute Correlation': return this.statCtrl.runComputeCorrelation(safeCol(0), safeCol(1));
+          case 'Centroid Configuration Blocks': return this.statCtrl.runDivideBlocks('anterior_posterior');
+          case 'LOWESS Smooth': return this.statCtrl.runLowess(safeCol(0), safeCol(1));
+          case 'Polynomial Trend': return this.statCtrl.runPolynomialTrend(safeCol(0), safeCol(1));
+          case 'Remove Outliers': return this.statCtrl.runRemoveOutliers(safeCol(0));
+          case 'Cross Validate': return this.statCtrl.runCrossValidate(safeCol(0), safeCol(1));
+          case 'Detect Excursions': return this.statCtrl.runDetectExcursions(safeCol(0), safeCol(1));
+          case 'Filter Endemic': return this.statCtrl.runFilterEndemic(data.to2D());
+          case 'Build ARMA': return this.statCtrl.runBuildARMA(safeCol(0));
+          case 'ARMA Predict': return this.statCtrl.runARMAPredict(safeCol(0), 5);
+          case 'Kaplan-Meier': return this.statCtrl.runKaplanMeier(safeCol(0), safeCol(0).map(_ => 1));
+          case 'Neutral Simulation': return this.statCtrl.runSimulateNeutral(100, 10);
+          case 'Equilibrium Test': return this.statCtrl.runTestEquilibrium(0.5, 0.4);
+          case 'Exponential Fit': return this.statCtrl.runFitExponential(safeCol(0), safeCol(1));
+          case 'Logistic Fit': return this.statCtrl.runFitLogistic(safeCol(0), safeCol(1));
+          default: return null;
+        }
+      });
+
+      result = await task;
+
+      // Post-process results and update UI on main thread
       switch (name) {
-        case 'LDA': result = this.statCtrl.runLDA(groups ?? []); break;
-        case 'CCA': result = this.statCtrl.runCCA(data, data); break;
-        case 'Summary': result = this.statCtrl.runSummary(); break;
-        case 'Normality': result = this.statCtrl.runNormalityTest(0); break;
-        case 't-test': result = this.statCtrl.runTTest(data.col(0), data.col(1)); break;
-        case 'ANOVA': result = this.statCtrl.runANOVA([data.col(0), data.col(1)]); break;
-        case 'Kruskal-Wallis': result = this.statCtrl.runKruskal([data.col(0), data.col(1)]); break;
         case 'Diversity Indices':
-          result = this.statCtrl.runDiversity(data.row(0));
           this.plotTitle = 'Diversity: S=' + result.richness + ' H=' + result.shannon.toFixed(2);
           this.plotType = 'bar';
           break;
         case 'Rarefaction':
-          result = this.statCtrl.runRarefaction(data.row(0));
           this.plotDataX = result.sampleSizes;
           this.plotDataY = result.expectedTaxa;
           this.plotTitle = 'Rarefaction Curve';
           this.plotType = 'line';
           break;
-        case 'SHE Analysis': result = this.statCtrl.runSHE(); break;
-        case 'Clustering': result = this.statCtrl.runClustering(3); break;
-        case 'ANOSIM': result = this.statCtrl.runANOSIM(groups ?? []); break;
-        case 'PERMANOVA': result = this.statCtrl.runPERMANOVA(groups ?? []); break;
-        case 'SIMPER': result = this.statCtrl.runSIMPER(groups ?? []); break;
-        case 'GPA': result = this.statCtrl.runGPA(); break;
-        case 'TPS Grid': result = this.statCtrl.runGPA(); break;
-        case 'Allometry': result = this.statCtrl.runAllometry(); break;
-        case 'Evolution Rate': result = this.statCtrl.runEvoRate(); break;
         case 'Spectral':
-          result = this.statCtrl.runSpectral();
           this.plotDataX = result.periods;
           this.plotDataY = result.power;
           this.plotTitle = 'Spectral (peak=' + result.peakPeriod.toFixed(2) + ')';
           this.plotType = 'line';
           break;
-        case 'Markov': result = this.statCtrl.runMarkov(); break;
-        case 'Directional': result = this.statCtrl.runDirectional(); break;
-        case 'Wavelet': result = this.statCtrl.runWavelet(); break;
-        case 'Isotope': result = this.statCtrl.runIsotope(); break;
-        case 'Stratigraphic Correlation': result = this.statCtrl.runSpectral(); break;
-        case 'Biostratigraphy': result = this.statCtrl.runSpectral(); break;
-        case 'Paleo-Environment': result = this.statCtrl.runPaleoEnv(); break;
-        case 'Fitch Parsimony': this.statusText = 'Fitch: needs Newick tree + sequences'; result = this.statCtrl.runSummary(); break;
-        case 'PIC': this.statusText = 'PIC: needs Newick tree + traits'; result = this.statCtrl.runSummary(); break;
-        case 'Phylo Signal': this.statusText = 'Phylo Signal: needs tree + traits'; result = this.statCtrl.runSummary(); break;
-        case 'Phylo ANOVA': this.statusText = 'Phylo ANOVA: needs tree + traits + groups'; result = this.statCtrl.runSummary(); break;
-        case 'Cohort Survival': this.statusText = 'Cohort: needs fossil record intervals'; result = this.statCtrl.runSummary(); break;
-        case 'Diversity Dynamics': this.statusText = 'Diversity: needs fossil record intervals'; result = this.statCtrl.runSummary(); break;
         case 'FBD Process':
-          result = this.statCtrl.runFBD(0.5, 0.2, 0.1, 10);
           this.plotTitle = 'FBD Diversity Curve';
           this.plotType = 'line';
           break;
-        case 'Beta Diversity': result = this.statCtrl.runBetaDiv(); break;
-        case 'Null Model': this.showNullModelDialog = true; return;
-        case 'Import': this.showImportDialog = true; return;
-        case 'Export': this.showExportDialog = true; return;
-        // ─── Newly ported analyses ──────────────────────────────────────────
-        case 'Mann-Whitney U': result = this.statCtrl.runMannWhitney(data.col(0), data.col(1)); break;
+        case 'Mann-Whitney U':
+          this.plotTitle = 'Mann-Whitney U: U=' + result.U.toFixed(2) + ' p=' + result.p.toFixed(4);
+          this.plotType = 'bar';
+          break;
         case 'PLS Integration':
           this.statusText = 'PLS Integration: 2 blocks required (use Import or Dialog)';
           break;
-        case 'Relative Warps': result = this.statCtrl.runRelativeWarps(); break;
-        case 'Morphospace Disparity': result = this.statCtrl.runMorphospaceDisparity(); break;
-        case 'Convex Hull': result = this.statCtrl.runConvexHull(data.to2D()); break;
-        case 'Minimum Spanning Tree': result = this.statCtrl.runMST(); break;
         case 'Ripley K': this.statusText = 'Ripley K: needs 2D coordinate data'; break;
-        case 'Coverage Rarefaction': result = this.statCtrl.runCoverageRarefaction(); break;
-        case 'Abundance Models': result = this.statCtrl.runAbundanceModels(); break;
         case 'DTW': this.statusText = 'DTW: needs 2 sequences'; break;
-        case 'Compute Correlation': result = this.statCtrl.runComputeCorrelation(data.col(0), data.col(1)); break;
-        case 'Centroid Configuration Blocks': result = this.statCtrl.runDivideBlocks('anterior_posterior'); break;
         case 'TPS Analyzer': this.statusText = 'TPS Analyzer: needs (source, target) landmarks'; break;
         case 'Unitary Associations': this.statusText = 'UA: needs FAD/LAD matrices'; break;
         case 'RASC Ranking': this.statusText = 'RASC: needs event distance matrix'; break;
         case 'Age Model': this.statusText = 'Age Model: needs age constraints'; break;
         case 'Sedimentation Rate': this.statusText = 'Sed Rate: needs section with ages'; break;
-        case 'LOWESS Smooth': result = this.statCtrl.runLowess(data.col(0), data.col(1)); break;
-        case 'Polynomial Trend': result = this.statCtrl.runPolynomialTrend(data.col(0), data.col(1)); break;
         case 'Moving Average': this.statusText = 'Moving Average: needs 1D series'; break;
-        case 'Remove Outliers': result = this.statCtrl.runRemoveOutliers(data.col(0)); break;
-        case 'Cross Validate': result = this.statCtrl.runCrossValidate(data.col(0), data.col(1)); break;
-        case 'Detect Excursions': result = this.statCtrl.runDetectExcursions(data.col(0), data.col(1)); break;
-        case 'Filter Endemic': result = this.statCtrl.runFilterEndemic(data.to2D()); break;
-        case 'Build ARMA': result = this.statCtrl.runBuildARMA(data.col(0)); break;
-        case 'ARMA Predict': result = this.statCtrl.runARMAPredict(this.stateMgr.dataMatrix?.data?.col(0) ?? [], 5); break;
         case 'Cox PH': this.statusText = 'Cox PH: needs durations + events + covariates'; break;
         case 'Log-rank': this.statusText = 'Log-rank: needs two survival groups'; break;
-        case 'Kaplan-Meier': result = this.statCtrl.runKaplanMeier(data.col(0), data.col(0).map(_ => 1)); break;
-        case 'Neutral Simulation': result = this.statCtrl.runSimulateNeutral(100, 10); break;
-        case 'Equilibrium Test': result = this.statCtrl.runTestEquilibrium(0.5, 0.4); break;
-        case 'Exponential Fit': result = this.statCtrl.runFitExponential(data.col(0), data.col(1)); break;
-        case 'Logistic Fit': result = this.statCtrl.runFitLogistic(data.col(0), data.col(1)); break;
         case 'FBD Likelihood': this.statusText = 'FBD Likelihood: needs tree data'; break;
         case 'NJ Tree': this.statusText = 'NJ: needs distance matrix + names'; break;
         case 'UPGMA Tree': this.statusText = 'UPGMA: needs distance matrix + names'; break;
@@ -697,7 +745,9 @@ struct Index {
         case 'Majority Rule': this.statusText = 'Majority Rule: needs ≥ 2 trees'; break;
         case 'Heuristic Search': this.statusText = 'Heuristic Search: needs sequences'; break;
         case 'Tree Comparator': this.statusText = 'Tree Comparator: needs ≥ 2 parsed trees'; break;
-        default: this.statusText = name + ': not implemented'; return;
+        case 'Null Model': this.showNullModelDialog = true; return;
+        case 'Import': this.showImportDialog = true; return;
+        case 'Export': this.showExportDialog = true; return;
       }
 
       this.statusText = name + ' completed';
@@ -705,6 +755,7 @@ struct Index {
     } catch (e) {
       this.statusText = name + ' error: ' + String(e).substring(0, 100);
     }
+    this.isLoading = false;
   }
 
   private handleAction(action: string): void {

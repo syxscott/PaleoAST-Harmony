@@ -13,8 +13,6 @@ export interface DATData {
 
 export function parseDAT(text: string, delimiter = ',', hasHeader = true, hasRowLabels = true): DATData {
   const lines = text.trim().split(/\r?\n/).filter(l => l.trim());
-?
-/).filter(l => l.trim());
   if (lines.length === 0) return { data: [], rowLabels: [], colLabels: [], nRows: 0, nCols: 0 };
 
   let startRow = 0;

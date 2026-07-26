@@ -1,6 +1,9 @@
 import {Matrix} from "../math/Matrix";
 import {RowMetadata} from "./RowMetadata";
 import {ColumnMetadata} from "./ColumnMetadata";
+import { Observed } from '@kit.ArkUI';
+
+@Observed
 export class DataMatrix{
   readonly data:Matrix; readonly rowLabels:string[]; readonly colLabels:string[]; readonly nSamples:number; readonly nVariables:number;
   rowMeta:RowMetadata=new RowMetadata(); colMeta:ColumnMetadata=new ColumnMetadata();

@@ -1,5 +1,7 @@
 import { Matrix } from '../../math/Matrix';
 import { svd } from '../../math/linalg';
+import { rand, createSeededRNG } from '../../math/random';
+import { tpsKernel2D } from './tpsKernel';
 
 /**
  * GPA (Generalized Procrustes Analysis) — replaces morphometrics/gpa.py.
@@ -163,6 +165,24 @@ export function efa(contour: number[][], nHarmonics: number = 10): EFAResult {
     a *= factor; b *= factor; c *= factor; d *= factor;
     harmonics.push({ n, a, b, c, d });
     coefficients.push([a, b, c, d]);
+  }
+
+  // Normalize first harmonic: ellipse should have a_0 = 1
+  // a_0 = sqrt((a² + c²) / 2) per Kuhl & Giardina (1982) and Momocs::efourier
+  // Reference: Kuhl, F.P. & Giardina, C.R. (1982). "Fourier descriptors of
+  //   closed contour curves." Comput. Vision Graphics Image Process. 18: 236-258.
+  if (harmonics.length > 0) {
+    const h0 = harmonics[0];
+    const a0 = Math.sqrt((h0.a * h0.a + h0.c * h0.c) / 2);
+    if (a0 > 1e-15) {
+      const scale = 1 / a0;
+      for (const h of harmonics) {
+        h.a *= scale; h.b *= scale; h.c *= scale; h.d *= scale;
+      }
+      for (const coeff of coefficients) {
+        coeff[0] *= scale; coeff[1] *= scale; coeff[2] *= scale; coeff[3] *= scale;
+      }
+    }
   }
 
   return { harmonics, coefficients, nHarmonics, nPoints: nPts };
@@ -348,7 +368,7 @@ export function tpsDeformation(sourceLandmarks: number[][], targetLandmarks: num
     if (i === j) continue;
     let r2 = 0;
     for (let d = 0; d < dim; d++) r2 += (sourceLandmarks[i][d] - sourceLandmarks[j][d]) ** 2;
-    K.set(i, j, r2 > 0 ? r2 * Math.log(Math.sqrt(r2)) : 0);
+    K.set(i, j, tpsKernel2D(Math.sqrt(r2)));
   }
 
   // Build P matrix (landmark coordinates + 1)
@@ -395,7 +415,7 @@ export function tpsDeformation(sourceLandmarks: number[][], targetLandmarks: num
         const diff = d === 0 ? gx - sourceLandmarks[i][0] : gy - sourceLandmarks[i][1];
         r2 += diff * diff;
       }
-      const U = r2 > 0 ? r2 * Math.log(Math.sqrt(r2)) : 0;
+      const U = tpsKernel2D(Math.sqrt(r2));
       dx += wx[i] * U;
       dy += wy[i] * U;
     }
@@ -502,7 +522,7 @@ export function divideConfigurationIntoBlocks(
   let firstHalf: number[], secondHalf: number[];
 
   if (division === 'random') {
-    const rng = randomSeed !== undefined ? seededRNG(randomSeed) : Math.random;
+    const rng = randomSeed !== undefined ? createSeededRNG(randomSeed) : Math.random;
     const indices = Array.from({ length: nLandmarks }, (_, i) => i);
     for (let i = indices.length - 1; i > 0; i--) {
       const j = Math.floor(rng() * (i + 1));
@@ -527,11 +547,6 @@ export function divideConfigurationIntoBlocks(
   const blockB = alignedConfigs.sliceCols(blockBCols[0], blockBCols[blockBCols.length - 1] + 1);
 
   return [blockA, blockB];
-}
-
-function seededRNG(seed: number): () => number {
-  let s = seed;
-  return () => { s = (s * 16807 + 0) % 2147483647; return s / 2147483647; };
 }
 
 // ─── Re-exports: Eigenshape / 2B-PLS Integration / TPS basis ───────────────────

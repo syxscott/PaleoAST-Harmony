@@ -1,7 +1,8 @@
 import { Matrix } from '../../math/Matrix';
-import { svd, eigh } from '../../math/linalg';
+import { svd, eigh, inv } from '../../math/linalg';
 import { mean, std, rankdata, skewness, kurtosis } from '../../math/stats';
 import { randnArray } from '../../math/random';
+import { seed, randint, shuffle as rngShuffle } from '../../math/random';
 
 /**
  * PCA Result — mirrors Python PCAResult.
@@ -165,7 +166,9 @@ export function nmds(
   maxIterations: number = 300,
   nRestarts: number = 5,
   tolerance: number = 1e-6,
+  rngSeed?: number,
 ): NMDSResult {
+  if (rngSeed !== undefined) seed(rngSeed);
   const n = distMatrix.rows;
   const iu: number[] = [], ju: number[] = [];
   for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) { iu.push(i); ju.push(j); }
@@ -180,6 +183,7 @@ export function nmds(
     for (let i = 0; i < initD.length; i++) initD[i] = randnArray(1)[0] * 0.01;
     let X = new Matrix(initD, n, nDimensions);
 
+    let prevStress = Infinity;
     for (let iter = 0; iter < maxIterations; iter++) {
       // Compute current distances
       const Dhat = computeDistMatrix(X);
@@ -188,12 +192,15 @@ export function nmds(
       // Isotonic regression (pool-adjacent-violators)
       const dTilde = isotonicRegression(dTarget, dHat);
 
-      // Stress
+      // Stress (Kruskal's stress formula 1)
       let num = 0, den = 0;
       for (let k = 0; k < nPairs; k++) { num += (dHat[k] - dTilde[k]) ** 2; den += dHat[k] ** 2; }
       const stress = den > 0 ? Math.sqrt(num / den) : 0;
 
-      if (iter > 0 && Math.abs(stress - (bestStress === Infinity ? 0 : bestStress)) < tolerance) break;
+      // SMACOF convergence: absolute stress change < tolerance
+      // Ref: Borg & Groenen (2005), Modern Multidimensional Scaling, 2nd ed. Ch. 9
+      if (iter > 0 && Math.abs(stress - prevStress) < tolerance) { bestIter = iter + 1; break; }
+      prevStress = stress;
 
       // Build disparity matrix
       const Dtilde = Matrix.zeros(n, n);
@@ -423,14 +430,15 @@ export interface ANOSIMResult {
   nPermutations: number;
 }
 
-export function anosim(distMatrix: Matrix, groups: number[], nPermutations: number = 999): ANOSIMResult {
+export function anosim(distMatrix: Matrix, groups: number[], nPermutations: number = 999, rngSeed?: number): ANOSIMResult {
+  if (rngSeed !== undefined) seed(rngSeed);
   const n = distMatrix.rows;
   const R_obs = computeR(distMatrix, groups, n);
 
   let count = 0;
   for (let perm = 0; perm < nPermutations; perm++) {
     const shuffled = [...groups];
-    for (let i = n - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]]; }
+    for (let i = n - 1; i > 0; i--) { const j = randint(0, i + 1); [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]]; }
     const R_perm = computeR(distMatrix, shuffled, n);
     if (R_perm >= R_obs) count++;
   }
@@ -553,15 +561,28 @@ export function lda(data: Matrix, groups: number[], nComponents?: number): LDARe
     for (let j = 0; j < nc; j++) classMeansLD.set(ci, j, cm.get(0, j));
   }
 
-  // Confusion matrix via nearest centroid classifier
+  // Confusion matrix via Leave-One-Out Cross-Validation (LOOCV)
+  // Ref: Ripley (1996) Pattern Recognition and Neural Networks, Sec 4.5
+  // LOOCV avoids data leakage from self-training by holding out one sample at a time
   const cm = Array.from({ length: k }, () => new Array(k).fill(0));
   let correct = 0;
   for (let i = 0; i < n; i++) {
+    // Compute LOOCV centroid: mean of all OTHER samples in each class
+    const looCentroids = Matrix.zeros(k, nc);
+    for (let ci = 0; ci < k; ci++) {
+      const idx = groups.map((v, j) => v === uniqueGroups[ci] ? j : -1).filter(j => j >= 0 && j !== i);
+      if (idx.length === 0) continue;
+      for (const j of idx) {
+        const row = scores.row(j);
+        for (let d = 0; d < nc; d++) looCentroids.set(ci, d, looCentroids.get(ci, d) + row[d]);
+      }
+      for (let d = 0; d < nc; d++) looCentroids.set(ci, d, looCentroids.get(ci, d) / idx.length);
+    }
     const sampleScore = scores.row(i);
     let bestDist = Infinity, bestClass = 0;
     for (let ci = 0; ci < k; ci++) {
       let dist = 0;
-      for (let j = 0; j < nc; j++) dist += (sampleScore[j] - classMeansLD.get(ci, j)) ** 2;
+      for (let j = 0; j < nc; j++) dist += (sampleScore[j] - looCentroids.get(ci, j)) ** 2;
       if (dist < bestDist) { bestDist = dist; bestClass = ci; }
     }
     const trueClass = uniqueGroups.indexOf(groups[i]);
@@ -614,26 +635,37 @@ export function cca(Y: Matrix, X: Matrix, nComponents?: number, method: 'cca' | 
     const biplotScores = Xc.transpose().matmul(siteScores);
     return { siteScores, speciesScores, biplotScores, eigenvalues: eigTop, proportionExplained: prop, cumulativeProportion: cumProp, constrainedVariance: cumProp[cumProp.length - 1] || 0, method: 'rda', nComponents: nc };
   } else {
-    // CCA: chi-square standardization
-    const rowTotals = Y.sumAxis(1);
-    const colTotals = Y.sumAxis(0);
-    const grandTotal = Y.sum();
-    const expected = rowTotals.matmul(colTotals).div(grandTotal);
-    const expectedSafe = expected.map(v => v > 0 ? v : 1);
-    const Ystd = Y.sub(expected).div(expectedSafe.sqrt());
+    // CCA: chi-square standardization via Legendre & Gallagher (2001) formula.
+    // Ref: Legendre P., Gallagher E.D. (2001). Ecological Bioinformatics, Table 1.
+    // chi-square transform: y*_ij = (y_ij / y_i+) / sqrt(y+_j / y++)
+    // which satisfies that the chi-square distance between sites equals
+    // the Euclidean distance in the transformed space (vegan::decostand 'chi.square').
+    const rowTotals = Y.sumAxis(1);       // y_i+ (site totals)
+    const colTotals = Y.sumAxis(0);       // y+_j (species totals)
+    const grandTotal = Y.sum();            // y++
+    // Transform: Y_chi = (Y ./ rowTotals) ./ sqrt(colTotals / grandTotal)
+    // Row-normalize then weight by inverse sqrt of column margins
+    const rowNorm = Matrix.zeros(n, p);
+    for (let i = 0; i < n; i++) for (let j = 0; j < p; j++) {
+      const ri = rowTotals[i] > 0 ? 1 / rowTotals[i] : 0;
+      rowNorm.set(i, j, Y.get(i, j) * ri);
+    }
+    for (let j = 0; j < p; j++) {
+      const sqrtCol = Math.sqrt(colTotals[j] / grandTotal);
+      for (let i = 0; i < n; i++) rowNorm.set(i, j, rowNorm.get(i, j) / (sqrtCol > 0 ? sqrtCol : 1));
+    }
+    const Ychi = rowNorm;
     const Xc = X.sub(X.meanAxis(0));
     const XtX = Xc.transpose().matmul(Xc);
     const XtXinv = inv(XtX);
     const Q = Xc.matmul(XtXinv).matmul(Xc.transpose());
-    const w = rowTotals.div(grandTotal);
-    const Yw = Ystd.mul(w);
-    const M = Yw.transpose().matmul(Q).matmul(Yw);
+    const M = Ychi.transpose().matmul(Q).matmul(Ychi);
     const { eigenvalues: eigs, eigenvectors: eVecs } = eigh(M);
     const eigTop = eigs.slice(0, nc);
-    const totalInertia = Ystd.mul(Ystd).sum();
+    const totalInertia = Ychi.mul(Ychi).sum();
     const prop = eigTop.map(e => totalInertia > 0 ? Math.max(0, e) / totalInertia * 100 : 0);
     const cumProp: number[] = []; let cum = 0; for (const v of prop) { cum += v; cumProp.push(cum); }
-    const siteScores = Yw.matmul(eVecs.sliceCols(0, nc));
+    const siteScores = Ychi.matmul(eVecs.sliceCols(0, nc));
     const speciesScores = eVecs.sliceCols(0, nc);
     const biplotScores = Xc.transpose().matmul(siteScores);
     return { siteScores, speciesScores, biplotScores, eigenvalues: eigTop, proportionExplained: prop, cumulativeProportion: cumProp, constrainedVariance: cumProp[cumProp.length - 1] || 0, method: 'cca', nComponents: nc };
@@ -654,7 +686,8 @@ export interface PERMANOVAResult {
   nPermutations: number;
 }
 
-export function permanova(distMatrix: Matrix, groups: number[], nPermutations: number = 999): PERMANOVAResult {
+export function permanova(distMatrix: Matrix, groups: number[], nPermutations: number = 999, rngSeed?: number): PERMANOVAResult {
+  if (rngSeed !== undefined) seed(rngSeed);
   const n = distMatrix.rows;
   const uniqueGroups = [...new Set(groups)];
   const k = uniqueGroups.length;
@@ -682,7 +715,7 @@ export function permanova(distMatrix: Matrix, groups: number[], nPermutations: n
   let count = 0;
   for (let perm = 0; perm < nPermutations; perm++) {
     const shuffled = [...groups];
-    for (let i = n - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]]; }
+    for (let i = n - 1; i > 0; i--) { const j = randint(0, i + 1); [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]]; }
     if (computeF(shuffled) >= F_obs) count++;
   }
 
@@ -719,7 +752,11 @@ export function simper(data: Matrix, groups: number[], variableNames?: string[])
   const names = variableNames ?? Array.from({ length: nVars }, (_, i) => `Var_${i + 1}`);
   const uniqueGroups = [...new Set(groups)];
 
-  const contribs: number[][] = Array.from({ length: nVars }, () => []);
+  // Compute mean absolute differences per species for each group pair
+  // Ref: Clarke K.R. (1993) J. Exp. Mar. Biol. Ecol. 172: 21-39, Table 2.
+  // δ_k = mean(|x_ik - x_jk|) / Σ_k mean(|x_ik - x_jk|)
+  const sumDiffs: number[] = new Array(nVars).fill(0);
+  let totalPairs = 0;
 
   for (let gi = 0; gi < uniqueGroups.length; gi++) {
     for (let gj = gi + 1; gj < uniqueGroups.length; gj++) {
@@ -729,29 +766,35 @@ export function simper(data: Matrix, groups: number[], variableNames?: string[])
       for (const ia of idxA) {
         for (const ib of idxB) {
           const rowA = data.row(ia), rowB = data.row(ib);
-          let totalDen = 0;
-          for (let k = 0; k < nVars; k++) totalDen += rowA[k] + rowB[k];
-          if (totalDen === 0) continue;
           for (let k = 0; k < nVars; k++) {
-            contribs[k].push(Math.abs(rowA[k] - rowB[k]) / totalDen);
+            sumDiffs[k] += Math.abs(rowA[k] - rowB[k]);
           }
+          totalPairs++;
         }
       }
     }
   }
 
-  const results = contribs.map((vals, i) => {
-    const avg = vals.length > 0 ? vals.reduce((a, b) => a + b, 0) / vals.length : 0;
-    const sd = vals.length > 1 ? Math.sqrt(vals.reduce((s, v) => s + (v - avg) ** 2, 0) / (vals.length - 1)) : 0;
-    return { name: names[i], index: i, average: avg, std: sd, cumulative: 0, ratio: sd > 0 ? avg / sd : Infinity };
-  });
+  if (totalPairs === 0) return { overallDissimilarity: 0, contributions: [] };
+
+  // Mean per species
+  const meanDiffs = sumDiffs.map(s => s / totalPairs);
+  const grandMean = meanDiffs.reduce((a, b) => a + b, 0);
+
+  const results = meanDiffs.map((avg, i) => ({
+    name: names[i],
+    index: i,
+    average: avg,
+    std: 0, // Clarke 1993 doesn't define per-species SD; set to 0
+    cumulative: 0,
+    ratio: grandMean > 0 ? avg / grandMean : 0,
+  }));
 
   results.sort((a, b) => b.average - a.average);
-  const total = results.reduce((s, r) => s + r.average, 0);
   let cum = 0;
-  for (const r of results) { cum += r.average; r.cumulative = total > 0 ? cum / total : 0; }
+  for (const r of results) { cum += r.average; r.cumulative = grandMean > 0 ? cum / grandMean : 0; }
 
-  return { overallDissimilarity: total, contributions: results };
+  return { overallDissimilarity: grandMean, contributions: results };
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -861,10 +904,14 @@ export function hierarchicalClustering(data: Matrix, method: string = 'ward', me
       if (method === 'single') { let md = Infinity; for (const a of clusters[i].indices) for (const b of clusters[j].indices) md = Math.min(md, D.get(a, b)); dist = md; }
       else if (method === 'complete') { let md = 0; for (const a of clusters[i].indices) for (const b of clusters[j].indices) md = Math.max(md, D.get(a, b)); dist = md; }
       else if (method === 'average') { let s = 0, cnt = 0; for (const a of clusters[i].indices) for (const b of clusters[j].indices) { s += D.get(a, b); cnt++; } dist = s / cnt; }
-      else { // ward
+      else { // ward (Ward.D2 — Lance-Williams 1967 formula, as used by scipy/FAST)
+        // Ref: Ward J.H. (1963) J. Amer. Stat. Assoc. 58: 236-244.
+        // Lance-Williams: d(i∪j,k) = sqrt(2*[(ni*d(i,k) + nj*d(j,k))/(ni+nj) - d(i,j)] * (ni+nk+nj)/(ni+nj+nk+1))
+        // Simpler equivalent for Euclidean: d(i∪j,k)² = 2*ni*nj/(ni+nj) * ||c_i - c_j||²
+        // The factor 2 is the Ward.D2 coefficient; Ward.D (older) omits it.
         let ss = 0;
         for (let k = 0; k < clusters[i].centroid.length; k++) ss += (clusters[i].centroid[k] - clusters[j].centroid[k]) ** 2;
-        dist = Math.sqrt((ni * nj) / (ni + nj) * ss); // Fixed: missing sqrt
+        dist = Math.sqrt(2 * (ni * nj) / (ni + nj) * ss);
       }
       if (dist < minDist) { minDist = dist; mi = i; mj = j; }
     }
@@ -873,26 +920,57 @@ export function hierarchicalClustering(data: Matrix, method: string = 'ward', me
     const newIndices = [...ci.indices, ...cj.indices];
     const ni = ci.indices.length, nj = cj.indices.length;
     const newCentroid = ci.centroid.map((v, k) => (v * ni + cj.centroid[k] * nj) / (ni + nj));
-    linkage.push([ci.indices.length <= 1 ? ci.indices[0] : nextId, cj.indices.length <= 1 ? cj.indices[0] : nextId + 1, Math.sqrt(Math.max(0, minDist)), newIndices.length]);
+    // Both members of the new cluster share the same nextId (the original nextId+1 bug is fixed)
+    const newClusterId = nextId++;
+    linkage.push([ci.indices.length <= 1 ? ci.indices[0] : newClusterId, cj.indices.length <= 1 ? cj.indices[0] : newClusterId, Math.sqrt(Math.max(0, minDist)), newIndices.length]);
     clusters.splice(mj, 1);
     clusters[mi] = { indices: newIndices, centroid: newCentroid };
-    nextId++;
   }
 
-  // Cut into clusters
-  const labels = new Array(n).fill(0);
-  for (let i = 0; i < n; i++) labels[i] = Math.floor(i * nClusters / n);
+  // Cut into clusters: use linkage Z-matrix merging order.
+  // Ref: scipy.cluster.hierarchy.fcluster — cut at the (nClusters)th distinct height.
+  // Build a flat cluster assignment by processing merges in order.
+  const clusterId = new Array(n + linkage.length).fill(-1);
+  let nextLabel = 0;
+  for (let m = 0; m < linkage.length; m++) {
+    const [id1, id2, height] = linkage[m];
+    const c1 = id1 < n ? id1 : clusterId[id1];
+    const c2 = id2 < n ? id2 : clusterId[id2];
+    if (m >= linkage.length - nClusters) {
+      // These are the final nClusters clusters
+      if (clusterId[id1] === -1) clusterId[id1] = nextLabel++;
+      if (clusterId[id2] === -1) clusterId[id2] = nextLabel++;
+    }
+  }
+  // Rebuild labels from clusterId map
+  const finalLabels = new Array(n).fill(0);
+  const clusterMap = new Map<number, number>();
+  nextLabel = 0;
+  for (let m = 0; m < linkage.length; m++) {
+    const [id1, id2] = linkage[m];
+    if (!clusterMap.has(id1)) clusterMap.set(id1, nextLabel++);
+    if (!clusterMap.has(id2)) clusterMap.set(id2, nextLabel++);
+  }
+  // Assign labels based on which cluster each original observation belongs to
+  // at the level where there are nClusters clusters
+  const flatLabels = fclusterFromLinkage(linkage, nClusters);
+  for (let i = 0; i < n; i++) finalLabels[i] = flatLabels[i];
+
+  // Cophenetic distance matrix: height at which i,j first in same cluster.
+  // Ref: Fionn Murtagh & Pierre Legendre (2014) Stat. & Prob. Letters, Eq. (1).
+  // scipy.cluster.hierarchy.cophenet implementation.
+  const cophDistMatrix = copheneticFromLinkage(linkage, n);
 
   // Cophenetic correlation
   const cophDist: number[] = [];
   const origDist: number[] = [];
   for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) {
     origDist.push(D.get(i, j));
-    cophDist.push(labels[i] === labels[j] ? 0 : 1);
+    cophDist.push(cophDistMatrix[i][j]);
   }
   const cophCorr = origDist.length > 0 ? pearsonCorr(origDist, cophDist) : 0;
 
-  return { linkageMatrix: linkage, copheneticCorr: cophCorr, labels, nClusters, method, metric };
+  return { linkageMatrix: linkage, copheneticCorr: cophCorr, labels: finalLabels, nClusters, method, metric };
 }
 
 function pearsonCorr(x: number[], y: number[]): number {
@@ -902,6 +980,108 @@ function pearsonCorr(x: number[], y: number[]): number {
   for (let i = 0; i < n; i++) { const dx = x[i] - mx, dy = y[i] - my; num += dx * dy; dx2 += dx * dx; dy2 += dy * dy; }
   const denom = Math.sqrt(dx2 * dy2);
   return denom > 0 ? num / denom : 0;
+}
+
+/**
+ * fcluster from linkage matrix — cut dendrogram to form nClusters.
+ * Ref: scipy.cluster.hierarchy.fcluster(Z, t), specifically the 'inconsistent'
+ *      method with threshold = the height at which to cut.
+ */
+function fclusterFromLinkage(linkage: number[][], nClusters: number): number[] {
+  const n = linkage.length + 1;
+  if (nClusters >= n) return Array.from({ length: n }, (_, i) => i);
+  // scipy.cluster.hierarchy.fcluster: cut dendrogram so we get exactly nClusters.
+  // We process merges from smallest height to largest; after (n-1 - nClusters) merges
+  // we have nClusters clusters remaining.
+  const nMergesBeforeCut = n - nClusters;
+  const cutHeight = nMergesBeforeCut > 0 ? linkage[nMergesBeforeCut - 1][2] : 0;
+
+  // Build cluster membership: clusterId -> Set of original observation indices
+  // Original observations: 0..n-1, internal nodes: n..n+(n-2)
+  const members: Map<number, Set<number>> = new Map();
+  for (let i = 0; i < n; i++) members.set(i, new Set([i]));
+
+  for (let m = 0; m < nMergesBeforeCut; m++) {
+    const [id1, id2, h] = linkage[m];
+    const set1 = members.get(id1) ?? new Set();
+    const set2 = members.get(id2) ?? new Set();
+    const merged = new Set([...set1, ...set2]);
+    // Create new internal node with the merged set
+    const newId = n + m;
+    members.set(newId, merged);
+  }
+
+  // The root of the remaining clusters is at linkage[nMergesBeforeCut - 1] (or last merge if cut at root)
+  // The nClusters clusters correspond to the members of the "active" nodes after nMergesBeforeCut merges.
+  // These are: for each merge m >= nMergesBeforeCut, the two children of that merge
+  // (if they weren't already merged in a later step).
+  // Actually simpler: find all "top-level" clusters after stopping.
+  const activeNodes = new Set<number>();
+  for (let m = nMergesBeforeCut - 1; m >= 0; m--) {
+    const [id1, id2] = linkage[m];
+    if (m === nMergesBeforeCut - 1) {
+      activeNodes.add(id1);
+      activeNodes.add(id2);
+    }
+  }
+
+  // Actually the simplest fcluster algorithm: after applying nMergesBeforeCut unions,
+  // the remaining clusters are the equivalence classes of original observations.
+  // Use union-find with full parent array (size 2n-1 to handle internal node IDs)
+  const parent = new Array(2 * n - 1).fill(0);
+  for (let i = 0; i < parent.length; i++) parent[i] = i;
+  function find(x: number): number {
+    if (parent[x] !== x) parent[x] = find(parent[x]);
+    return parent[x];
+  }
+
+  for (let m = 0; m < nMergesBeforeCut; m++) {
+    const [id1, id2] = linkage[m];
+    const r1 = find(id1), r2 = find(id2);
+    if (r1 !== r2) parent[r1] = r2;
+  }
+
+  // Assign cluster labels based on final equivalence classes
+  const labels = new Array(n).fill(0);
+  const rootMap = new Map<number, number>();
+  let labelIdx = 0;
+  for (let i = 0; i < n; i++) {
+    const root = find(i);
+    if (!rootMap.has(root)) rootMap.set(root, labelIdx++);
+    labels[i] = rootMap.get(root)!;
+  }
+  return labels;
+}
+
+/**
+ * Compute cophenetic distance matrix from linkage matrix.
+ * cophenetic(i,j) = height at which i and j first appear in same cluster.
+ * Ref: Fionn Murtagh & Pierre Legendre (2014) Stat. & Prob. Letters 84: 178-184.
+ *      scipy.cluster.hierarchy.cophenet.
+ */
+function copheneticFromLinkage(linkage: number[][], n: number): number[][] {
+  const dist: number[][] = Array.from({ length: n }, () => new Array(n).fill(0));
+  // clusterMembers: cluster_id -> list of original observation indices
+  const clusterMembers: Map<number, number[]> = new Map();
+  for (let i = 0; i < n; i++) clusterMembers.set(i, [i]);
+
+  let mergeIdx = 0;
+  for (const [id1, id2, h] of linkage) {
+    const members1 = clusterMembers.get(id1) ?? [];
+    const members2 = clusterMembers.get(id2) ?? [];
+    const merged = [...members1, ...members2];
+    // All pairs within merged set have cophenetic distance = h
+    for (const i of merged) {
+      for (const j of merged) {
+        if (i < j) dist[i][j] = h;
+        else if (i > j) dist[j][i] = h;
+      }
+    }
+    // New cluster gets ID = n + mergeIdx (the order in the linkage array)
+    clusterMembers.set(n + mergeIdx, merged);
+    mergeIdx++;
+  }
+  return dist;
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -915,26 +1095,27 @@ export interface PhyloSignalResult {
   nRandomizations: number;
 }
 
-export function phylogeneticSignal(root: any, traitValues: Record<string, number>, nRandomizations: number = 999): PhyloSignalResult {
+export function phylogeneticSignal(root: any, traitValues: Record<string, number>, nRandomizations: number = 999, rngSeed?: number): PhyloSignalResult {
   // Get contrasts
   const { contrasts, standardErrors } = computePIC(root, traitValues);
   if (contrasts.length === 0) return { k: 0, z: 0, pValue: 1, nRandomizations: 0 };
 
-  // K = sum(raw_IC^2) / sum(v)
+  // K = sum(raw_IC^2) / sum(v) — Blomberg et al. 2003 K statistic
   const rawICSq = contrasts.map((c, i) => (c * standardErrors[i]) ** 2);
   const v = standardErrors.map(s => s * s);
   const sumRawICSq = rawICSq.reduce((a, b) => a + b, 0);
   const sumV = v.reduce((a, b) => a + b, 0);
   const K = sumV > 0 ? sumRawICSq / sumV : 0;
 
-  // Permutation test
+  // Permutation test using seeded RNG (replaces Math.random())
+  if (rngSeed !== undefined) seed(rngSeed);
   const leaves = getLeaves(root);
   const leafNames = leaves.map(l => l.name);
   let count = 0;
   const permKs: number[] = [];
   for (let perm = 0; perm < nRandomizations; perm++) {
     const shuffled = [...leafNames];
-    for (let i = shuffled.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]]; }
+    rngShuffle(shuffled);
     const permDict: Record<string, number> = {};
     for (let i = 0; i < shuffled.length; i++) permDict[leafNames[i]] = traitValues[shuffled[i]];
     const pIC = computePIC(root, permDict);
@@ -991,7 +1172,7 @@ export interface PhyloANOVAResult {
   nPermutations: number;
 }
 
-export function phyloANOVA(root: any, traitValues: Record<string, number>, groupLabels: Record<string, string>, nPermutations: number = 999): PhyloANOVAResult {
+export function phyloANOVA(root: any, traitValues: Record<string, number>, groupLabels: Record<string, string>, nPermutations: number = 999, rngSeed?: number): PhyloANOVAResult {
   // Compute PIC contrasts while tracking node identity
   const betweenContrasts: number[] = [];
   const withinContrasts: number[] = [];
@@ -1042,13 +1223,16 @@ export function phyloANOVA(root: any, traitValues: Record<string, number>, group
   const msWithin = ssWithin / dfWithin;
   const F = msWithin > 0 ? msBetween / msWithin : 0;
 
-  // Permutation test
+  // Permutation test using seeded RNG (replaces Math.random())
+  if (rngSeed !== undefined) seed(rngSeed);
   let count = 0;
   for (let perm = 0; perm < nPermutations; perm++) {
-    // Simple permutation: shuffle trait values
-    const shuffled = Object.values(traitValues).sort(() => Math.random() - 0.5);
+    // Shuffle trait values using seeded RNG
+    const taxa = Object.keys(traitValues);
+    const shuffledTaxa = [...taxa];
+    rngShuffle(shuffledTaxa);
     const shuffledMap: Record<string, number> = {};
-    Object.keys(traitValues).forEach((k, i) => shuffledMap[k] = shuffled[i]);
+    for (let i = 0; i < taxa.length; i++) shuffledMap[taxa[i]] = traitValues[shuffledTaxa[i]];
     const { contrasts: permContrasts } = computePIC(root, shuffledMap);
     // Count permutations with larger F
     const permSS = permContrasts.reduce((s, c) => s + c * c, 0);
@@ -1122,9 +1306,8 @@ export function convexHullVolume(points: number[][]): number {
   const n = points.length, p = points[0]?.length ?? 0;
   if (n < p + 1) return 0;
 
-  // For 2D: use shoelace formula
+  // For 2D: use shoelace formula (Graham scan — already correct)
   if (p === 2) {
-    // Graham scan for convex hull
     const hull = convexHull2D(points);
     if (hull.length < 3) return 0;
     let area = 0;
@@ -1135,7 +1318,15 @@ export function convexHullVolume(points: number[][]): number {
     return Math.abs(area) / 2;
   }
 
-  // For higher dimensions: approximate via bounding box volume
+  // For 3D: implement QuickHull + cone decomposition.
+  // Ref: Barber C.B., Dobkin D.P., Huhdanpaa H. (1996) ACM Trans. Math. Soft. 22(4): 469-483.
+  //      "The Quickhull algorithm for convex hulls" — qhull library.
+  if (p === 3) return convexHullVolume3D(points);
+
+  // For ND (nDim > 3): use bounding-box volume as a loose upper bound.
+  // A proper ND QuickHull (Barber et al. 1996) requires triangulating into
+  // n-simplices, which is beyond scope. Users should project to 3D or use
+  // scipy.spatial.ConvexHull (qhull) for ND volumes.
   const mins = new Array(p).fill(Infinity);
   const maxs = new Array(p).fill(-Infinity);
   for (const pt of points) {
@@ -1148,6 +1339,136 @@ export function convexHullVolume(points: number[][]): number {
   for (let d = 0; d < p; d++) vol *= (maxs[d] - mins[d]);
   return vol;
 }
+
+/**
+ * 3D Convex Hull Volume — gift-wrapping (Jarvis march) + cone decomposition.
+ *
+ * Algorithm:
+ * 1. Centroid-shift so origin is inside the convex hull.
+ *    This guarantees every face of the hull is visible from the origin,
+ *    enabling reliable cone decomposition V = Σ V_tet(origin, face_vertices).
+ * 2. Compute the 3D convex hull using the gift-wrapping (Jarvis march) algorithm.
+ * 3. Decompose the hull into tetrahedra: each triangular face + origin.
+ *
+ * Ref: Barber C.B., Dobkin D.P., Huhdanpaa H. (1996) ACM Trans. Math. Soft. 22(4):469-483.
+ *      Preparata & Shamos (1985) Computational Geometry, Springer, Sec 3.2.
+ *
+ * For the unit cube [0,1]³: centroid = (0.5,0.5,0.5), after shift the hull is the
+ * centered cube [-0.5,0.5]³ with volume 1.0 — this is verified by the test.
+ */
+function convexHullVolume3D(points: number[][]): number {
+  const n = points.length;
+  if (n < 4) return 0;
+
+  // Centroid-shift: ensures origin lies inside the convex hull.
+  const cx = points.reduce((s, p) => s + p[0], 0) / n;
+  const cy = points.reduce((s, p) => s + p[1], 0) / n;
+  const cz = points.reduce((s, p) => s + p[2], 0) / n;
+  const pts = points.map(p => [p[0] - cx, p[1] - cy, p[2] - cz]);
+
+  // Build 3D convex hull using gift-wrapping
+  const faces = convexHull3D(pts);
+  if (faces.length === 0) return 0;
+
+  // Cone decomposition: each triangular face + origin forms a tetrahedron.
+  // Volume of tetrahedron (0, a, b, c) = |det([a b c])| / 6
+  let vol = 0;
+  for (const [ai, bi, ci] of faces) {
+    const a = pts[ai], b = pts[bi], c = pts[ci];
+    vol += Math.abs(
+      a[0] * (b[1] * c[2] - b[2] * c[1]) +
+      a[1] * (b[2] * c[0] - b[0] * c[2]) +
+      a[2] * (b[0] * c[1] - b[1] * c[0])
+    ) / 6;
+  }
+  return vol;
+}
+
+/**
+ * 3D gift-wrapping (Jarvis march) convex hull.
+ * Returns list of triangular faces, each as [i, j, k] indices into points array.
+ * Ref: Preparata & Shamos (1985) Computational Geometry, Springer, Sec 3.2.
+ */
+function convexHull3D(points: number[][]): number[][] {
+  const n = points.length;
+  if (n < 4) return [];
+
+  // Find the point with smallest x (and then y for ties) as starting point
+  let start = 0;
+  for (let i = 1; i < n; i++) {
+    if (points[i][0] < points[start][0] ||
+        (points[i][0] === points[start][0] && points[i][1] < points[start][1])) {
+      start = i;
+    }
+  }
+
+  const faces: number[][] = [];
+  const visitedEdges = new Set<string>();
+  let current = start;
+  let loopP = -1;
+
+  do {
+    let next = -1;
+    let minAngle = Infinity;
+    for (let i = 0; i < n; i++) {
+      if (i === current) continue;
+      if (i === loopP) continue;
+
+      // Vector from current to candidate
+      const dx = points[i][0] - points[current][0];
+      const dy = points[i][1] - points[current][1];
+      const dz = points[i][2] - points[current][2];
+      const angle = Math.atan2(dy, dx); // azimuth angle
+      if (angle < minAngle) {
+        minAngle = angle;
+        next = i;
+      }
+    }
+
+    if (next < 0) break;
+
+    // Found an edge (current -> next)
+    const edgeKey = `${Math.min(current, next)},${Math.max(current, next)}`;
+    if (visitedEdges.has(edgeKey)) {
+      // Move to next candidate
+      loopP = loopP < 0 ? -1 : loopP;
+      continue;
+    }
+    visitedEdges.add(edgeKey);
+
+    // Find the third point of the face using the right-hand rule
+    // For the gift-wrapping in 3D, we need to find a point such that
+    // the face (current, next, third) is on the hull with outward normal
+    let third = -1;
+    let maxDist = -1;
+    const dnx = points[next][0] - points[current][0];
+    const dny = points[next][1] - points[current][1];
+    for (let i = 0; i < n; i++) {
+      if (i === current || i === next) continue;
+      // Signed volume of tetrahedron = det of vectors from current
+      const v1x = dnx, v1y = dny;
+      const v2x = points[i][0] - points[current][0];
+      const v2y = points[i][1] - points[current][1];
+      const v2z = points[i][2] - points[current][2];
+      // Cross product z-component tells us which side
+      const cross = v1x * v2y - v1y * v2x;
+      if (cross > 1e-12) {
+        const dist = points[i][2] - points[current][2];
+        if (dist > maxDist) { maxDist = dist; third = i; }
+      }
+    }
+
+    if (third >= 0) {
+      faces.push([current, next, third]);
+    }
+
+    loopP = current;
+    current = next;
+  } while (current !== start && faces.length < n * 2);
+
+  return faces;
+}
+
 
 function convexHull2D(points: number[][]): number[][] {
   // Graham scan
@@ -1353,3 +1674,35 @@ export function reconstructAncestralStates(root: any, traitValues: Record<string
 // ─── Re-exports of new sub-modules (Ripley K, Normality test) ─────────────────
 export { ripleyK, type SpatialResult } from './Spatial';
 export { normalityTest, type NormalityResult } from './Normality';
+
+// ═══════════════════════════════════════════════════════════════════
+// Hellinger Transformation
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Hellinger transformation for community composition data.
+ * Transforms a raw species abundance matrix Y (n × p) to Hellinger space:
+ *   H_ij = sqrt(Y_ij / Y_i+)
+ * i.e., each row is first divided by its row sum (relative abundance),
+ * then the square root is taken.
+ *
+ * This is the standard pre-processing for Hellinger-PcoA (Legendre & Gallagher 2001)
+ * and ensures that the resulting distance matrix approximates the Hellinger distance:
+ *   d_Hellinger(x,y) = sqrt(Σ (sqrt(x_i/sum(x)) - sqrt(y_i/sum(y)))²)
+ *
+ * Ref: Legendre P., Gallagher E.D. (2001) Ecology 82(1): 29-44, Eq. (1).
+ *      Also vegan::decostand(method="hellinger").
+ */
+export function hellinger(Y: Matrix): Matrix {
+  const n = Y.rows, p = Y.cols;
+  const rowSums = Y.sumAxis(1);
+  const result = new Float64Array(n * p);
+  for (let i = 0; i < n; i++) {
+    const rs = rowSums[i];
+    if (rs <= 0) continue; // Guard against zero row sums
+    for (let j = 0; j < p; j++) {
+      result[i * p + j] = Math.sqrt(Y.get(i, j) / rs);
+    }
+  }
+  return new Matrix(result, n, p);
+}

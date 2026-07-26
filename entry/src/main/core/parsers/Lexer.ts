@@ -37,7 +37,7 @@ export class Lexer {
         this._col++; this._pos++;
       } else if (/\s/.test(ch)) {
         this._col++; this._pos++;
-      } else if (/[-\d.]/.test(ch)) {
+      } else if (/[-\d.eE]/.test(ch)) {
         const start = this._pos;
         while (this._pos < this._input.length && /[\d.eE+-]/.test(this._input[this._pos])) this._pos++;
         tokens.push({ type: TokenType.NUMBER, value: this._input.slice(start, this._pos), line: this._line, column: this._col });

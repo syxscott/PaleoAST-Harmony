@@ -5,10 +5,17 @@
  *     [K  P] [w]   [target]
  *     [P^T 0] [a] = [0   ]
  *
- * Kernel U(r) = r² log(r).
+ * Kernel U(r) = r² log(r)  (Bookstein 1989)
  * Bending energy: E = w^T K w.
+ *
+ * References:
+ * - Bookstein, F.L. (1989). "Principal warps: thin-plate splines and the
+ *   decomposition of deformations." IEEE TPAMI 11(6): 567-585.
+ * - Bookstein, F.L. (1991). Morphometric Tools for Landmark Data.
+ * - Rohlf, F.J. & Slice, D. (1990). Syst. Zool. 39: 40-59.
  */
 import { MorphometricsError } from '../../utils/Exceptions';
+import { tpsKernel2D, buildKernelMatrix } from './tpsKernel';
 
 export interface TPSResult {
   source: number[][];
@@ -143,7 +150,7 @@ function _buildKernel(src: number[][]): number[][] {
         sq += d * d;
       }
       const r = Math.sqrt(sq);
-      row.push(r === 0 ? 0 : r * r * Math.log(r));
+      row.push(tpsKernel2D(r));
     }
     K.push(row);
   }
@@ -213,7 +220,7 @@ function _tpsWarp(points: number[][], source: number[][], x: number[][], m: numb
         sq += dd * dd;
       }
       const r = Math.sqrt(sq);
-      const U = r === 0 ? 0 : r * r * Math.log(r);
+      const U = tpsKernel2D(r);
       for (let k = 0; k < d; k++) outPoint[k] += U * x[i][k];
     }
     out.push(outPoint);

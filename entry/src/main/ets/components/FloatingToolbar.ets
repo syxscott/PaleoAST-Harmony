@@ -5,8 +5,9 @@
 @Component
 export struct FloatingToolbar {
   @State visible: boolean = true;
-  @State x: number = 100;
-  @State y: number = 100;
+  @State positionX: number = 100;
+  @State positionY: number = 100;
+  @State isDragging: boolean = false;
 
   onAction: (action: string) => void = () => {};
 
@@ -27,6 +28,20 @@ export struct FloatingToolbar {
       .backgroundColor('#FFFFFF')
       .border({ width: 1, color: '#E4E7EB' })
       .shadow({ radius: 8, color: '#00000020', offsetY: 2 })
+      .position({ x: this.positionX, y: this.positionY })
+      .gesture(
+        PanGesture()
+          .onActionStart(() => {
+            this.isDragging = true;
+          })
+          .onActionUpdate((event: GestureEvent) => {
+            this.positionX += event.deltaX;
+            this.positionY += event.deltaY;
+          })
+          .onActionEnd(() => {
+            this.isDragging = false;
+          })
+      )
     }
   }
 

@@ -10,6 +10,9 @@ export class Quaternion {
     const half = angle / 2;
     const s = Math.sin(half);
     const norm = Math.sqrt(axis[0]**2 + axis[1]**2 + axis[2]**2);
+    // Guard against zero-length axis: return identity quaternion
+    // Ref: Shoemake (1985), "Animating rotation with quaternion curves"
+    if (norm < 1e-15) return new Quaternion(1, 0, 0, 0);
     return new Quaternion(Math.cos(half), axis[0]*s/norm, axis[1]*s/norm, axis[2]*s/norm);
   }
 
@@ -115,14 +118,19 @@ export class RotationMatrix {
     }
     // SVD of H ≈ U S Vᵀ; R = V Uᵀ (single-sided Jacobi — fallback inline)
     const svd = _jacobiSVD3x3(H);
-    // If det(VUᵀ) < 0, flip last column to enforce proper rotation
+    // If det(VUᵀ) < 0, multiply the last column of V by -1 before computing R.
+    // This applies diag(1,1,-1) to V so that R = V @ diag(1,1,-1) @ Uᵀ = V*Uᵀ
+    // has det > 0 (proper rotation, not a reflection).  Per Bookstein 1991
+    // and Rohlf & Slice 1990 the correction is applied to V before forming R.
     const V = svd.V, U = svd.U;
     const R: number[][] = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+    // Compute R = V @ Uᵀ; if det < 0, apply diag(1,1,-1) to V first
+    if (det3(V) * det3(U) < 0) {
+      // Flip last column of V (equivalent to V @ diag(1,1,-1))
+      for (let i = 0; i < 3; i++) V[i][2] = -V[i][2];
+    }
     for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) {
       for (let k = 0; k < 3; k++) R[i][j] += V[i][k] * U[k][j];  // V@U^T
-    }
-    if (det3(R) < 0) {
-      for (let i = 0; i < 3; i++) R[i][2] = -R[i][2];
     }
     return R;
   }

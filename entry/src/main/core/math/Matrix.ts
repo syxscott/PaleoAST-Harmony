@@ -1,7 +1,12 @@
 /**
  * PaleoAST-Harmony Matrix Library
  * Replaces NumPy ndarray. Row-major Float64Array storage.
+ *
+ * Note: Matrix.randn() uses the seeded PRNG from random.ts.
+ * Call random.seed(n) before generating random matrices for reproducible results.
  */
+import { randn as _randn } from './random';
+
 export class Matrix {
   readonly rows: number;
   readonly cols: number;
@@ -32,15 +37,13 @@ export class Matrix {
     const n = v.length, m = Matrix.zeros(n, n);
     for (let i = 0; i < n; i++) m.data[i * n + i] = v[i]; return m;
   }
+  /** Matrix of standard normal random numbers using seeded RNG (random.ts). */
   static randn(r: number, c: number): Matrix {
     const d = new Float64Array(r * c);
     for (let i = 0; i < d.length; i += 2) {
-      let u1 = Math.random();
-      if (u1 === 0) u1 = Math.random(); // Regenerate if exactly 0
-      const u2 = Math.random();
-      const rad = Math.sqrt(-2 * Math.log(u1));
-      d[i] = rad * Math.cos(2 * Math.PI * u2);
-      if (i + 1 < d.length) d[i + 1] = rad * Math.sin(2 * Math.PI * u2);
+      const v0 = _randn();
+      d[i] = v0;
+      if (i + 1 < d.length) d[i + 1] = _randn();
     }
     return new Matrix(d, r, c);
   }

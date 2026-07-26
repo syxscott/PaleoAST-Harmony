@@ -1,6 +1,9 @@
 /**
  * Ecology analysis modules — replaces ecology/*.py
  */
+import { Matrix } from '../math/Matrix';
+import * as linalg from '../math/linalg';
+import { seed, rand, randint } from '../math/random';
 
 /**
  * Diversity indices for a single sample.
@@ -53,18 +56,24 @@ export interface RarefactionResult {
   sampleName: string;
   sampleSizes: number[];
   expectedTaxa: number[];
+  extrapolationFlag: boolean; // true when maxN >= N (beyond observed range)
 }
 
 export function computeRarefaction(abundances: number[], maxN?: number, nPoints: number = 50): RarefactionResult {
   const counts = abundances.filter(v => v > 0 && !isNaN(v));
   const N = counts.reduce((a, b) => a + b, 0);
   const S = counts.length;
-  if (N === 0) return { sampleName: '', sampleSizes: [], expectedTaxa: [] };
+  if (N === 0) return { sampleName: '', sampleSizes: [], expectedTaxa: [], extrapolationFlag: false };
 
   const maxSample = maxN ?? Math.floor(N / 2);
   const step = Math.max(1, Math.floor(maxSample / nPoints));
   const sizes: number[] = [];
-  for (let n = 1; n <= maxSample && n < N; n += step) sizes.push(n);
+  let extrapolationFlag = false;
+  for (let n = 1; n <= maxSample; n += step) {
+    if (n >= N) { extrapolationFlag = true; break; } // beyond observed range
+    sizes.push(n);
+  }
+  if (!extrapolationFlag && maxSample < N) sizes.push(N); // include full sample
 
   const expected: number[] = [];
   for (const n of sizes) {
@@ -79,7 +88,7 @@ export function computeRarefaction(abundances: number[], maxN?: number, nPoints:
     expected.push(E);
   }
 
-  return { sampleName: '', sampleSizes: sizes, expectedTaxa: expected };
+  return { sampleName: '', sampleSizes: sizes, expectedTaxa: expected, extrapolationFlag };
 }
 
 /**
@@ -174,10 +183,31 @@ export interface NullModelResult {
   metric: string;
 }
 
-export function nullModel(presenceMatrix: number[][], metric: 'c_score' | 'checkerboard' = 'c_score', nPermutations: number = 999): NullModelResult {
+/**
+ * SIM9 null model algorithm (Gotelli 2000 "Null model analysis of species
+ * co-occurrence patterns", Ecology 81(9): 2616-2626).
+ *
+ * SIM9 keeps row sums (species frequencies) and column sums (site richness)
+ * fixed. It works by repeatedly selecting a presence (1) and an absence (0)
+ * in the same row and swapping them — which is always feasible because
+ * swapping within a row preserves that row's sum and also preserves the column
+ * sums (one column gains a 1, the other loses a 1, so both column sums stay
+ * unchanged).
+ *
+ * References:
+ * - Gotelli, N.J. & Entsminger, G.L. (2001). EcoSim: null models software
+ *   for ecology. https://gentsminger.com/ecosim/
+ * - Stone, L. & Roberts, A. (1992). The checkerboard score: tests of spatial
+ *   heterogeneity in faunal inventories. Oikos 64: 253-259.
+ */
+export function nullModel(
+  presenceMatrix: number[][],
+  metric: 'c_score' | 'checkerboard' = 'c_score',
+  nPermutations: number = 999,
+  seed?: number
+): NullModelResult {
   const nSpecies = presenceMatrix.length, nSites = presenceMatrix[0].length;
   const presence = presenceMatrix.map(row => row.map(v => v > 0 ? 1 : 0));
-  const rowSums = presence.map(row => row.reduce((a, b) => a + b, 0));
 
   const computeCScore = (mat: number[][]): number => {
     const rs = mat.map(row => row.reduce((a, b) => a + b, 0));
@@ -204,17 +234,38 @@ export function nullModel(presenceMatrix: number[][], metric: 'c_score' | 'check
   const computeScore = metric === 'checkerboard' ? computeCheckerboard : computeCScore;
   const observed = computeScore(presence);
 
+  // SIM9 swap: build index of presence/absence positions per row
+  const presIdx: number[][] = []; // presIdx[r] = [c where mat[r][c] == 1]
+  const absIdx: number[][] = [];  // absIdx[r]  = [c where mat[r][c] == 0]
+  for (let r = 0; r < nSpecies; r++) {
+    presIdx.push([]); absIdx.push([]);
+    for (let c = 0; c < nSites; c++) {
+      if (presence[r][c] === 1) presIdx[r].push(c);
+      else absIdx[r].push(c);
+    }
+  }
+
   const simulated: number[] = [];
+  seed(seed ?? 42); // seed the global PRNG
+
   for (let perm = 0; perm < nPermutations; perm++) {
-    // Swap algorithm
+    // Deep-copy current matrix for this permutation
     const mat = presence.map(row => [...row]);
+    const pIdx = presIdx.map(row => [...row]);
+    const aIdx = absIdx.map(row => [...row]);
+
     const nSwaps = Math.floor(nSpecies * nSites * 0.1);
     for (let s = 0; s < nSwaps; s++) {
-      const r1 = Math.floor(Math.random() * nSpecies), r2 = Math.floor(Math.random() * nSpecies);
-      const c1 = Math.floor(Math.random() * nSites), c2 = Math.floor(Math.random() * nSites);
-      if (r1 !== r2 && c1 !== c2) {
-        const tmp = mat[r1][c1]; mat[r1][c1] = mat[r2][c2]; mat[r2][c2] = tmp;
-      }
+      // Pick a random species (row) using randint
+      const r = randint(0, nSpecies);
+      if (pIdx[r].length === 0 || aIdx[r].length === 0) continue;
+      // Pick a random presence and absence position in that row
+      const pi = randint(0, pIdx[r].length);
+      const ai = randint(0, aIdx[r].length);
+      const cPres = pIdx[r][pi], cAbs = aIdx[r][ai];
+      // Swap
+      mat[r][cPres] = 0; mat[r][cAbs] = 1;
+      pIdx[r][pi] = cAbs; aIdx[r][ai] = cPres;
     }
     simulated.push(computeScore(mat));
   }
@@ -222,7 +273,10 @@ export function nullModel(presenceMatrix: number[][], metric: 'c_score' | 'check
   const meanSim = simulated.reduce((a, b) => a + b, 0) / simulated.length;
   const stdSim = Math.sqrt(simulated.reduce((s, v) => s + (v - meanSim) ** 2, 0) / simulated.length);
   const ses = stdSim > 0 ? (observed - meanSim) / stdSim : 0;
-  const pValue = simulated.filter(s => s >= observed).length / nPermutations;
+
+  // Two-sided p-value (Stone & Roberts 1992): count more extreme in either tail
+  const tailCount = simulated.filter(s => Math.abs(s - meanSim) >= Math.abs(observed - meanSim)).length;
+  const pValue = (tailCount + 1) / (nPermutations + 1);
 
   return { observedScore: observed, simulatedScores: simulated, meanSimulated: meanSim, stdSimulated: stdSim, ses, pValue, nPermutations, metric };
 }
@@ -351,9 +405,11 @@ export function sheAnalysis(abundanceMatrix: number[][], sampleNames?: string[])
     let H = 0;
     for (const c of counts) { const p = c / N; if (p > 0) H -= p * Math.log(p); }
     const E = S > 1 ? H / Math.log(S) : 0;
-    logS.push(Math.log(S + 1));
-    logH.push(Math.log(H + 0.001));
-    logE.push(Math.log(E + 0.001));
+    // Standard SHE: log(S), H, E — no offset (S ≥ 1, H ≥ 0, E ≥ 0)
+    // Guard H = 0 or E = 0 which give -Inf; map to -999 (sentinel for -∞)
+    logS.push(Math.log(S));
+    logH.push(H > 0 ? H : -999);
+    logE.push(E > 0 ? E : -999);
   }
 
   return { logS, logH, logE, sampleNames: totals.map(t => names[t.idx]) }; // Fixed: use totals[i].idx correctly
@@ -400,29 +456,13 @@ export function paleoEnvironment(abundanceMatrix: number[][], heights: number[])
   return { axis1Scores: scores, heights: [...heights], explainedInertia: explained, pearsonCorr: Math.abs(pearson), wasFlipped };
 }
 
+/**
+ * Full eigen-decomposition via linalg.eigh.
+ * Returns ALL eigenvalues and eigenvectors (descending order).
+ * Callers should slice to top-k as needed.
+ */
 function eigh_from_matrix(M: Matrix): { eigenvalues: number[]; eigenvectors: Matrix } {
-  // Simple power iteration for top eigenvector
-  const n = M.rows;
-  let v = new Float64Array(n);
-  for (let i = 0; i < n; i++) v[i] = Math.random();
-  let norm = Math.sqrt(v.reduce((s, x) => s + x * x, 0));
-  for (let i = 0; i < n; i++) v[i] /= norm;
-
-  for (let iter = 0; iter < 100; iter++) {
-    const vNew = new Float64Array(n);
-    for (let i = 0; i < n; i++) { let s = 0; for (let j = 0; j < n; j++) s += M.get(i, j) * v[j]; vNew[i] = s; }
-    norm = Math.sqrt(vNew.reduce((s, x) => s + x * x, 0));
-    if (norm < 1e-15) break;
-    for (let i = 0; i < n; i++) vNew[i] /= norm;
-    v = vNew;
-  }
-
-  let eigenvalue = 0;
-  for (let i = 0; i < n; i++) { let s = 0; for (let j = 0; j < n; j++) s += M.get(i, j) * v[j]; eigenvalue += v[i] * s; }
-
-  const eigenvalues = [eigenvalue];
-  const eigenvectors = Matrix.from1D(Array.from(v), n, 1);
-  return { eigenvalues, eigenvectors };
+  return linalg.eigh(M);
 }
 
 // ═══════════════════════════════════════════════════════════════════

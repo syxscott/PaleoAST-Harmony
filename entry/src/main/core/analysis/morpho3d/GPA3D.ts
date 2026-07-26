@@ -63,15 +63,16 @@ export function gpa3d(configs: number[][][], maxIter = 100, tol = 1e-8): GPA3DRe
     meanShape = normMean;
 
     // Re-align each specimen to the updated mean shape
+    // FIXED: removed re-scaling to maintain size-lock per Rohlf & Slice (1990)
+    // Only rotate and translate (no re-scaling after initial unit centroid size)
     for (let i = 0; i < n; i++) {
-      // Re-center and re-scale aligned specimen
+      // Re-center aligned specimen to origin
       const cx = centered[i].reduce((s, p) => s + p[0], 0) / nLM;
       const cy = centered[i].reduce((s, p) => s + p[1], 0) / nLM;
       const cz = centered[i].reduce((s, p) => s + p[2], 0) / nLM;
       centered[i] = centered[i].map(p => [p[0]-cx, p[1]-cy, p[2]-cz]);
-      const si = Math.sqrt(centered[i].reduce((s, p) => s + p[0]**2+p[1]**2+p[2]**2, 0));
-      if (si > 0) centered[i] = centered[i].map(p => [p[0]/si, p[1]/si, p[2]/si]);
-      // Add Procrustes rotation to align with mean shape
+      // Apply Procrustes rotation to align with mean shape
+      // Note: NO re-scaling here — centroid size stays locked at 1
       const R = RotationMatrix.procrustes(centered[i], meanShape);
       centered[i] = centered[i].map(p => RotationMatrix.apply(R, p as [number,number,number]));
     }

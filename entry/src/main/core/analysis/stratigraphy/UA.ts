@@ -137,43 +137,87 @@ function _bronKerbosch(
   }
 }
 
+/**
+ * Merge maximal cliques (zones) into Unitary Association Zones (UAZ).
+ *
+ * Implements Guex (1991) "Biochronological Correlations" Section 3.3:
+ *   - UA zones are the "co-recovery" units derived from maximal cliques.
+ *   - Two maximal cliques belong to the same UAZ if their intersection
+ *     is non-empty (they share at least one event).
+ *   - This is NOT simply merging by similarity threshold.
+ *
+ * The algorithm:
+ *   1. Sort maximal cliques by their "base level" (minimum LAD in the zone).
+ *   2. Build a graph where nodes = maximal cliques.
+ *   3. Connect two cliques if they share events (intersection non-empty).
+ *   4. Connected components = UAZs.
+ */
 function _mergeToUAZ(
   zones: Zone[],
   _allEvents: string[]
 ): { uazId: number; uazName: string; zoneIndices: number[]; eventUnion: string[] }[] {
-  const out: { uazId: number; uazName: string; zoneIndices: number[]; eventUnion: string[] }[] = [];
-  const simThreshold = 0.8;
-  const sets = zones.map(z => new Set(z.events));
-  let progress = true;
-  while (progress && sets.length > 1) {
-    progress = false;
-    let bestSim = simThreshold;
-    let bestPair: [number, number] | null = null;
-    for (let i = 0; i < sets.length - 1; i++) {
-      const sim = _sim(sets[i], sets[i + 1]);
-      if (sim >= bestSim) { bestSim = sim; bestPair = [i, i + 1]; }
-    }
-    if (bestPair) {
-      const [a, b] = bestPair;
-      const merged = new Set([...sets[a], ...sets[b]]);
-      const mergedZones: number[] = [];
-      for (let k = a; k <= b; k++) mergedZones.push(zones.indexOf(zones[k]) >= 0 ? k : k);
-      sets.splice(a, 2, merged);
-      out.push({
-        uazId: out.length + 1,
-        uazName: `UAZ ${out.length + 1}`,
-        zoneIndices: mergedZones,
-        eventUnion: Array.from(merged)
-      });
-      progress = true;
+  if (zones.length === 0) return [];
+
+  // Compute base level (minimum LAD index) for each zone to sort
+  const baseLevels = zones.map(z => {
+    // Find the minimum "stratigraphic level" among events in this zone
+    // Using section co-occurrence count as proxy
+    return z.sections.length;
+  });
+
+  // Sort zones by base level (ascending)
+  const sorted = zones
+    .map((z, i) => ({ zone: z, idx: i, level: baseLevels[i] }))
+    .sort((a, b) => b.level - a.level); // descending = older first
+
+  // Build co-occurrence graph: connect zones sharing at least one event
+  const n = sorted.length;
+  const adj: boolean[][] = Array.from({ length: n }, () => new Array(n).fill(false));
+
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      // Check if zones i and j share any event
+      const eventsI = new Set(sorted[i].zone.events);
+      const shared = sorted[j].zone.events.filter(e => eventsI.has(e));
+      if (shared.length > 0) {
+        adj[i][j] = adj[j][i] = true;
+      }
     }
   }
-  return out;
-}
 
-function _sim(a: Set<string>, b: Set<string>): number {
-  // Sørensen-style similarity
-  let inter = 0;
-  for (const x of a) if (b.has(x)) inter++;
-  return (2 * inter) / Math.max(1, (a.size + b.size));
+  // Find connected components (UAZs)
+  const visited = new Array(n).fill(false);
+  const out: { uazId: number; uazName: string; zoneIndices: number[]; eventUnion: string[] }[] = [];
+
+  for (let i = 0; i < n; i++) {
+    if (visited[i]) continue;
+    const component: number[] = [];
+    const queue = [i];
+    while (queue.length > 0) {
+      const curr = queue.shift()!;
+      if (visited[curr]) continue;
+      visited[curr] = true;
+      component.push(curr);
+      for (let j = 0; j < n; j++) {
+        if (adj[curr][j] && !visited[j]) queue.push(j);
+      }
+    }
+
+    // Union of events in this UAZ
+    const eventSet = new Set<string>();
+    const zoneIndices: number[] = [];
+    for (const ci of component) {
+      zoneIndices.push(sorted[ci].idx);
+      for (const e of sorted[ci].zone.events) eventSet.add(e);
+    }
+
+    out.push({
+      uazId: out.length + 1,
+      uazName: `UAZ ${out.length + 1}`,
+      zoneIndices: zoneIndices.sort((a, b) => a - b),
+      eventUnion: Array.from(eventSet)
+    });
+  }
+
+  return out;
 }

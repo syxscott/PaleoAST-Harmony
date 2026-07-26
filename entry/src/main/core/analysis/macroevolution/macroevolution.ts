@@ -199,19 +199,19 @@ export function coxPH(durations: number[], events: number[], covariates: number[
   const beta = new Array(p).fill(0);
   const maxIter = 50;
 
+  // Pre-compute risk sets once (Stadler 2010 / Cox 1972)
+  const riskSets: number[][] = [];
+  for (let i = 0; i < n; i++) {
+    const riskSet: number[] = [];
+    for (let j = 0; j < n; j++) {
+      if (durations[j] >= durations[i]) riskSet.push(j);
+    }
+    riskSets.push(riskSet);
+  }
+
   for (let iter = 0; iter < maxIter; iter++) {
     const grad = new Array(p).fill(0);
     const hess = Array.from({ length: p }, () => new Array(p).fill(0));
-
-    // Compute risk sets
-    const riskSets: number[][] = [];
-    for (let i = 0; i < n; i++) {
-      const riskSet: number[] = [];
-      for (let j = 0; j < n; j++) {
-        if (durations[j] >= durations[i]) riskSet.push(j);
-      }
-      riskSets.push(riskSet);
-    }
 
     // Gradient and Hessian
     for (let i = 0; i < n; i++) {
@@ -529,7 +529,9 @@ export function fbdLogLikelihood(
   const r = 1 - rho;
 
   const E = (t: number): number => {
-    if (t <= 0) return Math.max(0, Math.min(1, 1 - rho));
+    // E(t) = probability a lineage alive at time t is extinct by present (Stadler 2010)
+    // At t=0 (process origin), no lineages have had time to go extinct -> E(0) = 0
+    if (t <= 0) return 0;
     if (lambda <= 0) return Math.max(0, Math.min(1, 1 - rho * Math.exp(-(mu + psi) * t)));
     const e_gt = Math.exp(gamma * t);
     const num = beta_fbd * (r - alpha) * e_gt - alpha * (r - beta_fbd);
@@ -547,11 +549,24 @@ export function fbdLogLikelihood(
     const age = nodeAges[i];
     logLik += -(lambda + mu + psi) * age;
     if (isExtant[i]) {
+      // Extant sampled: factor rho (Stadler 2010 Eq. 3)
       logLik += safeLog(rho);
     } else if (isFossil[i]) {
-      logLik += safeLog(psi) + safeLog(E(age));
+      // Fossil: factor psi * E(t) / (1 - E(t)) per Stadler 2010 / Heath et al. 2014
+      // This is the odds that the lineage is represented in the fossil record
+      const e_t = E(age);
+      const oneMinusE = 1 - e_t;
+      if (oneMinusE > 0) {
+        logLik += safeLog(psi) + safeLog(e_t) - safeLog(oneMinusE);
+      } else {
+        logLik += safeLog(psi) + safeLog(e_t);
+      }
     } else {
-      logLik += safeLog(lambda) + safeLog(E(age));
+      // Internal node (neither extant tip nor fossil tip): factor
+      // lambda * (1 - E(t)) / (1 - E(child_ages)) per FBD theory
+      // For reconstructed birth-death process: speciation rate conditioned on
+      // producing at least one sampled descendant
+      logLik += safeLog(lambda) + safeLog(1 - E(age));
     }
   }
 

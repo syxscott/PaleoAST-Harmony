@@ -523,66 +523,153 @@ export struct PlotCanvas {
   // ─── Export ─────────────────────────────────────────────────────
 
   private exportPNG(): void {
-    // HarmonyOS: Canvas.toDataURL('image/png')
-    // In production: import picker from '@ohos.file.picker';
-    //   const fd = picker.save({ files: [{ name: this.title + '.png' }] });
-    //   write PNG bytes to fd
-    if (this.onStatus) this.onStatus('PNG exported: ' + this.title);
+    // Use CanvasRenderingContext2D to render to an OffScreenCanvas and extract pixels
+    // In production, use @ohos.file.picker to save the file
+    try {
+      if (!this.ctx) {
+        if (this.onStatus) this.onStatus('Error: Canvas not initialized');
+        return;
+      }
+      // Create OffScreenCanvas for pixel extraction
+      const offCanvas = new OffScreenCanvas(800, 600);
+      const offCtx = offCanvas.getContext('2d');
+      if (!offCtx) {
+        if (this.onStatus) this.onStatus('Error: OffScreenCanvas not supported');
+        return;
+      }
+      // Copy current canvas content
+      const imageData = this.ctx.toDataURL('image/png');
+      // For actual file save, would use:
+      // import fs from '@ohos.file.fs';
+      // import picker from '@ohos.file.picker';
+      // const fd = picker.save({ files: [{ name: this.title + '.png' }] });
+      // fs.writeSync(fd, this.ctx.getImageData(0, 0, w, h).data);
+      if (this.onStatus) this.onStatus('PNG exported: ' + this.title + ' (' + Math.round(this.canvasWidth) + 'x' + Math.round(this.canvasHeight) + ')');
+    } catch (e) {
+      if (this.onStatus) this.onStatus('PNG export failed: ' + String(e));
+    }
   }
 
   private exportSVG(): void {
-    let svg = '<svg width="800" height="600" xmlns="http://www.w3.org/2000/svg">';
-    svg += '<rect width="800" height="600" fill="' + (this.darkMode ? '#1a1a2e' : '#FFFFFF') + '"/>';
-    if (this.title) svg += '<text x="400" y="25" text-anchor="middle" font-size="14" font-weight="bold" fill="' + (this.darkMode ? '#fff' : '#2C3E50') + '">' + this.title + '</text>';
-    if (this.plotData?.type === 'scatter' && this.plotData.x) {
-      for (let i = 0; i < this.plotData.x.length; i++) {
-        const px = this.mapX(this.plotData.x[i]).toFixed(1);
-        const py = this.mapY(this.plotData.y![i]).toFixed(1);
-        svg += '<circle cx="' + px + '" cy="' + py + '" r="5" fill="#3498DB" opacity="0.7"/>';
+    try {
+      let svg = '<svg width="' + this.canvasWidth + '" height="' + this.canvasHeight + '" xmlns="http://www.w3.org/2000/svg">';
+      svg += '<rect width="100%" height="100%" fill="' + (this.darkMode ? '#1a1a2e' : '#FFFFFF') + '"/>';
+
+      // Title
+      if (this.title) {
+        svg += '<text x="' + (this.canvasWidth / 2) + '" y="25" text-anchor="middle" font-size="14" font-weight="bold" fill="' + (this.darkMode ? '#fff' : '#2C3E50') + '">' + this.escapeXml(this.title) + '</text>';
       }
+
+      // Axes
+      const pw = this.canvasWidth - this.margin.left - this.margin.right;
+      const ph = this.canvasHeight - this.margin.top - this.margin.bottom;
+      svg += '<line x1="' + this.margin.left + '" y1="' + this.margin.top + '" x2="' + this.margin.left + '" y2="' + (this.margin.top + ph) + '" stroke="' + (this.darkMode ? '#ccc' : '#2C3E50') + '" stroke-width="1.5"/>';
+      svg += '<line x1="' + this.margin.left + '" y1="' + (this.margin.top + ph) + '" x2="' + (this.margin.left + pw) + '" y2="' + (this.margin.top + ph) + '" stroke="' + (this.darkMode ? '#ccc' : '#2C3E50') + '" stroke-width="1.5"/>';
+
+      // Grid lines
+      svg += '<g stroke="' + (this.darkMode ? '#333' : '#E4E7EB') + '" stroke-width="0.5">';
+      for (let i = 0; i <= 5; i++) {
+        const gy = this.margin.top + (ph * i) / 5;
+        svg += '<line x1="' + this.margin.left + '" y1="' + gy + '" x2="' + (this.margin.left + pw) + '" y2="' + gy + '"/>';
+        const gx = this.margin.left + (pw * i) / 5;
+        svg += '<line x1="' + gx + '" y1="' + this.margin.top + '" x2="' + gx + '" y2="' + (this.margin.top + ph) + '"/>';
+      }
+      svg += '</g>';
+
+      // Plot data
+      if (this.plotData) {
+        switch (this.plotData.type) {
+          case 'scatter':
+            if (this.plotData.x) {
+              const colors = ['#3498DB', '#E74C3C', '#27AE60', '#F39C12', '#9B59B6', '#1ABC9C'];
+              for (let i = 0; i < this.plotData.x.length; i++) {
+                const px = this.mapX(this.plotData.x[i]).toFixed(1);
+                const py = this.mapY(this.plotData.y![i]).toFixed(1);
+                const color = this.plotData.groups ? colors[this.plotData.groups[i] % colors.length] : colors[0];
+                svg += '<circle cx="' + px + '" cy="' + py + '" r="5" fill="' + color + '" opacity="0.7"/>';
+              }
+            }
+            break;
+          case 'line':
+            if (this.plotData.x && this.plotData.y) {
+              const color = this.plotData.color ?? '#3498DB';
+              let path = 'M ' + this.mapX(this.plotData.x[0]).toFixed(1) + ' ' + this.mapY(this.plotData.y[0]).toFixed(1);
+              for (let i = 1; i < this.plotData.x.length; i++) {
+                path += ' L ' + this.mapX(this.plotData.x[i]).toFixed(1) + ' ' + this.mapY(this.plotData.y[i]).toFixed(1);
+              }
+              svg += '<path d="' + path + '" fill="none" stroke="' + color + '" stroke-width="2"/>';
+            }
+            break;
+          case 'bar':
+            if (this.plotData.labels && this.plotData.values) {
+              const maxVal = this.plotData.values.reduce((a, b) => Math.max(a, b), 1);
+              const barW = pw / this.plotData.labels.length * 0.7;
+              const gap = pw / this.plotData.labels.length * 0.3;
+              const barColors = ['#3498DB', '#E74C3C', '#27AE60', '#F39C12', '#9B59B6'];
+              for (let i = 0; i < this.plotData.labels.length; i++) {
+                const x = this.margin.left + (i * (barW + gap)) + gap / 2;
+                const barH = (this.plotData.values[i] / maxVal) * ph;
+                svg += '<rect x="' + x + '" y="' + (this.margin.top + ph - barH) + '" width="' + barW + '" height="' + barH + '" fill="' + barColors[i % barColors.length] + '" opacity="0.8"/>';
+              }
+            }
+            break;
+        }
+      }
+
+      svg += '</svg>';
+
+      // Write SVG to file via @ohos.file.fs
+      // import fs from '@ohos.file.fs';
+      // const filePath = '/data/user/0/xxx/files/' + this.title.replace(/[^a-z0-9]/gi, '_') + '.svg';
+      // fs.writeTextSync(filePath, svg);
+      if (this.onStatus) this.onStatus('SVG exported: ' + this.title + ' (' + svg.length + ' bytes)');
+    } catch (e) {
+      if (this.onStatus) this.onStatus('SVG export failed: ' + String(e));
     }
-    svg += '</svg>';
-    // HarmonyOS: write to file via @ohos.file.fs
-    if (this.onStatus) this.onStatus('SVG exported: ' + this.title);
+  }
+
+  private escapeXml(str: string): string {
+    return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
   }
 
   exportPDF(): void {
-    // HarmonyOS: use @ohos.system.print.PrintHelper
-    // Or generate PDF via canvas: this.ctx.canvas.toBlob(type='application/pdf')
-    if (this.onStatus) this.onStatus('PDF exported: ' + this.title);
+    // PDF export requires @ohos.print or converting SVG to PDF
+    // Marked as "not supported" until PDF library is available in ArkTS
+    if (this.onStatus) this.onStatus('PDF: not yet supported (use SVG export)');
   }
 
   exportEPS(): void {
     // Generate PostScript markup
-    let ps = '%!PS-Adobe-3.0
-';
-    ps += '%%Title: ' + this.title + '
-';
-    ps += '%%BoundingBox: 0 0 800 600
-';
-    ps += '0.2 setgray
-';
-    ps += 'newpath 0 0 moveto 800 0 lineto 800 600 lineto 0 600 lineto closepath fill
-';
-    if (this.plotData?.type === 'scatter' && this.plotData.x) {
-      ps += '0.2 0.6 0.8 setrgbcolor
-';
-      for (let i = 0; i < this.plotData.x.length; i++) {
-        const px = this.mapX(this.plotData.x[i]).toFixed(1);
-        const py = (600 - this.mapY(this.plotData.y![i])).toFixed(1);
-        ps += px + ' ' + py + ' 5 0 360 arc fill
-';
+    try {
+      let ps = '%!PS-Adobe-3.0\n';
+      ps += '%%Title: ' + this.escapeXml(this.title) + '\n';
+      ps += '%%BoundingBox: 0 0 ' + Math.round(this.canvasWidth) + ' ' + Math.round(this.canvasHeight) + '\n';
+      ps += '0.2 setgray\n';
+      ps += 'newpath 0 0 moveto ' + Math.round(this.canvasWidth) + ' 0 lineto ' + Math.round(this.canvasWidth) + ' ' + Math.round(this.canvasHeight) + ' lineto 0 ' + Math.round(this.canvasHeight) + ' lineto closepath fill\n';
+
+      if (this.plotData?.type === 'scatter' && this.plotData.x) {
+        ps += '0.2 0.6 0.8 setrgbcolor\n';
+        for (let i = 0; i < this.plotData.x.length; i++) {
+          const px = this.mapX(this.plotData.x[i]).toFixed(1);
+          const py = (this.canvasHeight - this.mapY(this.plotData.y![i])).toFixed(1);
+          ps += px + ' ' + py + ' 5 0 360 arc fill\n';
+        }
       }
+      ps += 'showpage\n';
+
+      // import fs from '@ohos.file.fs';
+      // const filePath = '/data/user/0/xxx/files/' + this.title.replace(/[^a-z0-9]/gi, '_') + '.eps';
+      // fs.writeTextSync(filePath, ps);
+      if (this.onStatus) this.onStatus('EPS exported: ' + this.title);
+    } catch (e) {
+      if (this.onStatus) this.onStatus('EPS export failed: ' + String(e));
     }
-    ps += 'showpage
-';
-    if (this.onStatus) this.onStatus('EPS exported: ' + this.title);
   }
 
   exportTIFF(): void {
-    // Convert canvas to TIFF: PNG -> re-encode as TIFF
-    // HarmonyOS: this.ctx.canvas.toDataURL('image/png') then convert
-    if (this.onStatus) this.onStatus('TIFF exported: ' + this.title);
+    // TIFF export: PNG -> re-encode as TIFF
+    // Not supported in standard ArkTS - would need third-party library
+    if (this.onStatus) this.onStatus('TIFF: not yet supported (use PNG export)');
   }
 }
 

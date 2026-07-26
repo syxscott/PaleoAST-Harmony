@@ -257,19 +257,29 @@ export function qchisq(p: number, df: number, tol: number = 1e-8, maxIter: numbe
 export function pF(f: number, d1: number, d2: number): number {
   if (f <= 0) return 0;
   const x = (d1 * f) / (d1 * f + d2);
-  return gammaincRegularized(d1 / 2, d2 / 2, x);
+  return betaincRegularized(d1 / 2, d2 / 2, x);
 }
 
-/** Regularised incomplete beta I_x(a, b). */
-function gammaincRegularized(_a: number, _b: number, x: number): number {
-  // Used internally: incomplete beta via continued fraction
+/**
+ * Regularized incomplete beta function I_x(a, b) = B_x(a,b) / B(a,b).
+ *
+ * Uses the continued fraction representation from
+ * W.H. Press et al. (2007), _Numerical Recipes_ (3rd ed.), Sec 6.4.
+ * This is the core function used by pF() (F-distribution) and pt() (t-distribution).
+ *
+ * @param a  First shape parameter (> 0)
+ * @param b  Second shape parameter (> 0)
+ * @param x  Upper limit of integration (0 ≤ x ≤ 1)
+ * @returns 0 ≤ I_x(a,b) ≤ 1
+ */
+function betaincRegularized(a: number, b: number, x: number): number {
   if (x <= 0) return 0;
   if (x >= 1) return 1;
-  const lbeta = lgamma(_a) + lgamma(_b) - lgamma(_a + _b);
-  const front = Math.exp(_a * Math.log(x) + _b * Math.log(1 - x) - lbeta) / _a;
+  const lbeta_val = lgamma(a) + lgamma(b) - lgamma(a + b);
+  const front = Math.exp(a * Math.log(x) + b * Math.log(1 - x) - lbeta_val) / a;
   let term = 1, sum = 1;
   for (let i = 1; i < 200; i++) {
-    term *= (_a + i - 1) * x / (i * (_a + i));
+    term *= (a + i - 1) * x / (i * (a + i));
     sum += term;
     if (term < 1e-15 * sum) break;
   }
@@ -279,7 +289,7 @@ function gammaincRegularized(_a: number, _b: number, x: number): number {
 /** t-distribution CDF P(T ≤ t | df). */
 export function pt(t: number, df: number): number {
   const x = df / (df + t * t);
-  const ib = gammaincRegularized(df / 2, 0.5, x);
+  const ib = betaincRegularized(df / 2, 0.5, x);
   if (t >= 0) return 1 - 0.5 * ib;
   return 0.5 * ib;
 }

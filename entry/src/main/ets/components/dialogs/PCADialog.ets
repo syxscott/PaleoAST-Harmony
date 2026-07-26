@@ -15,7 +15,14 @@ export struct PCADialog {
     'Correlation: standardizes to unit variance (good for mixed units)',
   ];
   onConfirm: (params: Record<string, Object>) => void = () => {};
-  onCancel: () => void = () => {};
+  onCancel: () => void = () => {}; // Callback to notify parent component
+
+  onVisibleChange() {
+    if (!this.visible) {
+      // Dialog is closing - notify parent
+      this.onCancel();
+    }
+  }
 
   onVisibleChange() {
     if (this.visible) {
@@ -70,12 +77,12 @@ export struct PCADialog {
 
       Row() {
         Button('Cancel').backgroundColor('#95A5A6').fontColor('#FFFFFF')
-          .onClick(() => { this.onCancel(); }).margin({ right: 12 })
+          .onClick(() => { this.visible = false; }).margin({ right: 12 })
         Button('Run Analysis').type(ButtonType.Capsule).backgroundColor('#3498DB').fontColor('#FFFFFF')
           .enabled(this.errorMsg === '')
           .onClick(() => {
             this.onConfirm({ nComponents: this.nComponents, method: this.methodOpts[this.methodIdx] });
-            this.onCancel();
+            this.visible = false;
           })
       }.width('100%').justifyContent(FlexAlign.End)
     }.padding(24).width(480).borderRadius(12)

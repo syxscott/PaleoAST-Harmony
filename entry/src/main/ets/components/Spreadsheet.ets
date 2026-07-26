@@ -16,7 +16,7 @@ import { Matrix } from "../../core/math/Matrix";
  */
 @Component
 export struct Spreadsheet {
-  @Prop dataMatrix: DataMatrix | null = null;
+  @ObjectLink @Trace dataMatrix: DataMatrix | null = null;
   @State selectedRow: number = -1;
   @State selectedCol: number = -1;
   @State selectedRows: Set<number> = new Set();
@@ -25,7 +25,7 @@ export struct Spreadsheet {
   @State filterText: string = '';
   @State editingCell: string = ''; // "row,col"
   @State editValue: string = '';
-  @State updateFlag: number = 0; // Force UI refresh on data change
+  @State cellUpdateFlags: Map<string, number> = new Map(); // Per-cell update tracking
   @State groupColors: Map<string, string> = new Map([
     ['Group_A', '#3498DB'], ['Group_B', '#E74C3C'], ['Group_C', '#27AE60'],
     ['Group_D', '#F39C12'], ['Ungrouped', '#95A5A6'],
@@ -34,7 +34,7 @@ export struct Spreadsheet {
   @State darkMode: boolean = false;
   @State showGroups: boolean = true;
 
-  // Callbacks
+  // Callbacks - use these to notify parent of changes instead of direct prop mutation
   onDataChanged: (data: Matrix) => void = () => {};
   onSelectionChanged: (rows: number[], cols: number[]) => void = () => {};
   onGroupChanged: (groups: string[]) => void = () => {};
@@ -137,7 +137,7 @@ export struct Spreadsheet {
 
           // Data cells
           ForEach(Array.from({ length: this.dataMatrix!.nVariables }), (_: Object, colIdx: number) => {
-            Text(this.getCellDisplay(rowIdx, colIdx) + (this.updateFlag > -1 ? '' : ''))
+            Text(this.getCellDisplay(rowIdx, colIdx))
               .width(80).fontSize(10).textAlign(TextAlign.Right)
               .fontColor(this.getCellFontColor(rowIdx, colIdx))
               .backgroundColor(this.getCellBg(rowIdx, colIdx))
@@ -147,7 +147,7 @@ export struct Spreadsheet {
         }
         .width('100%').height(22)
         .backgroundColor(this.selectedRow === rowIdx ? '#EBF5FB' : (rowIdx % 2 === 0 ? 'transparent' : (this.darkMode ? '#16213e08' : '#F8F9FA08')))
-      }, (rowIdx: number) => rowIdx.toString() + '_' + this.updateFlag.toString())
+      }, (rowIdx: number) => rowIdx.toString())
     }
   }
 
@@ -226,11 +226,11 @@ export struct Spreadsheet {
 
     const newVal = this.editValue.trim().toLowerCase() === 'na' ? NaN : parseFloat(this.editValue);
     if (!isNaN(newVal) || this.editValue.trim().toLowerCase() === 'na') {
-      this.dataMatrix.data.set(row, col, isNaN(newVal) ? NaN : newVal);
-      // ArkUI @State is shallow-watch: updating dataMatrix.data.set() alone
-      // won't trigger UI refresh. Increment updateFlag to force LazyForEach
-      // key change + Text re-evaluation.
-      this.updateFlag++;
+      const finalVal = isNaN(newVal) ? NaN : newVal;
+      this.dataMatrix.data.set(row, col, finalVal);
+      // Update per-cell flag to trigger minimal re-render
+      this.cellUpdateFlags.set(`${row},${col}`, (this.cellUpdateFlags.get(`${row},${col}`) ?? 0) + 1);
+      // Notify parent via callback since @ObjectLink doesn't auto-sync edits back
       this.onDataChanged(this.dataMatrix.data);
     }
     this.editingCell = '';

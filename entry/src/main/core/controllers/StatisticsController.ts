@@ -4,7 +4,7 @@ import {
   computeDistanceMatrix, Metric, pca, pcoa, nmds, lda, cca, anosim, permanova, simper,
   hierarchicalClustering, univariateSummary, tTest, anova, kruskalWallis, phylogeneticSignal,
   mannWhitneyU, convexHullVolume, morphospaceDisparity, plsAnalysis, minimumSpanningTree,
-  reconstructAncestralStates, ripleyK, normalityTest
+  reconstructAncestralStates, ripleyK, normalityTest, phyloANOVA
 } from '../analysis/statistics/index';
 import {
   computeDiversity, computeRarefaction, betaDiversityDecomposition, nullModel, sheAnalysis,
@@ -340,7 +340,6 @@ export class StatisticsController {
   }
 
   runPhyloANOVA(root: PhyloNode, traits: Record<string, number>, groups: Record<string, string>, np = 999) {
-    const { phyloANOVA } = require('../analysis/statistics/index');
     return phyloANOVA(root, traits, groups, np);
   }
 

@@ -126,6 +126,9 @@ interface ZipEntry {
   compressionMethod: number;
   dataOffset: number;
   localHeaderOffset: number;
+  nameLen: number;
+  extraLen: number;
+  commentLen: number;
 }
 
 function parseZipArchive(bytes: Uint8Array): Record<string, string> {
@@ -145,7 +148,7 @@ function parseZipArchive(bytes: Uint8Array): Record<string, string> {
     const entry = parseLocalFileHeader(bytes, offset);
     if (entry) {
       centralDirectory.push(entry);
-      offset = entry.localHeaderOffset + 30 + entry.nameLength(bytes) + entry.extraLength(bytes);
+      offset = entry.localHeaderOffset + 30 + entry.nameLen + entry.extraLen;
     } else {
       break;
     }
@@ -170,7 +173,7 @@ function parseZipArchive(bytes: Uint8Array): Record<string, string> {
           existing.uncompressedSize = entry.uncompressedSize;
           existing.dataOffset = entry.dataOffset;
         }
-        cdPos += 46 + entry.nameLength(bytes) + entry.extraLength(bytes) + entry.commentLength(bytes);
+        cdPos += 46 + entry.nameLen + entry.extraLen + entry.commentLen;
       } else {
         break;
       }
@@ -213,7 +216,10 @@ function parseLocalFileHeader(bytes: Uint8Array, offset: number): ZipEntry | nul
     uncompressedSize,
     compressionMethod: compression,
     dataOffset,
-    localHeaderOffset: offset
+    localHeaderOffset: offset,
+    nameLen,
+    extraLen,
+    commentLen: 0
   };
 }
 
@@ -242,16 +248,12 @@ function parseCentralDirectoryEntry(bytes: Uint8Array, offset: number): ZipEntry
     uncompressedSize,
     compressionMethod: compression,
     dataOffset: localHeaderOffset + 30 + nameLen + extraLen,
-    localHeaderOffset
+    localHeaderOffset,
+    nameLen,
+    extraLen,
+    commentLen
   };
 }
-
-function ZipEntry.nameLength(_bytes: Uint8Array): number {
-  return this.compressedSize; // Placeholder - actual uses local header
-}
-
-function ZipEntry.extraLength(_bytes: Uint8Array): number { return 0; }
-function ZipEntry.commentLength(_bytes: Uint8Array): number { return 0; }
 
 function findCentralDirectoryOffset(bytes: Uint8Array): number {
   // End of central directory signature: EOCD

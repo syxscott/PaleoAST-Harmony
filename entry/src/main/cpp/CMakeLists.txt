@@ -13,6 +13,12 @@ target_include_directories(paleoast_napi PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
+# Eigen3 (optional): If HarmonyOS NDK includes Eigen, enable with:
+#   find_package(Eigen3 CONFIG REQUIRED)
+#   target_link_libraries(paleoast_napi PUBLIC Eigen3::Eigen)
+# Currently the implementation uses std::vector with hand-rolled algorithms
+# for maximum compatibility with all HarmonyOS NDK versions.
+
 target_link_libraries(paleoast_napi PUBLIC
     libace_napi.z.so
 )
