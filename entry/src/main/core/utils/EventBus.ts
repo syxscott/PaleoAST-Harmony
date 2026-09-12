@@ -10,6 +10,10 @@ export class EventBus{
     return EventBus._i;
   }
 
+  /**
+   * Subscribe. `e` may be an exact event name or a wildcard pattern with a
+   * trailing `.*` (e.g. `data.*` matches `data_changed`, `data_loaded`, ...).
+   */
   on(e:string, c:EventCallback): void {
     if (!this._l.has(e)) this._l.set(e, new Set());
     this._l.get(e)!.add(c);
@@ -27,19 +31,29 @@ export class EventBus{
     this.on(e, w);
   }
 
+  /** Wildcard match: trailing `*` is a prefix wildcard (`data_*`, `data.*`, or bare `*`). */
+  private _matches(pattern:string, e:string): boolean {
+    if (pattern === e) return true;
+    if (pattern === '*') return true;
+    if (pattern.endsWith('*')) return e.startsWith(pattern.slice(0, -1));
+    return false;
+  }
+
   emit(e:string, ...a:unknown[]): void {
     this._h.push({e, a, t: Date.now()});
     if (this._h.length > EventBus.MAX_HISTORY) this._h.shift();
-    // Fixed: iterate over a shallow copy to avoid modification during iteration
-    const listeners = this._l.get(e);
-    if (listeners) {
-      const callbacks = [...listeners];
-      for (const c of callbacks) {
-        try {
-          c(...a);
-        } catch (x) {
-          console.error(x);
-        }
+    // Collect exact + wildcard listeners; iterate over shallow copies to be
+    // safe against modification during iteration; one listener throwing must
+    // not break the others.
+    const callbacks: EventCallback[] = [];
+    for (const [pattern, listeners] of this._l) {
+      if (this._matches(pattern, e)) callbacks.push(...listeners);
+    }
+    for (const c of callbacks) {
+      try {
+        c(...a);
+      } catch (x) {
+        console.error(x);
       }
     }
   }

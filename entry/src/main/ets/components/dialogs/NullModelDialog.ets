@@ -4,12 +4,12 @@
  */
 @Component
 export struct NullModelDialog {
-  @Link visible: boolean = false;
+  @Link visible: boolean;
   @State metricIdx: number = 0;
   @State n_permutations: number = 999;
   @State n_workers: number = 4;
   @State showAdvanced: boolean = false;
-  metricOpts: string[] = ['c_score', 'checkerboard'];
+  metricOpts: string[] = ['c_score', 'checkerboard', 'combo'];
   metricDesc: string[] = [
     'C-score (Stone & Roberts 1990): measures checkerboard structure',
     'Checkerboard: counts perfect checkerboard pairs',

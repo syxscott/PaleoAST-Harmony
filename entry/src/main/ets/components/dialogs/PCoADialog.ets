@@ -4,7 +4,7 @@
  */
 @Component
 export struct PCoADialog {
-  @Link visible: boolean = false;
+  @Link visible: boolean;
   @State n_components: number = 10;
   @State metricIdx: number = 0;
   @State errorMsg: string = '';

@@ -11,11 +11,13 @@ import fs from '@ohos.file.fs';
  */
 @Component
 export struct PlotCanvas {
-  @State plotType: string = 'scatter';
-  @State title: string = '';
+  // 样式/类型属性用 @Prop + @Watch：父级（WorkspaceView）变化时同步并触发
+  // Canvas 重绘（@State 只在创建时取值，主题切换和二次分析不会生效）
+  @Prop @Watch('onStyleChanged') plotType: string = 'scatter';
+  @Prop @Watch('onStyleChanged') title: string = '';
+  @Prop @Watch('onStyleChanged') darkMode: boolean = false;
   @State xlabel: string = '';
   @State ylabel: string = '';
-  @State darkMode: boolean = false;
   @State zoomLevel: number = 1.0;
   @State panX: number = 0;
   @State panY: number = 0;
@@ -27,6 +29,34 @@ export struct PlotCanvas {
   @State mouseY: number = 0;
   @State canvasWidth: number = 800;
   @State canvasHeight: number = 600;
+
+  // 父组件注入的数据（ArkUI 无法从父级调用子组件方法，命令式 setXXXData
+  // 仅限组件内部使用；数据经 @Prop 单向同步 + @Watch 重新摄入）
+  @Prop @Watch('onInputDataChanged') dataX: number[] = [];
+  @Prop @Watch('onInputDataChanged') dataY: number[] = [];
+
+  aboutToAppear(): void {
+    this.ingestInputData();
+  }
+
+  private onStyleChanged(): void {
+    this.redraw();
+  }
+
+  private onInputDataChanged(): void {
+    this.ingestInputData();
+  }
+
+  /** 把父级注入的 X/Y 序列按当前 plotType 装载为绘制数据。 */
+  private ingestInputData(): void {
+    if (this.dataX.length === 0 || this.dataX.length !== this.dataY.length) return;
+    if (this.plotType === 'line') {
+      this.setLineData(this.dataX, this.dataY);
+    } else if (this.plotType === 'scatter') {
+      this.setScatterData(this.dataX, this.dataY);
+    }
+    // bar/histogram 等类型的数据不由 X/Y 序列承载，忽略
+  }
 
   private plotData: PlotData | null = null;
   private ctx: CanvasRenderingContext2D | null = null;

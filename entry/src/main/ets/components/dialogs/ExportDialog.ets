@@ -1,6 +1,6 @@
 @Component
 export struct ExportDialog {
-  @Link visible: boolean = false;
+  @Link visible: boolean;
   @State formatIdx: number = 0;
   formatOpts: string[] = ['CSV', 'TSV'];
   @State includeLabels: boolean = true;

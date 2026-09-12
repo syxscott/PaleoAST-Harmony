@@ -1,6 +1,7 @@
-import { DataMatrix } from "../../core/models/index";
+import { DataMatrix, StateManager } from "../../core/models/index";
 import { SpreadsheetDataSource } from "./SpreadsheetDataSource";
 import { Matrix } from "../../core/math/Matrix";
+import { EventBus } from "../../core/utils/EventBus";
 
 /**
  * Scientific Spreadsheet Component — replaces views/ui_spreadsheet.py
@@ -30,7 +31,8 @@ export struct Spreadsheet {
     ['Group_D', '#F39C12'], ['Ungrouped', '#95A5A6'],
   ]);
   @State rowGroups: string[] = []; // group label per row
-  @State darkMode: boolean = false;
+  // @Prop（非 @State）：跟随父级（WorkspaceView/Index）主题切换实时联动
+  @Prop darkMode: boolean = false;
   @State showGroups: boolean = true;
   @State editingCell: string | null = null;
   @State filteredRowsCache: number[] = []; // memoized filtered/sorted rows
@@ -45,6 +47,10 @@ export struct Spreadsheet {
 
   // LazyForEach data source — recomputed outside the render path
   private dataSource: SpreadsheetDataSource = new SpreadsheetDataSource();
+  // 编辑回写撤销栈所需：记录进入编辑时的原始值
+  private editingOldValue: number = NaN;
+  // 数据被外部改变（撤销/重做/重新加载）时的刷新订阅
+  private dataChangedHandler = (): void => { this.onExternalDataChanged(); };
 
   aboutToAppear(): void {
     if (this.dataMatrix) {
@@ -52,6 +58,22 @@ export struct Spreadsheet {
     }
     this.initColumnIndices();
     this.recomputeRows();
+    // 撤销/重做/重新加载后由 Index 经 EventBus 通知，这里刷新行缓存与网格
+    EventBus.getInstance().on('data_changed', this.dataChangedHandler);
+  }
+
+  aboutToDisappear(): void {
+    EventBus.getInstance().off('data_changed', this.dataChangedHandler);
+  }
+
+  /** 外部数据变更（undo/redo/加载新文件）→ 重建行缓存并刷新整表。 */
+  private onExternalDataChanged(): void {
+    this.initColumnIndices();
+    this.rowGroups = this.dataMatrix
+      ? Array.from({ length: this.dataMatrix.nSamples }, (_, i) => this.rowGroups[i] ?? 'Ungrouped')
+      : [];
+    this.recomputeRows();
+    this.dataSource.setRowIndices(this.filteredRowsCache);
   }
 
   // @Watch callback: filter/sort inputs changed → rebuild row cache (not in build)
@@ -270,6 +292,7 @@ export struct Spreadsheet {
   private startEditing(row: number, col: number): void {
     if (!this.dataMatrix) return;
     const val = this.dataMatrix.data.get(row, col);
+    this.editingOldValue = val; // 记录原值供撤销栈使用
     this.editValue = isNaN(val) ? '' : String(val);
     this.editingCell = `${row},${col}`;
   }
@@ -284,6 +307,9 @@ export struct Spreadsheet {
     const newVal = this.editValue.trim().toLowerCase() === 'na' ? NaN : parseFloat(this.editValue);
     if (!isNaN(newVal) || this.editValue.trim().toLowerCase() === 'na') {
       const finalVal = isNaN(newVal) ? NaN : newVal;
+      // 写入撤销栈（单元格级 delta），使编辑可被 Undo/Redo 回退
+      StateManager.getInstance().pushUndo(row, col, this.editingOldValue, finalVal);
+      StateManager.getInstance().markModified();
       this.dataMatrix.data.set(row, col, finalVal);
       // Matrix itself is not observable — refresh the edited row explicitly
       this.dataSource.notifyRowChanged(row);

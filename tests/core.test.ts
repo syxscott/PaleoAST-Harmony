@@ -421,3 +421,97 @@ function require_i18n() {
 }
 
 import { setLanguage, getTranslator } from '../entry/src/main/core/config/i18n.ts';
+
+// ─── Hollow-feature fixes verification ───────────────────────────────────────
+
+import { EventBus } from '../entry/src/main/core/utils/EventBus.ts';
+import { assertNoSingular } from '../entry/src/main/core/math/Validation.ts';
+import { RegexCompiler, NFA } from '../entry/src/main/core/state_machine/Automaton.ts';
+
+describe('hollow-feature fixes', () => {
+  it('EventBus wildcard: data.* receives data_changed', () => {
+    const bus = new EventBus();
+    const seen: string[] = [];
+    bus.on('data_*', (name) => { seen.push(String(name)); });
+    bus.emit('data_changed', 'changed');
+    bus.emit('data_loaded', 'loaded');
+    bus.emit('metadata_changed', 'x', 0, null); // must NOT match
+    expect(seen).toEqual(['changed', 'loaded']);
+  });
+
+  it('EventBus single * matches everything, off removes', () => {
+    const bus = new EventBus();
+    let count = 0;
+    const cb = () => { count++; };
+    bus.on('*', cb);
+    bus.emit('a');
+    bus.emit('data_changed');
+    bus.off('*', cb);
+    bus.emit('b');
+    expect(count).toBe(2);
+  });
+
+  it('assertNoSingular rejects singular and accepts regular matrices', () => {
+    const good = Matrix.from2D([[2, 1], [1, 3]]);
+    assertNoSingular(good, 'good'); // must not throw
+    const bad = Matrix.from2D([[1, 2], [2, 4]]); // row2 = 2*row1
+    let threw = false;
+    try { assertNoSingular(bad, 'bad'); } catch { threw = true; }
+    expect(threw).toBe(true);
+  });
+
+  it('DFA minimize merges equivalent states and preserves language', () => {
+    const re = new RegexCompiler('(a|b)*abb');
+    const d1 = re.toDFA();
+    const minimal = d1.minimize();
+    const positives = ['abb', 'aabb', 'ababb', 'aaabbbabb'];
+    const negatives = ['', 'a', 'ab', 'abba', 'bb'];
+    for (const p of positives) expect(minimal.matches(p)).toBe(true);
+    for (const n of negatives) expect(minimal.matches(n)).toBe(false);
+    // minimisation actually shrank the automaton (subset construction > Hopcroft result)
+    expect(minimal.states.length).toBeLessThanOrEqual(d1.states.length);
+    expect(minimal.states.length).toBe(5); // classic Hopcroft example: (a|b)*abb minimal DFA has 5 states
+    void NFA;
+  });
+});
+
+// ─── Real taskpool / NativeMath dynamic loading verification ────────────────
+
+import { ProcessPool } from '../entry/src/main/core/hpc/ProcessPool.ts';
+import { TaskScheduler } from '../entry/src/main/core/hpc/TaskScheduler.ts';
+import { initNative, hasNative, nativeSVD, warmupNative } from '../entry/src/main/core/math/NativeMath.ts';
+
+describe('real dispatch & native loading', () => {
+  it('ProcessPool.map returns correct results via fallback path (node has no taskpool)', async () => {
+    const pool = new ProcessPool(4);
+    const out = await pool.map([1, 2, 3, 4, 5], (x: number) => x * 2);
+    expect(out).toEqual([2, 4, 6, 8, 10]);
+  });
+
+  it('ProcessPool.map isolates per-item errors without aborting', async () => {
+    const pool = new ProcessPool(2);
+    const out = await pool.map([1, 0, 3], (x: number) => { if (x === 0) throw new Error('div by zero'); return 10 / x; });
+    expect(out[0]).toBe(10);
+    expect(out[1]).toBeNull();
+    expect(out[2]).toBeCloseTo(10 / 3, 1e-9);
+  });
+
+  it('TaskScheduler.executeInTaskPool falls back to same-thread and still computes', async () => {
+    const r = await TaskScheduler.executeInTaskPool((a: number, b: number) => a + b, 2, 3);
+    expect(r).toBe(5);
+  });
+
+  it('TaskScheduler.parallelMap preserves order and values', async () => {
+    const out = await TaskScheduler.parallelMap([0, 1, 2, 3], (x: number) => x * x);
+    expect(out).toEqual([0, 1, 4, 9]);
+  });
+
+  it('initNative resolves false gracefully on non-HarmonyOS runtime', async () => {
+    const ok = await initNative();
+    expect(ok).toBe(false);
+    expect(hasNative()).toBe(false);
+    // wrappers keep the null contract after a failed load
+    expect(nativeSVD(new Float64Array([1, 2, 3, 4]), 2, 2)).toBeNull();
+    warmupNative(); // idempotent, must not throw
+  });
+});

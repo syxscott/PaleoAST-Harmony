@@ -1,54 +1,54 @@
 /**
  * FilePickerHelper - HarmonyOS file picker integration.
- * Uses @ohos.file.picker and @ohos.file.fs for sandbox-safe I/O.
- * Import statements are device-only (commented for compilation).
+ * Uses the system document picker (@kit.CoreFileKit picker) and fs for
+ * sandbox-safe import/export. Real implementations — no stubs.
  */
+import { picker, fs } from '@kit.CoreFileKit';
 import { FileManager } from './FileManager';
 
 export class FilePickerHelper {
   /**
-   * Open file picker dialog for import.
-   * On device: uncomment the picker import and implementation.
+   * Open the system document picker and return the selected file URI
+   * (null when the user cancels).
    */
   static async pickFile(): Promise<string | null> {
-    // import picker from '@ohos.file.picker';
-    // const options = new picker.DocumentSelectOptions();
-    // const documentPicker = new picker.DocumentViewPicker();
-    // const uris = await documentPicker.select(options);
-    // return uris.length > 0 ? uris[0] : null;
-    return null;
+    const options = new picker.DocumentSelectOptions();
+    const documentPicker = new picker.DocumentViewPicker();
+    try {
+      const uris = await documentPicker.select(options);
+      return uris.length > 0 ? uris[0] : null;
+    } catch (e) {
+      return null; // user cancel or picker error
+    }
   }
 
   /**
-   * Save file via picker dialog.
+   * Open the system save dialog, write the content to the chosen location
+   * and return the target URI (null when the user cancels).
    */
   static async saveFile(content: string, suggestedName: string): Promise<string | null> {
-    // import picker from '@ohos.file.picker';
-    // import fs from '@ohos.file.fs';
-    // const options = new picker.DocumentSaveOptions();
-    // options.newFileNames = [suggestedName];
-    // const pickerObj = new picker.DocumentViewPicker();
-    // const uris = await pickerObj.save(options);
-    // if (uris && uris.length > 0) {
-    //   const fd = fs.openSync(uris[0], fs.OpenMode.READ_WRITE);
-    //   fs.writeSync(fd.fd, content);
-    //   fs.closeSync(fd);
-    //   return uris[0];
-    // }
-    return null;
+    const options = new picker.DocumentSaveOptions();
+    options.newFileNames = [suggestedName];
+    const pickerObj = new picker.DocumentViewPicker();
+    try {
+      const uris = await pickerObj.save(options);
+      if (uris && uris.length > 0) {
+        const file = fs.openSync(uris[0], fs.OpenMode.READ_WRITE | fs.OpenMode.TRUNC);
+        try {
+          fs.writeSync(file.fd, content);
+        } finally {
+          fs.closeSync(file.fd);
+        }
+        return uris[0];
+      }
+      return null;
+    } catch (e) {
+      return null;
+    }
   }
 
-  /**
-   * Read file content from sandbox path.
-   */
+  /** Read file content from a sandbox path (delegates to FileManager). */
   static async readFile(path: string): Promise<string> {
-    // import fs from '@ohos.file.fs';
-    // const fd = fs.openSync(path, fs.OpenMode.READ_ONLY);
-    // const stat = fs.statSync(fd.fd);
-    // const buffer = new ArrayBuffer(stat.size);
-    // fs.readSync(fd.fd, buffer);
-    // fs.closeSync(fd);
-    // return new TextDecoder('utf-8').decode(buffer);
     return await FileManager.readText(path);
   }
 

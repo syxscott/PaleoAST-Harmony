@@ -1,6 +1,6 @@
 @Component
 export struct ConissDialog {
-  @Link visible: boolean = false;
+  @Link visible: boolean;
   @State n_zones: number = 4;
   @State showTips: boolean = false;
   onConfirm: (params: Record<string, Object>) => void = () => {};

@@ -11,7 +11,7 @@ interface PCAParams {
 
 @Component
 export struct PCADialog {
-  @Link @Watch('onVisibleChange') visible: boolean = false;
+  @Link @Watch('onVisibleChange') visible: boolean;
   @State nComponents: number = 3;
   @State methodIdx: number = 0;
   @State errorMsg: string = '';

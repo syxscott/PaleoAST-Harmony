@@ -3,6 +3,8 @@ import { StatisticsController } from '../../core/controllers/StatisticsControlle
 import { StateManager } from '../../core/models/index';
 import { parseCSV } from '../../core/parsers/CSVParser';
 import { PhyloNode } from '../../core/analysis/phylogenetics/index';
+import { EventBus } from '../../core/utils/EventBus';
+import { FilePickerHelper } from '../../core/io/FilePickerHelper';
 import { NavigationTree } from '../components/NavigationTree';
 import { Spreadsheet } from '../components/Spreadsheet';
 import { PlotCanvas } from '../components/PlotCanvas';
@@ -237,6 +239,8 @@ struct Index {
       this.statusText = 'Undo';
       this.canUndo = this.stateMgr.canUndo();
       this.canRedo = this.stateMgr.canRedo();
+      // Matrix 内容已回退但不可观察——广播刷新，Spreadsheet 重建行缓存
+      EventBus.getInstance().emit('data_changed');
     }
   }
 
@@ -245,6 +249,7 @@ struct Index {
       this.statusText = 'Redo';
       this.canUndo = this.stateMgr.canUndo();
       this.canRedo = this.stateMgr.canRedo();
+      EventBus.getInstance().emit('data_changed');
     }
   }
 
@@ -252,20 +257,25 @@ struct Index {
     this.isLoading = true;
     this.statusText = 'Loading...';
     const filePath = params['filePath'] as string ?? '';
+    const delimiter = params['delimiter'] as string ?? ',';
+    const hasHeader = params['hasHeader'] as boolean ?? true;
+    const hasRowLabels = params['hasRowLabels'] as boolean ?? true;
     try {
       let csv: string;
-      if (filePath && filePath.length > 0 && !filePath.includes('Sample,Var1')) {
+      if (filePath.length > 0) {
         // Use @ohos.file.fs to read the selected file
-        const fileData = fs.readTextSync(filePath);
-        csv = fileData;
+        csv = fs.readTextSync(filePath);
       } else {
-        csv = filePath || 'Sample,Var1,Var2,Var3,Var4\nA,5.1,3.5,1.4,0.2\nB,4.9,3.0,1.4,0.2\nC,4.7,3.2,1.3,0.2\nD,4.6,3.1,1.5,0.2\nE,5.0,3.6,1.4,0.2';
+        // no path given: load the built-in demo table
+        csv = 'Sample,Var1,Var2,Var3,Var4\nA,5.1,3.5,1.4,0.2\nB,4.9,3.0,1.4,0.2\nC,4.7,3.2,1.3,0.2\nD,4.6,3.1,1.5,0.2\nE,5.0,3.6,1.4,0.2';
       }
-      const dm = parseCSV(csv);
+      const dm = parseCSV(csv, delimiter, hasHeader, hasRowLabels);
       if (!dm || dm.nSamples === 0) {
         throw new Error('No data parsed');
       }
+      dm.currentFile = filePath;
       this.stateMgr.setData(dm);
+      this.stateMgr.setCurrentFile(filePath);
       this.hasData = true;
       this.dataInfo = dm.nSamples + ' x ' + dm.nVariables;
       this.statusText = 'Loaded: ' + this.dataInfo;
@@ -273,6 +283,8 @@ struct Index {
       this.currentWidget = 0;
       this.canUndo = false;
       this.canRedo = false;
+      // 通知已挂载的 WorkspaceView/Spreadsheet 换用新 DataMatrix
+      EventBus.getInstance().emit('data_changed');
     } catch (e) {
       this.statusText = 'Error: ' + String(e).substring(0, 100);
     }
@@ -280,10 +292,18 @@ struct Index {
   }
 
   private exportFile(params: Record<string, Object>): void {
+    const format = params['format'] as string ?? 'CSV';
     try {
-      const format = params['format'] as string ?? 'CSV';
-      this.dataCtrl.exportCSV(format === 'TSV' ? '\t' : ',');
-      this.statusText = 'Exported as ' + format;
+      const content = this.dataCtrl.exportCSV(format === 'TSV' ? '\t' : ',');
+      const ext = format === 'TSV' ? 'tsv' : 'csv';
+      // 真导出：系统保存对话框 + 落盘（FilePickerHelper.saveFile 内部写文件）
+      FilePickerHelper.saveFile(content, 'paleoast_export.' + ext)
+        .then((uri: string | null) => {
+          this.statusText = uri ? 'Saved to ' + uri : 'Export cancelled';
+        })
+        .catch((e: Error) => {
+          this.statusText = 'Export error: ' + String(e).substring(0, 80);
+        });
     } catch (e) { this.statusText = 'Export error: ' + e; }
   }
 

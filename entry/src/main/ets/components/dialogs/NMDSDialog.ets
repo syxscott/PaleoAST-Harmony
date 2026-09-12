@@ -4,7 +4,7 @@
  */
 @Component
 export struct NMDSDialog {
-  @Link visible: boolean = false;
+  @Link visible: boolean;
   @State n_dimensions: number = 2;
   @State n_restarts: number = 10;
   @State max_iterations: number = 300;

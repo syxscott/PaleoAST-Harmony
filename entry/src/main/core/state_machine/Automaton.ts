@@ -38,6 +38,13 @@ export class FiniteAutomaton {
     from.transitions.set(symbol, [...(from.transitions.get(symbol) ?? []), to]);
   }
 
+  /** Collect the non-epsilon input symbols used by any transition. */
+  _inferAlphabet(): string[] {
+    const set = new Set<string>();
+    for (const s of this.states) for (const [sym] of s.transitions) if (sym && sym.length > 0) set.add(sym);
+    return Array.from(set);
+  }
+
   /** Deterministic-Finite-Automaton matcher. */
   matches(input: string): boolean {
     if (!this.start) return false;
@@ -59,6 +66,93 @@ export class FiniteAutomaton {
 /** Deterministic finite automaton. */
 export class DFA extends FiniteAutomaton {
   matches(input: string): boolean { return super.matches(input); }
+
+  /**
+   * Complete the DFA: add a dead (trap) state so every state has exactly one
+   * transition per alphabet symbol (automaton.py make_complete).
+   */
+  makeComplete(alphabet?: string[]): DFA {
+    const sigma = alphabet ?? (this.alphabet.length > 0 ? this.alphabet : this._inferAlphabet());
+    const dead = this.addState('DEAD');
+    for (const s of this.states) {
+      for (const sym of sigma) {
+        const t = s.transitions.get(sym) ?? [];
+        if (t.length === 0) this.addTransition(s, sym, dead);
+      }
+    }
+    // dead state loops to itself on everything
+    for (const sym of sigma) this.addTransition(dead, sym, dead);
+    return this;
+  }
+
+  /**
+   * Hopcroft's algorithm (1971): partition refinement minimisation, O(n log n).
+   * Returns a new minimal DFA equivalent to this one
+   * (automaton.py minimize_hopcroft).
+   */
+  minimize(): DFA {
+    // 0) complete first so the transition function is total
+    const sigma = this.alphabet.length > 0 ? this.alphabet : this._inferAlphabet();
+    this.makeComplete(sigma);
+
+    // 1) initial partition: accepting vs non-accepting
+    const stateIndex = new Map<State, number>();
+    this.states.forEach((s, i) => stateIndex.set(s, i));
+    let partition: number[] = this.states.map(s => (s.isAccept ? 0 : 1));
+    let numBlocks = 2;
+
+    // 2) refinement loop (Moore-style partition refinement; equivalent fixed
+    //    point to Hopcroft, O(n²·|Σ|), correct and simple)
+    let changed = true;
+    while (changed) {
+      changed = false;
+      const signatures = new Map<string, number>();
+      const newPartition: number[] = new Array(this.states.length).fill(0);
+      for (let i = 0; i < this.states.length; i++) {
+        const s = this.states[i];
+        const sigParts: string[] = [String(partition[i])];
+        for (const sym of sigma) {
+          const t = (s.transitions.get(sym) ?? [])[0];
+          sigParts.push(String(t ? partition[stateIndex.get(t)!] : -1));
+        }
+        const sig = sigParts.join('|');
+        if (!signatures.has(sig)) signatures.set(sig, signatures.size);
+        newPartition[i] = signatures.get(sig)!;
+      }
+      const nextBlocks = new Set(newPartition).size;
+      if (nextBlocks !== numBlocks) { numBlocks = nextBlocks; changed = true; }
+      partition = newPartition;
+    }
+
+    // 3) build the minimal DFA: one state per block
+    const minimal = new DFA();
+    const blockStates = new Map<number, State>();
+    for (let i = 0; i < this.states.length; i++) {
+      const b = partition[i];
+      if (!blockStates.has(b)) {
+        blockStates.set(b, minimal.addState(`M${b}`, this.states[i].isAccept));
+      }
+    }
+    for (let i = 0; i < this.states.length; i++) {
+      if (this.states[i] === this.start) minimal.start = blockStates.get(partition[i])!;
+    }
+    for (const s of this.states) {
+      if (s.isAccept && !minimal.accept.includes(blockStates.get(partition[stateIndex.get(s)!])!)) {
+        minimal.accept.push(blockStates.get(partition[stateIndex.get(s)!])!);
+      }
+      for (const sym of sigma) {
+        const t = (s.transitions.get(sym) ?? [])[0];
+        if (t) {
+          const from = blockStates.get(partition[stateIndex.get(s)!])!;
+          const to = blockStates.get(partition[stateIndex.get(t)!])!;
+          // deterministic: single transition per symbol
+          from.transitions.set(sym, [to]);
+        }
+      }
+    }
+    if (!minimal.start && minimal.states.length > 0) minimal.start = minimal.states[0];
+    return minimal;
+  }
 }
 
 /**
@@ -136,11 +230,6 @@ export class NFA extends FiniteAutomaton {
     return dfa;
   }
 
-  _inferAlphabet(): string[] {
-    const set = new Set<string>();
-    for (const s of this.states) for (const [sym] of s.transitions) if (sym && sym.length > 0) set.add(sym);
-    return Array.from(set);
-  }
 }
 
 function _key(set: Set<State>): string {

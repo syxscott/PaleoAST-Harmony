@@ -275,14 +275,9 @@ function escapeLatex(s: string): string {
  * In HarmonyOS, this would use @ohos.file.fs to write the file.
  */
 export async function exportTeXFile(content: string, filename: string): Promise<string> {
-  // In HarmonyOS device environment:
-  // import fs from '@ohos.file.fs';
-  // const file = fs.openSync(filename, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE);
-  // fs.writeSync(file.fd, content);
-  // fs.closeSync(file.fd);
-
-  // For now, return the content (actual file writing is device-specific)
-  console.log(`TeX export: ${filename} (${content.length} bytes)`);
+  // Real sandbox write via fs (see FileManager.writeText)
+  const { FileManager } = await import('../io/FileManager');
+  await FileManager.writeText(filename, content);
   return filename;
 }
 
@@ -291,11 +286,38 @@ export async function exportTeXFile(content: string, filename: string): Promise<
  * This is a placeholder - actual implementation would spawn a subprocess.
  */
 export async function compilePDF(texPath: string, outputDir?: string): Promise<CompileResult> {
-  return {
-    success: false,
-    texContent: '',
-    errors: ['PDF compilation requires external pdflatex. Use compileLaTeX() to generate .tex file.']
-  };
+  // HarmonyOS apps cannot spawn external processes (sandboxed), so a local
+  // pdflatex run is impossible on device. Best possible behaviour: validate
+  // the .tex, hand back its content for sharing, and point the user at the
+  // PC-side compile step.
+  const { FileManager } = await import('../io/FileManager');
+  void outputDir;
+  try {
+    if (!(await FileManager.exists(texPath))) {
+      return {
+        success: false,
+        texContent: '',
+        errors: [
+          `TeX file not found: ${texPath}. Generate one first with compileLaTeX() + exportTeXFile().`,
+        ],
+      };
+    }
+    const tex = await FileManager.readText(texPath);
+    return {
+      success: false,
+      texContent: tex,
+      errors: [
+        'PDF compilation requires the pdflatex toolchain, which cannot run inside the HarmonyOS app sandbox.',
+        'Export the returned .tex source (it is included in texContent) and compile it on a PC: `pdflatex <file>.tex` (run twice for cross references).',
+      ],
+    };
+  } catch (e) {
+    return {
+      success: false,
+      texContent: '',
+      errors: [`PDF export failed: ${String(e)}`],
+    };
+  }
 }
 
 /**

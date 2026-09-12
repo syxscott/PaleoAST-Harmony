@@ -10,7 +10,7 @@
  */
 @Component
 export struct BaseAnalysisDialog {
-  @Link visible: boolean = false;
+  @Link visible: boolean;
   @State title: string = '';
   @State description: string = '';
   @State params: Record<string, Object> = {};

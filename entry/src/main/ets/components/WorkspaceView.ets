@@ -5,6 +5,7 @@
 import { StateManager, DataMatrix } from '../../core/models/index';
 import { Spreadsheet } from './Spreadsheet';
 import { PlotCanvas } from './PlotCanvas';
+import { EventBus } from '../../core/utils/EventBus';
 
 @Component
 export struct WorkspaceView {
@@ -16,18 +17,31 @@ export struct WorkspaceView {
   @Link plotType: string;
   @Link darkMode: boolean;
 
-  // StateManager singleton is read from AppStorage (set by Index.aboutToAppear).
-  // @ObjectLink was removed: it requires a parent-passed @Observed instance which
-  // Index never provided (compile error), and the unused StateManagerWrapper class
-  // was deleted.
-  private dataMatrix: DataMatrix | null = null;
-  private plotRef: PlotCanvas | null = null;
+  // @State（非普通字段）：重新加载文件时经 EventBus 刷新，@ObjectLink 需要
+  // 拿到新的 @Observed DataMatrix 实例才能更新表格
+  @State dataMatrix: DataMatrix | null = null;
+  // 数据被外部改变（撤销/重做/重新加载）时的刷新订阅
+  private dataChangedHandler = (): void => { this.onExternalDataChanged(); };
 
   aboutToAppear(): void {
+    this.refreshFromState();
+    EventBus.getInstance().on('data_changed', this.dataChangedHandler);
+  }
+
+  aboutToDisappear(): void {
+    EventBus.getInstance().off('data_changed', this.dataChangedHandler);
+  }
+
+  /** 从 AppStorage 里的 StateManager 单例同步最新 DataMatrix。 */
+  private refreshFromState(): void {
     const stateMgr = AppStorage.get<StateManager>('stateMgr');
     if (stateMgr) {
       this.dataMatrix = stateMgr.dataMatrix;
     }
+  }
+
+  private onExternalDataChanged(): void {
+    this.refreshFromState();
   }
 
   build() {
@@ -56,13 +70,12 @@ export struct WorkspaceView {
                 PlotCanvas({
                   plotType: this.plotType,
                   title: this.plotTitle,
-                  darkMode: this.darkMode
+                  darkMode: this.darkMode,
+                  dataX: this.plotDataX,
+                  dataY: this.plotDataY
                 })
                   .width('100%')
-                  .layoutWeight(1)
-                  .onAreaChange((_old: Area, _new: Area) => {
-                    // Data can be re-pushed through the imperative API by Index
-                  });
+                  .layoutWeight(1);
               }
               .width('100%')
               .height('100%');
