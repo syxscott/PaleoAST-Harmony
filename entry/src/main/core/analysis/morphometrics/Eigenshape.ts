@@ -14,6 +14,8 @@ export interface EigenshapeResult {
   cumulativeVariance: number[];
   nSpecimens: number;
   nComponents: number;
+  /** Human-readable summary (top components with cumulative variance). */
+  summary: string;
 }
 
 export function eigenshape(
@@ -60,6 +62,16 @@ export function eigenshape(
   const V = new Matrix(Vd, nVar, nc);
 
   const scores = Mc.matmul(V);
+
+  // Summary text (port of efa.py::EigenshapeResult.summary)
+  const lines: string[] = ['Eigenshape Analysis', '==================================================',
+    `Specimens: ${nSpec}`];
+  let cumAcc = 0;
+  for (let i = 0; i < Math.min(nc, 10); i++) {
+    cumAcc += explained[i];
+    lines.push(`ES${i + 1}: ${(explained[i] * 100).toFixed(2)}% (cum: ${(cumAcc * 100).toFixed(2)}%)`);
+  }
+
   return { scores, eigenvalues: sortedValsSlice, explainedVariance: explained, cumulativeVariance: cumulative,
-           nSpecimens: nSpec, nComponents: nc };
+           nSpecimens: nSpec, nComponents: nc, summary: lines.join('\n') };
 }

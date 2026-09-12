@@ -4,7 +4,7 @@
  */
 @Component
 export struct NullModelDialog {
-  @State visible: boolean = false;
+  @Link visible: boolean = false;
   @State metricIdx: number = 0;
   @State n_permutations: number = 999;
   @State n_workers: number = 4;
@@ -42,6 +42,6 @@ export struct NullModelDialog {
         Button('Cancel').backgroundColor('#95A5A6').fontColor('#FFFFFF').onClick(() => { this.visible = false; }).margin({ right: 12 })
         Button('Run Analysis').type(ButtonType.Capsule).backgroundColor('#3498DB').fontColor('#FFFFFF').onClick(() => { this.onConfirm({ metric: this.metricOpts[this.metricIdx], n_permutations: this.n_permutations, n_workers: this.n_workers }); this.visible = false; })
       }.width('100%').justifyContent(FlexAlign.End)
-    }.padding(24).width(480).borderRadius(12)
+    }.padding(24).width('92%').constraintSize({ maxWidth: 480 }).borderRadius(12)
   }
 }

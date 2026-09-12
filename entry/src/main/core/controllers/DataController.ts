@@ -1,6 +1,7 @@
 import { Matrix } from '../math/Matrix';
 import { DataMatrix, StateManager } from '../models/index';
 import { parseCSV, toCSV } from '../parsers/index';
+import { fs } from '@kit.CoreFileKit';
 
 /**
  * DataController — handles data loading, export, transformation.
@@ -19,6 +20,17 @@ export class DataController {
     const dm = this.state.dataMatrix;
     if (!dm) throw new Error('No data to export');
     return toCSV(dm, delimiter);
+  }
+
+  /** Export and persist to a sandbox path (data_controller.py export flow). */
+  exportCSVToFile(path: string, delimiter = ','): void {
+    const text = this.exportCSV(delimiter);
+    const file = fs.openSync(path, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
+    try {
+      fs.writeSync(file.fd, text);
+    } finally {
+      fs.closeSync(file.fd);
+    }
   }
 
   transpose(): DataMatrix {

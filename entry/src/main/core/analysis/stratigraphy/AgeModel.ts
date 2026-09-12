@@ -1,9 +1,11 @@
 /**
  * Geological age modeling — replaces stratigraphy/correlation.py::AgeModelAnalyzer.
  *
- * Provides linear and spline-based interpolation from biostratigraphic age
+ * Provides linear and PCHIP-based interpolation from biostratigraphic age
  * constraints and computes sedimentation rates.
  */
+import { lowess } from '../../math/LOWESS';
+import { pchipInterpolate } from './StratExtended';
 export interface StratigraphicSection {
   name: string;
   heights: number[];
@@ -33,9 +35,13 @@ export function buildAgeModel(
   const ca = sorted.map(c => c[1]);
   const ce = sorted.map(c => c[2]);
 
+  // 'spline' uses PCHIP (monotone cubic Hermite, Fritsch-Carlson 1980):
+  // sparse age constraints make natural cubic splines oscillate and can
+  // produce negative sedimentation rates; PCHIP is shape-preserving
+  // (2026-09 review H9, matches scipy PchipInterpolator).
   const modeled = modelType === 'linear'
     ? _linearInterp(section.heights, ch, ca)
-    : _cubicInterp(section.heights, ch, ca);
+    : section.heights.map(h => pchipInterpolate(ch, ca, h));
 
   // Sedimentation rate (geological convention: age decreases with height)
   const rates = new Array(section.heights.length).fill(0);
@@ -80,8 +86,7 @@ export function computeSedimentationRate(
   let smoothed = rates.slice();
   if (smooth && h.length > 4) {
     try {
-      // Inline LOWESS fallback (Cleveland 1979)
-      smoothed = _lowessSimple(h, rates, frac);
+      smoothed = lowess(h, rates, frac, 0);
     } catch {
       smoothed = rates;
     }
@@ -103,7 +108,11 @@ function _linearInterp(x: number[], xh: number[], yh: number[]): number[] {
   return out;
 }
 
-/** Natural cubic spline interpolation. */
+/**
+ * @deprecated Natural cubic spline (kept for reference). Age models now use
+ * PCHIP — natural splines oscillate with sparse age constraints and can imply
+ * negative sedimentation rates (Python correlation.py switched to PCHIP).
+ */
 function _cubicInterp(x: number[], xh: number[], yh: number[]): number[] {
   const n = xh.length;
   if (n < 2) return x.map(_ => yh[0] ?? 0);
@@ -136,22 +145,3 @@ function _cubicInterp(x: number[], xh: number[], yh: number[]): number[] {
   });
 }
 
-/** Simple triangular-kernel LOWESS. */
-function _lowessSimple(x: number[], y: number[], frac: number): number[] {
-  const n = x.length;
-  const r = Math.max(2, Math.floor(frac * n));
-  const out = new Array(n);
-  for (let i = 0; i < n; i++) {
-    const dists = x.map((xi, j) => ({ j, d: Math.abs(xi - x[i]) })).sort((a, b) => a.d - b.d);
-    const k = dists.slice(0, r);
-    const maxD = k[k.length - 1].d || 1;
-    let num = 0, den = 0;
-    for (const e of k) {
-      const w = (1 - (e.d / maxD) ** 3) ** 3;
-      num += w * y[e.j];
-      den += w;
-    }
-    out[i] = den > 0 ? num / den : y[i];
-  }
-  return out;
-}

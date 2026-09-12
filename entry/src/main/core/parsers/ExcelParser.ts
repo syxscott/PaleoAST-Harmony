@@ -16,6 +16,7 @@
  * - Proper error handling and recovery
  */
 import { DataMatrix } from '../models/DataMatrix';
+import { Matrix } from '../math/Matrix';
 
 export interface ExcelData {
   sheets: SheetData[];
@@ -54,11 +55,12 @@ export function parseExcel(content: ArrayBuffer | Uint8Array | string, options: 
   }
 
   // ArrayBuffer/Uint8Array: try XLSX first
+  const bytes = content instanceof Uint8Array ? content : new Uint8Array(content);
   try {
-    return parseXLSX(content, opts);
+    return parseXLSX(bytes, opts);
   } catch (e) {
     // Fallback: try as CSV-like format
-    const text = uint8ToString(content);
+    const text = uint8ToString(bytes);
     if (looksLikeDelimited(text)) {
       return parseDelimited(text, opts);
     }
@@ -286,273 +288,152 @@ function extractEntryData(bytes: Uint8Array, entry: ZipEntry): Uint8Array | null
 
 function inflateDeflate(compressed: Uint8Array): Uint8Array {
   const output: number[] = [];
+  let pos = 0;
   let bitBuffer = 0;
   let bitCount = 0;
-  let pos = 0;
 
-  // Fixed Huffman code tables (RFC 1951 Section 3.2.6)
-  const LIT_TABLE = buildFixedLiteralTable();
-  const DIST_TABLE = buildFixedDistanceTable();
+  // Shared LSB-first bit reader (RFC 1951 §3.1.1) — one stream position for
+  // the whole inflate, shared by headers, Huffman decoding and extra bits.
+  const readBit = (): number => {
+    if (bitCount === 0) {
+      if (pos >= compressed.length) throw new Error('DEFLATE: unexpected end of input');
+      bitBuffer = compressed[pos++];
+      bitCount = 8;
+    }
+    bitCount--;
+    return (bitBuffer >> bitCount) & 1;
+  };
+  const readBits = (n: number): number => {
+    let val = 0;
+    for (let i = 0; i < n; i++) val |= readBit() << i;
+    return val;
+  };
 
-  while (pos < compressed.length) {
-    // Read one bit at a time for block header
-    const readBit = (): number => {
-      if (bitCount === 0) {
-        bitBuffer = compressed[pos++];
-        bitCount = 8;
-      }
-      bitCount--;
-      return (bitBuffer >> bitCount) & 1;
-    };
+  // Canonical Huffman decoding (zlib "puff" style): counts per code length +
+  // symbols ordered by (length, symbol value).
+  interface HuffTable { counts: number[]; symbols: number[] }
+  const buildTable = (lengths: number[]): HuffTable => {
+    const counts = new Array(16).fill(0);
+    for (const len of lengths) if (len > 0) counts[len]++;
+    const offsets = new Array(16).fill(0);
+    let total = 0;
+    for (let len = 1; len < 16; len++) { offsets[len] = total; total += counts[len]; }
+    const symbols = new Array(total).fill(0);
+    for (let sym = 0; sym < lengths.length; sym++) {
+      if (lengths[sym] > 0) symbols[offsets[lengths[sym]]++] = sym;
+    }
+    return { counts, symbols };
+  };
+  const decodeSymbol = (table: HuffTable): number => {
+    let code = 0, first = 0, index = 0;
+    for (let len = 1; len < 16; len++) {
+      code |= readBit();
+      const count = table.counts[len];
+      if (code - first < count) return table.symbols[index + (code - first)];
+      index += count;
+      first = (first + count) << 1;
+      code <<= 1;
+    }
+    throw new Error('DEFLATE: invalid Huffman code');
+  };
 
-    const readBits = (n: number): number => {
-      let val = 0;
-      for (let i = 0; i < n; i++) {
-        val = (val << 1) | readBit();
-      }
-      return val;
-    };
+  // Fixed Huffman tables (RFC 1951 §3.2.6)
+  const fixedLitLengths: number[] = [];
+  for (let i = 0; i < 144; i++) fixedLitLengths.push(8);
+  for (let i = 144; i < 256; i++) fixedLitLengths.push(9);
+  for (let i = 256; i < 280; i++) fixedLitLengths.push(7);
+  for (let i = 280; i < 288; i++) fixedLitLengths.push(8);
+  const fixedLit = buildTable(fixedLitLengths);
+  const fixedDist = buildTable(new Array(32).fill(5));
 
-    const isFinal = readBit() === 1;
+  const LENGTH_BASE = [3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258];
+  const LENGTH_EXTRA = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0];
+  const DIST_BASE = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 14, 16, 20, 24, 28, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 448];
+  const DIST_EXTRA = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11];
+  // HCLEN order of the code-length alphabet (RFC 1951 §3.2.7)
+  const HCLEN_ORDER = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15];
+
+  while (true) {
+    const isFinal = readBit();
     const blockType = readBits(2);
 
     if (blockType === 0) {
-      // Stored block
-      bitCount = 0; // Align to byte boundary
-      const len = compressed[pos++] | (compressed[pos++] << 8);
-      pos++; // Skip nlen (complement)
+      // Stored block: discard remaining bits, then LEN + NLEN are byte-aligned
+      bitCount = 0;
+      if (pos + 4 > compressed.length) throw new Error('DEFLATE: truncated stored block');
+      const len = compressed[pos] | (compressed[pos + 1] << 8);
+      pos += 4; // LEN + NLEN (NLEN is a complement check; skipped)
       for (let i = 0; i < len; i++) {
+        if (pos >= compressed.length) throw new Error('DEFLATE: truncated stored data');
         output.push(compressed[pos++]);
       }
-    } else if (blockType === 1) {
-      // Fixed Huffman codes
+    } else if (blockType === 1 || blockType === 2) {
+      let litTable: HuffTable, distTable: HuffTable;
+      if (blockType === 1) {
+        litTable = fixedLit;
+        distTable = fixedDist;
+      } else {
+        // Dynamic Huffman: HLIT/HDIST/HCLEN headers, code-length alphabet in
+        // HCLEN order, then run-length-coded literal/distance code lengths
+        const hlit = readBits(5) + 257;
+        const hdist = readBits(5) + 1;
+        const hclen = readBits(4) + 4;
+        const clLengths = new Array(19).fill(0);
+        for (let i = 0; i < hclen; i++) clLengths[HCLEN_ORDER[i]] = readBits(3);
+        const clTable = buildTable(clLengths);
+
+        const allLengths: number[] = [];
+        while (allLengths.length < hlit + hdist) {
+          const sym = decodeSymbol(clTable);
+          if (sym < 16) {
+            allLengths.push(sym);
+          } else if (sym === 16) {
+            const rep = 3 + readBits(2);
+            const last = allLengths.length > 0 ? allLengths[allLengths.length - 1] : 0;
+            for (let r = 0; r < rep; r++) allLengths.push(last);
+          } else if (sym === 17) {
+            const rep = 3 + readBits(3);
+            for (let r = 0; r < rep; r++) allLengths.push(0);
+          } else {
+            const rep = 11 + readBits(7);
+            for (let r = 0; r < rep; r++) allLengths.push(0);
+          }
+        }
+        litTable = buildTable(allLengths.slice(0, hlit));
+        distTable = buildTable(allLengths.slice(hlit, hlit + hdist));
+      }
+
+      // Decode the compressed data of this block
       while (true) {
-        const lit = decodeHuffman(compressed, LIT_TABLE);
+        const lit = decodeSymbol(litTable);
         if (lit < 256) {
           output.push(lit);
         } else if (lit === 256) {
-          break; // End of block
-        } else if (lit > 256) {
-          const [length, dist] = decodeLengthDistance(compressed, lit, readBit, readBits);
-          copyFromHistory(output, dist, length);
+          break; // end of block
+        } else {
+          const li = lit - 257;
+          if (li >= LENGTH_BASE.length) throw new Error('DEFLATE: invalid length symbol');
+          const length = LENGTH_BASE[li] + readBits(LENGTH_EXTRA[li]);
+          const distSym = decodeSymbol(distTable);
+          if (distSym >= DIST_BASE.length) throw new Error('DEFLATE: invalid distance symbol');
+          const distance = DIST_BASE[distSym] + readBits(DIST_EXTRA[distSym]);
+          let start = output.length - distance;
+          if (start < 0) throw new Error('DEFLATE: distance too far back');
+          for (let i = 0; i < length; i++) {
+            output.push(output[start]);
+            start++;
+          }
         }
-        if (output.length > 10_000_000) break; // Safety limit
-      }
-    } else if (blockType === 2) {
-      // Dynamic Huffman codes
-      const literalCount = readBits(5) + 257;
-      const distanceCount = readBits(5) + 1;
-      const codeLengthCount = readBits(4) + 4;
-
-      // Read code length sequence
-      const codeLengths: number[] = [];
-      for (let i = 0; i < codeLengthCount; i++) {
-        codeLengths.push(readBits(3));
-      }
-
-      // Build code length alphabet
-      const clAlphabet = buildCodeLengthAlphabet(codeLengths);
-
-      // Read literal/distance code lengths
-      const litLengths: number[] = [];
-      while (litLengths.length < literalCount) {
-        const code = decodeHuffman(compressed, clAlphabet);
-        if (code < 16) {
-          litLengths.push(code);
-        } else if (code === 16) {
-          const repeat = readBits(2) + 3;
-          const last = litLengths.length > 0 ? litLengths[litLengths.length - 1] : 0;
-          for (let i = 0; i < repeat; i++) litLengths.push(last);
-        } else if (code === 17) {
-          const repeat = readBits(3) + 3;
-          for (let i = 0; i < repeat; i++) litLengths.push(0);
-        } else if (code === 18) {
-          const repeat = readBits(7) + 11;
-          for (let i = 0; i < repeat; i++) litLengths.push(0);
-        }
-      }
-
-      // Build literal table
-      const dynLitTable = buildHuffmanTable(litLengths.slice(0, literalCount));
-
-      // Read distance code lengths
-      const distLengths: number[] = [];
-      while (distLengths.length < distanceCount) {
-        const code = decodeHuffman(compressed, clAlphabet);
-        if (code < 16) {
-          distLengths.push(code);
-        } else if (code === 16) {
-          const repeat = readBits(2) + 3;
-          const last = distLengths.length > 0 ? distLengths[distLengths.length - 1] : 0;
-          for (let i = 0; i < repeat; i++) distLengths.push(last);
-        } else if (code === 17) {
-          const repeat = readBits(3) + 3;
-          for (let i = 0; i < repeat; i++) distLengths.push(0);
-        } else if (code === 18) {
-          const repeat = readBits(7) + 11;
-          for (let i = 0; i < repeat; i++) distLengths.push(0);
-        }
-      }
-
-      const dynDistTable = buildHuffmanTable(distLengths);
-
-      // Decode with dynamic tables
-      while (true) {
-        const lit = decodeHuffman(compressed, dynLitTable);
-        if (lit < 256) {
-          output.push(lit);
-        } else if (lit === 256) {
-          break;
-        } else if (lit > 256) {
-          const [length, dist] = decodeLengthDistance(compressed, lit, readBit, readBits);
-          copyFromHistory(output, dist, length);
-        }
-        if (output.length > 10_000_000) break;
+        if (output.length > 50_000_000) throw new Error('DEFLATE: output exceeds safety limit');
       }
     } else {
-      // Reserved - invalid block
-      break;
+      throw new Error('DEFLATE: reserved block type 3');
     }
 
     if (isFinal) break;
   }
 
   return new Uint8Array(output);
-}
-
-interface HuffmanTable {
-  minCode: number[];
-  maxCode: number[];
-  valPtr: number[];
-}
-
-function buildFixedLiteralTable(): HuffmanTable {
-  // Fixed literal/length codes (7-bit codes, 288 symbols)
-  const lengths: number[] = [];
-  for (let i = 0; i < 144; i++) lengths.push(8);
-  for (let i = 144; i < 256; i++) lengths.push(9);
-  for (let i = 256; i < 280; i++) lengths.push(7);
-  for (let i = 280; i < 288; i++) lengths.push(8);
-  return buildHuffmanTable(lengths);
-}
-
-function buildFixedDistanceTable(): HuffmanTable {
-  // Fixed distance codes (5-bit codes, 32 symbols)
-  const lengths: number[] = new Array(32).fill(5);
-  return buildHuffmanTable(lengths);
-}
-
-function buildHuffmanTable(lengths: number[]): HuffmanTable {
-  const maxBits = Math.max(...lengths, 1);
-  const tableSize = 1 << maxBits;
-  const table: (number | null)[] = new Array(tableSize).fill(null);
-
-  // Count codes of each length
-  const count: number[] = new Array(maxBits + 1).fill(0);
-  for (const len of lengths) {
-    if (len > 0) count[len]++;
-  }
-
-  // First code for each length
-  const firstCode: number[] = new Array(maxBits + 1).fill(0);
-  let code = 0;
-  for (let len = 1; len <= maxBits; len++) {
-    code = (code + count[len - 1]) << 1;
-    firstCode[len] = code;
-  }
-
-  // Build lookup table
-  for (let sym = 0; sym < lengths.length; sym++) {
-    const len = lengths[sym];
-    if (len === 0) continue;
-
-    code = firstCode[len]++;
-    // Fill all codes with this prefix
-    const step = 1 << (maxBits - len);
-    for (let i = code; i < tableSize; i += step) {
-      table[i] = sym;
-    }
-  }
-
-  // Build inverse table for decoding
-  const minCode: number[] = [];
-  const maxCode: number[] = [];
-  const valPtr: number[] = [];
-
-  let sym = 0;
-  for (let bits = 1; bits <= maxBits; bits++) {
-    if (count[bits] === 0) {
-      minCode[bits] = 0;
-      maxCode[bits] = -1;
-      valPtr[bits] = -1;
-    } else {
-      valPtr[bits] = sym;
-      minCode[bits] = firstCode[bits];
-      maxCode[bits] = firstCode[bits] + count[bits] - 1;
-      sym += count[bits];
-    }
-  }
-
-  return { minCode, maxCode, valPtr };
-}
-
-function decodeHuffman(data: Uint8Array, table: HuffmanTable): number {
-  let bitBuffer = 0;
-  let bitCount = 0;
-  let pos = 0;
-  let code = 0;
-
-  const readBit = (): number => {
-    if (bitCount === 0) {
-      bitBuffer = data[pos++];
-      bitCount = 8;
-    }
-    bitCount--;
-    return (bitBuffer >> bitCount) & 1;
-  };
-
-  for (let bits = 1; bits < table.minCode.length; bits++) {
-    code = (code << 1) | readBit();
-    if (code <= table.maxCode[bits] && table.maxCode[bits] >= 0) {
-      const idx = table.valPtr[bits] + (code - table.minCode[bits]);
-      return idx;
-    }
-  }
-
-  return -1; // Error
-}
-
-function decodeLengthDistance(data: Uint8Array, lit: number, readBit: () => number, readBits: (n: number) => number): [number, number] {
-  // Length codes 257-285 (extra bits vary)
-  const lengthBase = [3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258];
-  const lengthExtra = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5];
-  const distBase = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 14, 16, 20, 24, 28, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256];
-  const distExtra = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10];
-
-  const lengthIdx = lit - 257;
-  const length = lengthBase[lengthIdx] + readBits(lengthExtra[lengthIdx]);
-
-  const distCode = decodeHuffman(data, buildFixedDistanceTable());
-  const dist = distBase[distCode] + (distExtra[distCode] > 0 ? readBits(distExtra[distCode]) : 0);
-
-  return [length, dist];
-}
-
-function copyFromHistory(output: number[], distance: number, length: number): void {
-  const start = output.length - distance;
-  for (let i = 0; i < length; i++) {
-    output.push(output[start + i]);
-  }
-}
-
-function buildCodeLengthAlphabet(codeLengths: number[]): HuffmanTable {
-  // Code length alphabet: 0-18
-  const lengths: number[] = new Array(19).fill(0);
-  // First 19 values from the sequence
-  for (let i = 0; i < Math.min(codeLengths.length, 19); i++) {
-    lengths[i] = codeLengths[i];
-  }
-  return buildHuffmanTable(lengths);
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -736,7 +617,7 @@ function parseSheetXml(xml: string, sharedStrings: string[], opts: Required<Pars
     }
   }
 
-  return { data, rowLabels, colLabels };
+  return { name: '', data, rowLabels, colLabels };
 }
 
 type CellValue = number | string | boolean | null;
@@ -931,6 +812,10 @@ export function excelToDataMatrix(excel: ExcelData, sheetIndex = 0): DataMatrix 
       d[i * nCols + j] = sheet.data[i]?.[j] ?? NaN;
     }
   }
+  const grid: number[][] = [];
+  for (let i = 0; i < nRows; i++) {
+    grid.push(Array.from(d.subarray(i * nCols, (i + 1) * nCols)));
+  }
 
-  return new DataMatrix(d, nRows, nCols, sheet.rowLabels, sheet.colLabels);
+  return new DataMatrix(Matrix.from2D(grid), sheet.rowLabels, sheet.colLabels);
 }

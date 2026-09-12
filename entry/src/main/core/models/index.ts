@@ -1,14 +1,12 @@
 export { DataMatrix, DataMatrixView } from "./DataMatrix";
 export {
   ColumnMetadata,
-  ColumnMetadataManager,
-  ColumnMeta,
-  ColumnDataType
+  type ColumnMeta,
+  type ColumnDataType
 } from "./ColumnMetadata";
 export {
   RowMetadata,
-  RowMetadataManager,
-  RowMeta
+  type RowMeta
 } from "./RowMetadata";
 export {
   StateManager,
@@ -16,8 +14,8 @@ export {
 } from "./StateManager";
 export * from "./ResultTypes";
 export {
-  DiversityIndexResult,
-  DiversityResult as DiversityRecord
+  type DiversityIndexResult,
+  type DiversityResult as DiversityRecord
 } from "./DiversityResult";
 
 // ─── Convenience type aliases matching Python's models/diversity_result.py ─────

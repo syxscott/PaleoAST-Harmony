@@ -1,6 +1,6 @@
 @Component
 export struct BetaDivDialog {
-  @State visible: boolean = false;
+  @Link visible: boolean;
   @State metricIdx: number = 0;
   metricOpts: string[] = ["jaccard", "sorensen"];
   @State showTips: boolean = false;
@@ -20,6 +20,6 @@ export struct BetaDivDialog {
         Button("Cancel").backgroundColor("#95A5A6").fontColor("#FFFFFF").onClick(() => { this.visible = false; }).margin({ right: 12 })
         Button("Run Analysis").type(ButtonType.Capsule).backgroundColor("#3498DB").fontColor("#FFFFFF").onClick(() => { this.onConfirm({'metric': this.metricOpts[this.metricIdx]}); this.visible = false; })
       }.width("100%").justifyContent(FlexAlign.End)
-    }.padding(24).width(450).borderRadius(12)
+    }.padding(24).width('92%').constraintSize({ maxWidth: 450 }).borderRadius(12)
   }
 }

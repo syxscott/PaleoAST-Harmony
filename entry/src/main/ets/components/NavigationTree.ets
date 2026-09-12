@@ -5,8 +5,11 @@
 @Component
 export struct NavigationTree {
   @State expandedSections: Set<string> = new Set();
-  @State searchText: string = '';
+  @State @Watch('onSearchChanged') searchText: string = '';
   @State selectedEntry: string = '';
+  // Cached result of the (expensive) filtering — rebuilt only when
+  // searchText changes, never re-created during rendering.
+  @State filteredSections: NavSection[] = [];
 
   onNavigate: (name: string) => void = () => {};
 
@@ -56,6 +59,14 @@ export struct NavigationTree {
     ] },
   ];
 
+  aboutToAppear(): void {
+    this.recomputeFilteredSections();
+  }
+
+  onSearchChanged(): void {
+    this.recomputeFilteredSections();
+  }
+
   build() {
     Column() {
       // Search
@@ -65,7 +76,7 @@ export struct NavigationTree {
 
       // Sections
       List({ space: 2 }) {
-        ForEach(this.getFilteredSections(), (section: NavSection) => {
+        ForEach(this.filteredSections, (section: NavSection) => {
           ListItem() {
             Column() {
               // Section header
@@ -117,15 +128,20 @@ export struct NavigationTree {
     this.expandedSections = newSet;
   }
 
-  private getFilteredSections(): NavSection[] {
-    if (!this.searchText) return this.sections;
+  private recomputeFilteredSections(): void {
+    if (!this.searchText) {
+      this.filteredSections = this.sections;
+      return;
+    }
     const ft = this.searchText.toLowerCase();
-    return this.sections
-      .map(s => ({
-        ...s,
-        entries: s.entries.filter(e => e.toLowerCase().includes(ft)),
-      }))
-      .filter(s => s.entries.length > 0 || s.name.toLowerCase().includes(ft));
+    const result: NavSection[] = [];
+    for (const s of this.sections) {
+      const entries = s.entries.filter(e => e.toLowerCase().includes(ft));
+      if (entries.length > 0 || s.name.toLowerCase().includes(ft)) {
+        result.push({ name: s.name, icon: s.icon, entries: entries });
+      }
+    }
+    this.filteredSections = result;
   }
 }
 

@@ -1,4 +1,5 @@
 import { Matrix } from './Matrix';
+import { assertFiniteMatrix } from './Validation';
 
 /**
  * Linear algebra: SVD, eigh, inv, solve, lstsq, norm, det, cov, corrcoef.
@@ -16,6 +17,7 @@ import { Matrix } from './Matrix';
  * Returns: { U, S, Vt } with correct shapes for the given A.
  */
 export function svd(A: Matrix): { U: Matrix; S: number[]; Vt: Matrix } {
+  assertFiniteMatrix('svd:A', A);
   let m = A.rows, n = A.cols;
   // Work with the larger dimension for the bidiagonal iteration
   let work: Matrix;
@@ -107,6 +109,7 @@ export function svd(A: Matrix): { U: Matrix; S: number[]; Vt: Matrix } {
  * zero or by using SVD to reconstruct).
  */
 export function eigh(A: Matrix): { eigenvalues: number[]; eigenvectors: Matrix } {
+  assertFiniteMatrix('eigh:A', A);
   const n = A.rows;
   let T = A.clone(), Q = Matrix.eye(n);
   for (let iter = 0; iter < 100 * n; iter++) {
@@ -145,6 +148,7 @@ export function eigh(A: Matrix): { eigenvalues: number[]; eigenvectors: Matrix }
 }
 
 export function inv(A: Matrix): Matrix {
+  assertFiniteMatrix('inv:A', A);
   const n = A.rows;
   if (n !== A.cols) throw new Error('inv: not square');
   const aug = Matrix.zeros(n, 2 * n);
@@ -185,6 +189,8 @@ export function inv(A: Matrix): Matrix {
  * Returns x such that Ax = b.  A must be square and non-singular.
  */
 export function solve(A: Matrix, b: Matrix): Matrix {
+  assertFiniteMatrix('solve:A', A);
+  assertFiniteMatrix('solve:b', b);
   const n = A.rows;
   if (A.cols !== n) throw new Error('solve: A must be square');
   if (b.rows !== n) throw new Error('solve: b must have same row count as A');
@@ -259,28 +265,39 @@ export function norm(A: Matrix): number {
   return Math.sqrt(s);
 }
 
+/**
+ * Determinant using LU decomposition with partial pivoting.
+ * Uses log-sum scaling to prevent overflow for large matrices.
+ *
+ * @throws Error if determinant overflows (log10 |det| > 300)
+ */
 export function det(A: Matrix): number {
+  assertFiniteMatrix('det:A', A);
   const n = A.rows;
   const m = A.clone();
-  let d = 1;
+  let sign = 1;
+  let logSum = 0; // sum of log10|pivot| to avoid overflow
   for (let col = 0; col < n; col++) {
     let maxRow = col;
     for (let row = col + 1; row < n; row++)
       if (Math.abs(m.get(row, col)) > Math.abs(m.get(maxRow, col))) maxRow = row;
     if (maxRow !== col) {
-      d = -d;
+      sign = -sign;
       for (let j = 0; j < n; j++) {
         const t = m.get(col, j); m.set(col, j, m.get(maxRow, j)); m.set(maxRow, j, t);
       }
     }
-    d *= m.get(col, col);
-    if (Math.abs(d) < 1e-15) return 0;
+    const pivot = m.get(col, col);
+    if (Math.abs(pivot) < 1e-15) return 0;
+    logSum += Math.log10(Math.abs(pivot));
+    // Overflow guard: IEEE-754 double max ~ 1e308, log10 ~ 308
+    if (logSum > 300) throw new Error('det: overflow');
     for (let row = col + 1; row < n; row++) {
-      const f = m.get(row, col) / m.get(col, col);
+      const f = m.get(row, col) / pivot;
       for (let j = col + 1; j < n; j++) m.set(row, j, m.get(row, j) - f * m.get(col, j));
     }
   }
-  return d;
+  return sign * Math.pow(10, logSum);
 }
 
 export function cov(X: Matrix): Matrix {

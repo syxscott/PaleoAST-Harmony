@@ -1,28 +1,28 @@
 /**
  * PCA Configuration Dialog
  * Principal Component Analysis via SVD decomposition.
+ * (ArkTS structs cannot extend, so BaseAnalysisDialog is only a structural template.)
  */
+
+interface PCAParams {
+  nComponents: number;
+  method: string;
+}
+
 @Component
 export struct PCADialog {
-  @Prop @Watch('onVisibleChange') visible: boolean = false;
+  @Link @Watch('onVisibleChange') visible: boolean = false;
   @State nComponents: number = 3;
   @State methodIdx: number = 0;
   @State errorMsg: string = '';
   @State showAdvanced: boolean = false;
-  methodOpts: string[] = ['covariance', 'correlation'];
-  methodDesc: string[] = [
+  private methodOpts: string[] = ['covariance', 'correlation'];
+  private methodDesc: string[] = [
     'Covariance: preserves original scale (good when units are same)',
     'Correlation: standardizes to unit variance (good for mixed units)',
   ];
   onConfirm: (params: Record<string, Object>) => void = () => {};
-  onCancel: () => void = () => {}; // Callback to notify parent component
-
-  onVisibleChange() {
-    if (!this.visible) {
-      // Dialog is closing - notify parent
-      this.onCancel();
-    }
-  }
+  onCancel: () => void = () => {};
 
   onVisibleChange() {
     if (this.visible) {
@@ -33,45 +33,62 @@ export struct PCADialog {
     }
   }
 
+  aboutToUpdate() {
+    if (this.nComponents < 1) {
+      this.errorMsg = 'Must be >= 1';
+    } else if (this.nComponents > 50) {
+      this.errorMsg = 'Maximum 50';
+    } else {
+      this.errorMsg = '';
+    }
+  }
+
+  @Builder
+  contentBuilder() {
+    Row() {
+      Text('Number of components:').width(160).fontSize(13)
+      TextInput({ text: String(this.nComponents) }).width(80).type(InputType.Number)
+        .onChange((v: string) => {
+          const n = parseInt(v) || 3;
+          if (n < 1) { this.errorMsg = 'Must be >= 1'; this.nComponents = 1; }
+          else if (n > 50) { this.errorMsg = 'Maximum 50'; this.nComponents = 50; }
+          else { this.nComponents = n; this.errorMsg = ''; }
+        })
+    }.width('100%').margin({ bottom: 4 })
+
+    if (this.errorMsg) {
+      Text(this.errorMsg).fontSize(10).fontColor('#E74C3C').margin({ bottom: 8 })
+    }
+
+    Row() {
+      Text('Method:').width(160).fontSize(13)
+      Select(this.methodOpts.map((v, i) => ({ value: v })))
+        .selected(this.methodIdx)
+        .onSelect((idx: number) => { this.methodIdx = idx; })
+    }.width('100%').margin({ bottom: 4 })
+
+    Text(this.methodDesc[this.methodIdx]).fontSize(10).fontColor('#95A5A6').margin({ bottom: 8 })
+
+    Row() {
+      Text(this.showAdvanced ? '[-] Tips' : '[+] Tips').fontSize(11).fontColor('#3498DB')
+        .onClick(() => { this.showAdvanced = !this.showAdvanced; })
+    }.width('100%').margin({ bottom: 8 })
+
+    if (this.showAdvanced) {
+      Column() {
+        Text('Use correlation PCA when variables have different units.').fontSize(10).fontColor('#7F8C8D').margin({ bottom: 2 })
+        Text('Scree plot helps decide how many components to retain.').fontSize(10).fontColor('#7F8C8D').margin({ bottom: 2 })
+        Text('Kaiser criterion: retain components with eigenvalue > 1.').fontSize(10).fontColor('#7F8C8D')
+      }.margin({ bottom: 8 })
+    }
+  }
+
   build() {
     Column() {
       Text('PCA — Principal Component Analysis').fontSize(18).fontWeight(FontWeight.Bold).margin({ bottom: 8 })
       Text('Finds orthogonal axes of maximum variance via SVD.').fontSize(11).fontColor('#7F8C8D').margin({ bottom: 16 })
 
-      Row() {
-        Text('Number of components:').width(160).fontSize(13)
-        TextInput({ text: String(this.nComponents) }).width(80).type(InputType.Number)
-          .onChange((v: string) => {
-            const n = parseInt(v) || 3;
-            if (n < 1) { this.errorMsg = 'Must be >= 1'; this.nComponents = 1; }
-            else if (n > 50) { this.errorMsg = 'Maximum 50'; this.nComponents = 50; }
-            else { this.nComponents = n; this.errorMsg = ''; }
-          })
-      }.width('100%').margin({ bottom: 4 })
-
-      if (this.errorMsg) { Text(this.errorMsg).fontSize(10).fontColor('#E74C3C').margin({ bottom: 8 }) }
-
-      Row() {
-        Text('Method:').width(160).fontSize(13)
-        Select(this.methodOpts.map((v, i) => ({ value: v })))
-          .selected(this.methodIdx)
-          .onSelect((idx: number) => { this.methodIdx = idx; })
-      }.width('100%').margin({ bottom: 4 })
-
-      Text(this.methodDesc[this.methodIdx]).fontSize(10).fontColor('#95A5A6').margin({ bottom: 8 })
-
-      Row() {
-        Text(this.showAdvanced ? '[-] Tips' : '[+] Tips').fontSize(11).fontColor('#3498DB')
-          .onClick(() => { this.showAdvanced = !this.showAdvanced; })
-      }.width('100%').margin({ bottom: 8 })
-
-      if (this.showAdvanced) {
-        Column() {
-          Text('Use correlation PCA when variables have different units.').fontSize(10).fontColor('#7F8C8D').margin({ bottom: 2 })
-          Text('Scree plot helps decide how many components to retain.').fontSize(10).fontColor('#7F8C8D').margin({ bottom: 2 })
-          Text('Kaiser criterion: retain components with eigenvalue > 1.').fontSize(10).fontColor('#7F8C8D')
-        }.margin({ bottom: 8 })
-      }
+      this.contentBuilder()
 
       Divider().margin({ top: 8, bottom: 12 })
 
@@ -85,6 +102,6 @@ export struct PCADialog {
             this.visible = false;
           })
       }.width('100%').justifyContent(FlexAlign.End)
-    }.padding(24).width(480).borderRadius(12)
+    }.padding(24).width('92%').constraintSize({ maxWidth: 480 }).borderRadius(12)
   }
 }

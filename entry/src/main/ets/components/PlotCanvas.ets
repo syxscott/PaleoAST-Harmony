@@ -1,4 +1,8 @@
 import { DataMatrix } from '../../core/models/index';
+import { componentSnapshot } from '@kit.ArkUI';
+import { image } from '@kit.ImageKit';
+import { BusinessError } from '@kit.BasicServicesKit';
+import fs from '@ohos.file.fs';
 
 /**
  * Interactive Plot Canvas — replaces views/ui_plot_canvas.py (2,892 lines)
@@ -27,6 +31,32 @@ export struct PlotCanvas {
   private plotData: PlotData | null = null;
   private ctx: CanvasRenderingContext2D | null = null;
   onStatus: (msg: string) => void = (_msg: string) => {};
+
+  // Render scheduling — avoids duplicate RAF-driven renders
+  private canvasRenderScheduled: boolean = false;
+  private pendingRenderFrame: number = -1;
+
+  // Fold/unfold transitions fire a burst of area changes; coalesce redraws
+  // so the canvas re-renders once after the resize settles (smoothness).
+  private resizeTimerId: number = -1;
+
+  // Hover throttle: max 1 hover update per 16ms (60fps)
+  private hoverRafId: number = -1;
+  private pendingHover: { x: number; y: number } | null = null;
+
+  // Touch state: single-finger drag = pan, tap = select
+  private touchStartX: number = 0;
+  private touchStartY: number = 0;
+  private touchStartPanX: number = 0;
+  private touchStartPanY: number = 0;
+  private touchMoved: boolean = false;
+  private pinchStartZoom: number = 1;
+
+  aboutToDisappear(): void {
+    if (this.pendingRenderFrame >= 0) { clearTimeout(this.pendingRenderFrame); }
+    if (this.hoverRafId >= 0) { clearTimeout(this.hoverRafId); }
+    if (this.resizeTimerId >= 0) { clearTimeout(this.resizeTimerId); }
+  }
 
   // Cached coordinate mapping
   private xMin: number = 0;
@@ -63,21 +93,39 @@ export struct PlotCanvas {
         this.ctx = ctx;
         this.redraw();
       })
+      .id('plotCanvas')
       .width('100%').layoutWeight(1)
       .onAreaChange((_: Area, newArea: Area) => {
+        // 折叠/展开动画期间 area 会连续变化：尺寸即时更新（映射用），
+        // 重绘合并到动画结束后的一次（防抖），保证切换流畅。
         this.canvasWidth = newArea.width as number;
         this.canvasHeight = newArea.height as number;
-        this.redraw();
+        if (this.resizeTimerId >= 0) { clearTimeout(this.resizeTimerId); }
+        this.resizeTimerId = setTimeout(() => {
+          this.resizeTimerId = -1;
+          this.redraw();
+        }, 80);
       })
-      .onMouseAction((event: MouseEventAction) => {
+      .onMouse((event: MouseEvent) => {
         this.mouseX = event.x;
         this.mouseY = event.y;
         if (event.action === MouseAction.Move) {
           this.handleHover(event.x, event.y);
-        } else if (event.action === MouseAction.Down) {
+        } else if (event.action === MouseAction.Press) {
           this.handleClick(event.x, event.y);
         }
       })
+      .onTouch((event: TouchEvent) => {
+        this.handleTouch(event);
+      })
+      .gesture(
+        PinchGesture({ fingers: 2 })
+          .onActionStart(() => { this.pinchStartZoom = this.zoomLevel; })
+          .onActionUpdate((event: GestureEvent) => {
+            this.zoomLevel = Math.min(10, Math.max(0.1, this.pinchStartZoom * event.scale));
+            this.redraw();
+          })
+      )
 
       // ─── Tooltip ───
       if (this.showTooltip && this.hoveredPoint >= 0) {
@@ -133,7 +181,8 @@ export struct PlotCanvas {
   }
 
   setBoxPlotData(groups: { label: string; values: number[] }[]): void {
-    this.plotData = { type: 'boxplot', groups };
+    // Box-plot groups have their own field: PlotData.groups stays number[]
+    this.plotData = { type: 'boxplot', boxGroups: groups };
     this.plotType = 'boxplot';
     this.redraw();
   }
@@ -183,6 +232,19 @@ export struct PlotCanvas {
   // ─── Rendering ─────────────────────────────────────────────────
 
   private redraw(): void {
+    if (!this.ctx || !this.plotData) return;
+    if (this.canvasRenderScheduled) return;
+    this.canvasRenderScheduled = true;
+    // requestAnimationFrame is a Web API and does not exist in ArkTS — use setTimeout
+    this.pendingRenderFrame = setTimeout(() => {
+      this.canvasRenderScheduled = false;
+      this.pendingRenderFrame = -1;
+      this._redrawCore();
+    }, 16);
+  }
+
+  /** Internal render — called once per RAF cycle. */
+  private _redrawCore(): void {
     if (!this.ctx || !this.plotData) return;
     const ctx = this.ctx;
     const w = this.canvasWidth || 800;
@@ -269,6 +331,7 @@ export struct PlotCanvas {
     const data = this.plotData!;
     const x = data.x!, y = data.y!;
     const colors = ['#3498DB', '#E74C3C', '#27AE60', '#F39C12', '#9B59B6', '#1ABC9C'];
+    const n = x.length;
 
     // Zero lines
     if (this.xMin < 0 && this.xMax > 0) {
@@ -280,27 +343,83 @@ export struct PlotCanvas {
       ctx.beginPath(); ctx.moveTo(this.margin.left, this.mapY(0)); ctx.lineTo(this.margin.left + pw, this.mapY(0)); ctx.stroke();
     }
 
-    // Points
-    for (let i = 0; i < x.length; i++) {
-      const color = data.groups ? colors[data.groups[i] % colors.length] : colors[0];
-      const isHovered = this.hoveredPoint === i;
-      const isSelected = this.selectedPoints.has(i);
-      ctx.fillStyle = color;
-      ctx.globalAlpha = isHovered ? 1.0 : (isSelected ? 0.9 : 0.7);
-      ctx.beginPath();
-      ctx.arc(this.mapX(x[i]), this.mapY(y[i]), isHovered ? 8 : (isSelected ? 7 : 5), 0, 2 * Math.PI);
-      ctx.fill();
-      if (isHovered || isSelected) {
-        ctx.strokeStyle = color; ctx.lineWidth = 2;
-        ctx.beginPath(); ctx.arc(this.mapX(x[i]), this.mapY(y[i]), isHovered ? 11 : 9, 0, 2 * Math.PI); ctx.stroke();
+    // ── Batched Path2D rendering for large datasets (N > 1000) ──
+    if (n > 1000) {
+      // Pre-compute mapped coordinates to avoid repeated mapX/mapY calls
+      const mapped: { mx: number; my: number; color: string; isHovered: boolean; isSelected: boolean }[] = new Array(n);
+      for (let i = 0; i < n; i++) {
+        mapped[i] = {
+          mx: this.mapX(x[i]),
+          my: this.mapY(y[i]),
+          color: data.groups ? colors[data.groups[i] % colors.length] : colors[0],
+          isHovered: this.hoveredPoint === i,
+          isSelected: this.selectedPoints.has(i)
+        };
+      }
+      // Build one Path2D per color group
+      for (let ci = 0; ci < colors.length; ci++) {
+        const path = new Path2D();
+        let count = 0;
+        for (let i = 0; i < n; i++) {
+          const pt = mapped[i];
+          if (pt.color !== colors[ci]) continue;
+          if (pt.isHovered || pt.isSelected) continue;
+          const r = pt.isSelected ? 7 : 5;
+          // Circle approximated as rect for speed (no arc per-point)
+          path.arc(pt.mx, pt.my, r, 0, 2 * Math.PI);
+          count++;
+        }
+        if (count > 0) {
+          ctx.fillStyle = colors[ci];
+          ctx.globalAlpha = 0.7;
+          ctx.fill(path);
+        }
       }
       ctx.globalAlpha = 1;
+      // Hovered / selected drawn individually (on top, thin count)
+      for (let i = 0; i < n; i++) {
+        const pt = mapped[i];
+        if (!pt.isHovered && !pt.isSelected) continue;
+        const r = pt.isHovered ? 8 : 7;
+        ctx.fillStyle = pt.color;
+        ctx.globalAlpha = 1.0;
+        ctx.beginPath();
+        ctx.arc(pt.mx, pt.my, r, 0, 2 * Math.PI);
+        ctx.fill();
+        ctx.strokeStyle = pt.color; ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(pt.mx, pt.my, pt.isHovered ? 11 : 9, 0, 2 * Math.PI);
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+        if (pt.isHovered && data.labels?.[i]) {
+          ctx.fillStyle = this.darkMode ? '#ccc' : '#2C3E50';
+          ctx.font = '10px sans-serif';
+          ctx.fillText(data.labels[i], pt.mx + 10, pt.my - 5);
+        }
+      }
+    } else {
+      // ── Standard per-point rendering for small datasets ──
+      for (let i = 0; i < n; i++) {
+        const color = data.groups ? colors[data.groups[i] % colors.length] : colors[0];
+        const isHovered = this.hoveredPoint === i;
+        const isSelected = this.selectedPoints.has(i);
+        const mx = this.mapX(x[i]), my = this.mapY(y[i]);
+        ctx.fillStyle = color;
+        ctx.globalAlpha = isHovered ? 1.0 : (isSelected ? 0.9 : 0.7);
+        ctx.beginPath();
+        ctx.arc(mx, my, isHovered ? 8 : (isSelected ? 7 : 5), 0, 2 * Math.PI);
+        ctx.fill();
+        if (isHovered || isSelected) {
+          ctx.strokeStyle = color; ctx.lineWidth = 2;
+          ctx.beginPath(); ctx.arc(mx, my, isHovered ? 11 : 9, 0, 2 * Math.PI); ctx.stroke();
+        }
+        ctx.globalAlpha = 1;
 
-      // Label on hover
-      if (isHovered && data.labels?.[i]) {
-        ctx.fillStyle = this.darkMode ? '#ccc' : '#2C3E50';
-        ctx.font = '10px sans-serif';
-        ctx.fillText(data.labels[i], this.mapX(x[i]) + 10, this.mapY(y[i]) - 5);
+        if (isHovered && data.labels?.[i]) {
+          ctx.fillStyle = this.darkMode ? '#ccc' : '#2C3E50';
+          ctx.font = '10px sans-serif';
+          ctx.fillText(data.labels[i], mx + 10, my - 5);
+        }
       }
     }
 
@@ -379,7 +498,7 @@ export struct PlotCanvas {
 
   private drawBoxPlot(ctx: CanvasRenderingContext2D, pw: number, ph: number): void {
     const data = this.plotData!;
-    const groups = data.groups!;
+    const groups = data.boxGroups!;
     const allVals = groups.flatMap(g => g.values);
     const yMin = allVals.reduce((a, b) => Math.min(a, b), Infinity);
     const yMax = allVals.reduce((a, b) => Math.max(a, b), -Infinity);
@@ -430,10 +549,30 @@ export struct PlotCanvas {
     for (const row of matrix) for (const v of row) { minV = Math.min(minV, v); maxV = Math.max(maxV, v); }
     const range = maxV - minV || 1;
 
+    // Pre-compute normalized values + derived colors once
+    const normVals: number[][] = new Array(nRows);
+    const rChans: number[][] = new Array(nRows);
+    const bChans: number[][] = new Array(nRows);
+    const gChans: number[][] = new Array(nRows); // green channel (blue-ish diverging)
+    for (let i = 0; i < nRows; i++) {
+      normVals[i] = new Array(nCols);
+      rChans[i] = new Array(nCols);
+      bChans[i] = new Array(nCols);
+      gChans[i] = new Array(nCols);
+      for (let j = 0; j < nCols; j++) {
+        const norm = (matrix[i][j] - minV) / range;
+        normVals[i][j] = norm;
+        rChans[i][j] = Math.floor(norm * 255);
+        bChans[i][j] = Math.floor((1 - norm) * 255);
+        gChans[i][j] = Math.floor(100 * (1 - Math.abs(norm - 0.5) * 2));
+      }
+    }
+
+    // Draw cells using pre-computed values
     for (let i = 0; i < nRows; i++) for (let j = 0; j < nCols; j++) {
-      const norm = (matrix[i][j] - minV) / range;
-      const r = Math.floor(norm * 255), b = Math.floor((1 - norm) * 255);
-      ctx.fillStyle = 'rgb(' + r + ',' + Math.floor(100 * (1 - Math.abs(norm - 0.5) * 2)) + ',' + b + ')';
+      const norm = normVals[i][j];
+      const r = rChans[i][j], b = bChans[i][j], g = gChans[i][j];
+      ctx.fillStyle = 'rgb(' + r + ',' + g + ',' + b + ')';
       ctx.fillRect(this.margin.left + j * cellW, this.margin.top + i * cellH, cellW - 1, cellH - 1);
 
       // Value annotation
@@ -460,12 +599,21 @@ export struct PlotCanvas {
       ctx.restore();
     }
 
-    // Color bar
+    // Color bar — pre-compute gradient segments
     const barX = this.margin.left + pw + 10, barW = 15;
-    for (let i = 0; i < ph; i++) {
+    const barNormVals: number[] = new Array(Math.ceil(ph));
+    const barR: number[] = new Array(barNormVals.length);
+    const barB: number[] = new Array(barNormVals.length);
+    const barG: number[] = new Array(barNormVals.length);
+    for (let i = 0; i < barNormVals.length; i++) {
       const norm = 1 - i / ph;
-      const r = Math.floor(norm * 255), b = Math.floor((1 - norm) * 255);
-      ctx.fillStyle = 'rgb(' + r + ',' + Math.floor(100 * (1 - Math.abs(norm - 0.5) * 2)) + ',' + b + ')';
+      barNormVals[i] = norm;
+      barR[i] = Math.floor(norm * 255);
+      barB[i] = Math.floor((1 - norm) * 255);
+      barG[i] = Math.floor(100 * (1 - Math.abs(norm - 0.5) * 2));
+    }
+    for (let i = 0; i < barNormVals.length; i++) {
+      ctx.fillStyle = 'rgb(' + barR[i] + ',' + barG[i] + ',' + barB[i] + ')';
       ctx.fillRect(barX, this.margin.top + i, barW, 1);
     }
     ctx.fillStyle = this.darkMode ? '#ccc' : '#2C3E50';
@@ -477,6 +625,21 @@ export struct PlotCanvas {
   // ─── Interaction ───────────────────────────────────────────────
 
   private handleHover(x: number, y: number): void {
+    // Throttle: at most 1 hover update per 16ms (60fps)
+    if (this.hoverRafId >= 0) {
+      this.pendingHover = { x, y };
+      return;
+    }
+    this.hoverRafId = setTimeout(() => {
+      this.hoverRafId = -1;
+      const target = this.pendingHover ?? { x, y };
+      this.pendingHover = null;
+      this._doHover(target.x, target.y);
+    }, 16);
+  }
+
+  /** Actual hover logic — called at most once per 16ms. */
+  private _doHover(x: number, y: number): void {
     if (!this.plotData?.x) return;
     let minDist = Infinity, closest = -1;
     for (let i = 0; i < this.plotData.x.length; i++) {
@@ -503,13 +666,57 @@ export struct PlotCanvas {
   }
 
   private handleClick(x: number, y: number): void {
-    if (this.hoveredPoint >= 0) {
-      if (this.selectedPoints.has(this.hoveredPoint)) {
-        this.selectedPoints.delete(this.hoveredPoint);
+    this._doHover(x, y);
+    this._selectAt(x, y);
+  }
+
+  /** Shared by mouse click and touch tap: toggle selection of nearest point. */
+  private _selectAt(x: number, y: number): void {
+    if (!this.plotData?.x) return;
+    let minDist = Infinity, closest = -1;
+    for (let i = 0; i < this.plotData.x.length; i++) {
+      const dx = x - this.mapX(this.plotData.x[i]);
+      const dy = y - this.mapY(this.plotData.y![i]);
+      const d = Math.sqrt(dx * dx + dy * dy);
+      if (d < minDist && d < 20) { minDist = d; closest = i; }
+    }
+    if (closest >= 0) {
+      if (this.selectedPoints.has(closest)) {
+        this.selectedPoints.delete(closest);
       } else {
-        this.selectedPoints.add(this.hoveredPoint);
+        this.selectedPoints.add(closest);
       }
       this.redraw();
+    }
+  }
+
+  /** Touch: single-finger drag pans, tap selects (shares hover/select logic). */
+  private handleTouch(event: TouchEvent): void {
+    const t = event.touches[0];
+    if (!t) return;
+    if (event.type === TouchType.Down) {
+      this.touchStartX = t.x;
+      this.touchStartY = t.y;
+      this.touchStartPanX = this.panX;
+      this.touchStartPanY = this.panY;
+      this.touchMoved = false;
+    } else if (event.type === TouchType.Move) {
+      const dx = t.x - this.touchStartX;
+      const dy = t.y - this.touchStartY;
+      if (Math.abs(dx) > 3 || Math.abs(dy) > 3) { this.touchMoved = true; }
+      if (this.touchMoved) {
+        this.panX = this.touchStartPanX + dx;
+        this.panY = this.touchStartPanY + dy;
+        this.redraw();
+      }
+    } else if (event.type === TouchType.Up) {
+      if (!this.touchMoved) {
+        // Tap: treat as click (hover + select at point)
+        this.mouseX = t.x;
+        this.mouseY = t.y;
+        this._doHover(t.x, t.y);
+        this._selectAt(t.x, t.y);
+      }
     }
   }
 
@@ -522,110 +729,119 @@ export struct PlotCanvas {
 
   // ─── Export ─────────────────────────────────────────────────────
 
-  private exportPNG(): void {
-    // Use CanvasRenderingContext2D to render to an OffScreenCanvas and extract pixels
-    // In production, use @ohos.file.picker to save the file
+  /**
+   * PNG export via componentSnapshot: captures the canvas node by id,
+   * packs the PixelMap to PNG and writes it to `path` (@ohos.file.fs).
+   * Throws when no path is given.
+   */
+  async exportPNG(path: string = ''): Promise<void> {
     try {
-      if (!this.ctx) {
-        if (this.onStatus) this.onStatus('Error: Canvas not initialized');
-        return;
+      if (!path || path.length === 0) {
+        throw new Error('no export path');
       }
-      // Create OffScreenCanvas for pixel extraction
-      const offCanvas = new OffScreenCanvas(800, 600);
-      const offCtx = offCanvas.getContext('2d');
-      if (!offCtx) {
-        if (this.onStatus) this.onStatus('Error: OffScreenCanvas not supported');
-        return;
-      }
-      // Copy current canvas content
-      const imageData = this.ctx.toDataURL('image/png');
-      // For actual file save, would use:
-      // import fs from '@ohos.file.fs';
-      // import picker from '@ohos.file.picker';
-      // const fd = picker.save({ files: [{ name: this.title + '.png' }] });
-      // fs.writeSync(fd, this.ctx.getImageData(0, 0, w, h).data);
+      const pixelMap = await componentSnapshot.get('plotCanvas');
+      const packer = image.createImagePacker();
+      const data = await packer.pack(pixelMap, { format: 'image/png', quality: 100 });
+      const file = fs.openSync(path, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
+      fs.writeSync(file.fd, data);
+      fs.closeSync(file.fd);
+      packer.release();
+      pixelMap.release();
       if (this.onStatus) this.onStatus('PNG exported: ' + this.title + ' (' + Math.round(this.canvasWidth) + 'x' + Math.round(this.canvasHeight) + ')');
     } catch (e) {
-      if (this.onStatus) this.onStatus('PNG export failed: ' + String(e));
+      const err = e as BusinessError;
+      if (this.onStatus) this.onStatus('PNG export failed: ' + (err.message ?? String(e)));
     }
   }
 
-  private exportSVG(): void {
+  /**
+   * Pure string builder for the SVG markup (no I/O).
+   */
+  private buildSVG(): string {
+    let svg = '<svg width="' + this.canvasWidth + '" height="' + this.canvasHeight + '" xmlns="http://www.w3.org/2000/svg">';
+    svg += '<rect width="100%" height="100%" fill="' + (this.darkMode ? '#1a1a2e' : '#FFFFFF') + '"/>';
+
+    // Title
+    if (this.title) {
+      svg += '<text x="' + (this.canvasWidth / 2) + '" y="25" text-anchor="middle" font-size="14" font-weight="bold" fill="' + (this.darkMode ? '#fff' : '#2C3E50') + '">' + this.escapeXml(this.title) + '</text>';
+    }
+
+    // Axes
+    const pw = this.canvasWidth - this.margin.left - this.margin.right;
+    const ph = this.canvasHeight - this.margin.top - this.margin.bottom;
+    svg += '<line x1="' + this.margin.left + '" y1="' + this.margin.top + '" x2="' + this.margin.left + '" y2="' + (this.margin.top + ph) + '" stroke="' + (this.darkMode ? '#ccc' : '#2C3E50') + '" stroke-width="1.5"/>';
+    svg += '<line x1="' + this.margin.left + '" y1="' + (this.margin.top + ph) + '" x2="' + (this.margin.left + pw) + '" y2="' + (this.margin.top + ph) + '" stroke="' + (this.darkMode ? '#ccc' : '#2C3E50') + '" stroke-width="1.5"/>';
+
+    // Grid lines
+    svg += '<g stroke="' + (this.darkMode ? '#333' : '#E4E7EB') + '" stroke-width="0.5">';
+    for (let i = 0; i <= 5; i++) {
+      const gy = this.margin.top + (ph * i) / 5;
+      svg += '<line x1="' + this.margin.left + '" y1="' + gy + '" x2="' + (this.margin.left + pw) + '" y2="' + gy + '"/>';
+      const gx = this.margin.left + (pw * i) / 5;
+      svg += '<line x1="' + gx + '" y1="' + this.margin.top + '" x2="' + gx + '" y2="' + (this.margin.top + ph) + '"/>';
+    }
+    svg += '</g>';
+
+    // Plot data
+    if (this.plotData) {
+      switch (this.plotData.type) {
+        case 'scatter':
+          if (this.plotData.x) {
+            const colors = ['#3498DB', '#E74C3C', '#27AE60', '#F39C12', '#9B59B6', '#1ABC9C'];
+            for (let i = 0; i < this.plotData.x.length; i++) {
+              const px = this.mapX(this.plotData.x[i]).toFixed(1);
+              const py = this.mapY(this.plotData.y![i]).toFixed(1);
+              const color = this.plotData.groups ? colors[this.plotData.groups[i] % colors.length] : colors[0];
+              svg += '<circle cx="' + px + '" cy="' + py + '" r="5" fill="' + color + '" opacity="0.7"/>';
+            }
+          }
+          break;
+        case 'line':
+          if (this.plotData.x && this.plotData.y) {
+            const color = this.plotData.color ?? '#3498DB';
+            let path = 'M ' + this.mapX(this.plotData.x[0]).toFixed(1) + ' ' + this.mapY(this.plotData.y[0]).toFixed(1);
+            for (let i = 1; i < this.plotData.x.length; i++) {
+              path += ' L ' + this.mapX(this.plotData.x[i]).toFixed(1) + ' ' + this.mapY(this.plotData.y[i]).toFixed(1);
+            }
+            svg += '<path d="' + path + '" fill="none" stroke="' + color + '" stroke-width="2"/>';
+          }
+          break;
+        case 'bar':
+          if (this.plotData.labels && this.plotData.values) {
+            const maxVal = this.plotData.values.reduce((a, b) => Math.max(a, b), 1);
+            const barW = pw / this.plotData.labels.length * 0.7;
+            const gap = pw / this.plotData.labels.length * 0.3;
+            const barColors = ['#3498DB', '#E74C3C', '#27AE60', '#F39C12', '#9B59B6'];
+            for (let i = 0; i < this.plotData.labels.length; i++) {
+              const x = this.margin.left + (i * (barW + gap)) + gap / 2;
+              const barH = (this.plotData.values[i] / maxVal) * ph;
+              svg += '<rect x="' + x + '" y="' + (this.margin.top + ph - barH) + '" width="' + barW + '" height="' + barH + '" fill="' + barColors[i % barColors.length] + '" opacity="0.8"/>';
+            }
+          }
+          break;
+      }
+    }
+
+    svg += '</svg>';
+    return svg;
+  }
+
+  exportSVG(path: string = ''): void {
     try {
-      let svg = '<svg width="' + this.canvasWidth + '" height="' + this.canvasHeight + '" xmlns="http://www.w3.org/2000/svg">';
-      svg += '<rect width="100%" height="100%" fill="' + (this.darkMode ? '#1a1a2e' : '#FFFFFF') + '"/>';
-
-      // Title
-      if (this.title) {
-        svg += '<text x="' + (this.canvasWidth / 2) + '" y="25" text-anchor="middle" font-size="14" font-weight="bold" fill="' + (this.darkMode ? '#fff' : '#2C3E50') + '">' + this.escapeXml(this.title) + '</text>';
-      }
-
-      // Axes
-      const pw = this.canvasWidth - this.margin.left - this.margin.right;
-      const ph = this.canvasHeight - this.margin.top - this.margin.bottom;
-      svg += '<line x1="' + this.margin.left + '" y1="' + this.margin.top + '" x2="' + this.margin.left + '" y2="' + (this.margin.top + ph) + '" stroke="' + (this.darkMode ? '#ccc' : '#2C3E50') + '" stroke-width="1.5"/>';
-      svg += '<line x1="' + this.margin.left + '" y1="' + (this.margin.top + ph) + '" x2="' + (this.margin.left + pw) + '" y2="' + (this.margin.top + ph) + '" stroke="' + (this.darkMode ? '#ccc' : '#2C3E50') + '" stroke-width="1.5"/>';
-
-      // Grid lines
-      svg += '<g stroke="' + (this.darkMode ? '#333' : '#E4E7EB') + '" stroke-width="0.5">';
-      for (let i = 0; i <= 5; i++) {
-        const gy = this.margin.top + (ph * i) / 5;
-        svg += '<line x1="' + this.margin.left + '" y1="' + gy + '" x2="' + (this.margin.left + pw) + '" y2="' + gy + '"/>';
-        const gx = this.margin.left + (pw * i) / 5;
-        svg += '<line x1="' + gx + '" y1="' + this.margin.top + '" x2="' + gx + '" y2="' + (this.margin.top + ph) + '"/>';
-      }
-      svg += '</g>';
-
-      // Plot data
-      if (this.plotData) {
-        switch (this.plotData.type) {
-          case 'scatter':
-            if (this.plotData.x) {
-              const colors = ['#3498DB', '#E74C3C', '#27AE60', '#F39C12', '#9B59B6', '#1ABC9C'];
-              for (let i = 0; i < this.plotData.x.length; i++) {
-                const px = this.mapX(this.plotData.x[i]).toFixed(1);
-                const py = this.mapY(this.plotData.y![i]).toFixed(1);
-                const color = this.plotData.groups ? colors[this.plotData.groups[i] % colors.length] : colors[0];
-                svg += '<circle cx="' + px + '" cy="' + py + '" r="5" fill="' + color + '" opacity="0.7"/>';
-              }
-            }
-            break;
-          case 'line':
-            if (this.plotData.x && this.plotData.y) {
-              const color = this.plotData.color ?? '#3498DB';
-              let path = 'M ' + this.mapX(this.plotData.x[0]).toFixed(1) + ' ' + this.mapY(this.plotData.y[0]).toFixed(1);
-              for (let i = 1; i < this.plotData.x.length; i++) {
-                path += ' L ' + this.mapX(this.plotData.x[i]).toFixed(1) + ' ' + this.mapY(this.plotData.y[i]).toFixed(1);
-              }
-              svg += '<path d="' + path + '" fill="none" stroke="' + color + '" stroke-width="2"/>';
-            }
-            break;
-          case 'bar':
-            if (this.plotData.labels && this.plotData.values) {
-              const maxVal = this.plotData.values.reduce((a, b) => Math.max(a, b), 1);
-              const barW = pw / this.plotData.labels.length * 0.7;
-              const gap = pw / this.plotData.labels.length * 0.3;
-              const barColors = ['#3498DB', '#E74C3C', '#27AE60', '#F39C12', '#9B59B6'];
-              for (let i = 0; i < this.plotData.labels.length; i++) {
-                const x = this.margin.left + (i * (barW + gap)) + gap / 2;
-                const barH = (this.plotData.values[i] / maxVal) * ph;
-                svg += '<rect x="' + x + '" y="' + (this.margin.top + ph - barH) + '" width="' + barW + '" height="' + barH + '" fill="' + barColors[i % barColors.length] + '" opacity="0.8"/>';
-              }
-            }
-            break;
-        }
-      }
-
-      svg += '</svg>';
-
-      // Write SVG to file via @ohos.file.fs
-      // import fs from '@ohos.file.fs';
-      // const filePath = '/data/user/0/xxx/files/' + this.title.replace(/[^a-z0-9]/gi, '_') + '.svg';
-      // fs.writeTextSync(filePath, svg);
+      const svg = this.buildSVG();
+      this.saveTextFile(path, svg);
       if (this.onStatus) this.onStatus('SVG exported: ' + this.title + ' (' + svg.length + ' bytes)');
     } catch (e) {
       if (this.onStatus) this.onStatus('SVG export failed: ' + String(e));
     }
+  }
+
+  /** Write text content to a user-selected path via @ohos.file.fs. */
+  private saveTextFile(path: string, content: string): void {
+    if (!path || path.length === 0) {
+      throw new Error('no export path');
+    }
+    fs.writeTextSync(path, content);
   }
 
   private escapeXml(str: string): string {
@@ -633,33 +849,36 @@ export struct PlotCanvas {
   }
 
   exportPDF(): void {
-    // PDF export requires @ohos.print or converting SVG to PDF
-    // Marked as "not supported" until PDF library is available in ArkTS
-    if (this.onStatus) this.onStatus('PDF: not yet supported (use SVG export)');
+    // PDF export requires a native PDF library which is not bundled.
+    if (this.onStatus) this.onStatus('PDF: not supported yet — use SVG export instead');
   }
 
-  exportEPS(): void {
-    // Generate PostScript markup
-    try {
-      let ps = '%!PS-Adobe-3.0\n';
-      ps += '%%Title: ' + this.escapeXml(this.title) + '\n';
-      ps += '%%BoundingBox: 0 0 ' + Math.round(this.canvasWidth) + ' ' + Math.round(this.canvasHeight) + '\n';
-      ps += '0.2 setgray\n';
-      ps += 'newpath 0 0 moveto ' + Math.round(this.canvasWidth) + ' 0 lineto ' + Math.round(this.canvasWidth) + ' ' + Math.round(this.canvasHeight) + ' lineto 0 ' + Math.round(this.canvasHeight) + ' lineto closepath fill\n';
+  /**
+   * Pure string builder for PostScript (EPS) markup (no I/O).
+   */
+  private buildEPS(): string {
+    let ps = '%!PS-Adobe-3.0\n';
+    ps += '%%Title: ' + this.escapeXml(this.title) + '\n';
+    ps += '%%BoundingBox: 0 0 ' + Math.round(this.canvasWidth) + ' ' + Math.round(this.canvasHeight) + '\n';
+    ps += '0.2 setgray\n';
+    ps += 'newpath 0 0 moveto ' + Math.round(this.canvasWidth) + ' 0 lineto ' + Math.round(this.canvasWidth) + ' ' + Math.round(this.canvasHeight) + ' lineto 0 ' + Math.round(this.canvasHeight) + ' lineto closepath fill\n';
 
-      if (this.plotData?.type === 'scatter' && this.plotData.x) {
-        ps += '0.2 0.6 0.8 setrgbcolor\n';
-        for (let i = 0; i < this.plotData.x.length; i++) {
-          const px = this.mapX(this.plotData.x[i]).toFixed(1);
-          const py = (this.canvasHeight - this.mapY(this.plotData.y![i])).toFixed(1);
-          ps += px + ' ' + py + ' 5 0 360 arc fill\n';
-        }
+    if (this.plotData?.type === 'scatter' && this.plotData.x) {
+      ps += '0.2 0.6 0.8 setrgbcolor\n';
+      for (let i = 0; i < this.plotData.x.length; i++) {
+        const px = this.mapX(this.plotData.x[i]).toFixed(1);
+        const py = (this.canvasHeight - this.mapY(this.plotData.y![i])).toFixed(1);
+        ps += px + ' ' + py + ' 5 0 360 arc fill\n';
       }
-      ps += 'showpage\n';
+    }
+    ps += 'showpage\n';
+    return ps;
+  }
 
-      // import fs from '@ohos.file.fs';
-      // const filePath = '/data/user/0/xxx/files/' + this.title.replace(/[^a-z0-9]/gi, '_') + '.eps';
-      // fs.writeTextSync(filePath, ps);
+  exportEPS(path: string = ''): void {
+    try {
+      const ps = this.buildEPS();
+      this.saveTextFile(path, ps);
       if (this.onStatus) this.onStatus('EPS exported: ' + this.title);
     } catch (e) {
       if (this.onStatus) this.onStatus('EPS export failed: ' + String(e));
@@ -667,10 +886,14 @@ export struct PlotCanvas {
   }
 
   exportTIFF(): void {
-    // TIFF export: PNG -> re-encode as TIFF
-    // Not supported in standard ArkTS - would need third-party library
-    if (this.onStatus) this.onStatus('TIFF: not yet supported (use PNG export)');
+    // TIFF encoding is not provided by @ohos.multimedia.image; no third-party codec bundled.
+    if (this.onStatus) this.onStatus('TIFF: not supported yet — use PNG export instead');
   }
+}
+
+interface BoxGroupData {
+  label: string;
+  values: number[];
 }
 
 interface PlotData {
@@ -684,5 +907,5 @@ interface PlotData {
   rowLabels?: string[];
   colLabels?: string[];
   color?: string;
-  groups_data?: { label: string; values: number[] }[];
+  boxGroups?: BoxGroupData[];
 }

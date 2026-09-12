@@ -1,6 +1,6 @@
 @Component
 export struct ImportDialog {
-  @State visible: boolean = false;
+  @Link visible: boolean = false;
   @State filePath: string = '';
   @State hasHeader: boolean = true;
   @State hasRowLabels: boolean = true;
@@ -21,7 +21,7 @@ export struct ImportDialog {
         Button('Cancel').backgroundColor('#95A5A6').fontColor('#FFFFFF').onClick(() => { this.visible = false; }).margin({ right: 12 })
         Button('Import').type(ButtonType.Capsule).backgroundColor('#3498DB').fontColor('#FFFFFF').onClick(() => { this.doRun(); this.visible = false; })
       }.width('100%').justifyContent(FlexAlign.End)
-    }.padding(24).width(480).borderRadius(12)
+    }.padding(24).width('92%').constraintSize({ maxWidth: 480 }).borderRadius(12)
   }
   doRun(): void { this.onConfirm({ filePath: this.filePath, hasHeader: this.hasHeader, hasRowLabels: this.hasRowLabels, delimiter: this.delimiterVals[this.delimiterIdx] }); }
 }

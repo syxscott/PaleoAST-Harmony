@@ -4,7 +4,7 @@
  */
 @Component
 export struct NMDSDialog {
-  @State visible: boolean = false;
+  @Link visible: boolean = false;
   @State n_dimensions: number = 2;
   @State n_restarts: number = 10;
   @State max_iterations: number = 300;
@@ -41,6 +41,6 @@ export struct NMDSDialog {
         Button('Cancel').backgroundColor('#95A5A6').fontColor('#FFFFFF').onClick(() => { this.visible = false; }).margin({ right: 12 })
         Button('Run Analysis').type(ButtonType.Capsule).backgroundColor('#3498DB').fontColor('#FFFFFF').enabled(this.errorMsg === '').onClick(() => { this.onConfirm({ n_dimensions: this.n_dimensions, n_restarts: this.n_restarts, max_iterations: this.max_iterations, metric: this.metricOpts[this.metricIdx] }); this.visible = false; })
       }.width('100%').justifyContent(FlexAlign.End)
-    }.padding(24).width(480).borderRadius(12)
+    }.padding(24).width('92%').constraintSize({ maxWidth: 480 }).borderRadius(12)
   }
 }

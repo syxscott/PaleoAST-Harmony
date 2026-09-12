@@ -2,10 +2,121 @@
  * 3D Mesh �� replaces morpho3d/mesh.py
  */
 
+import { rand } from '../../math/random';
+
 export interface Mesh3D {
   vertices: number[][];
   faces: number[][];
   normals: number[][];
+}
+
+/** Undirected edge as an index pair (min, max). */
+export type MeshEdge = [number, number];
+
+/**
+ * Compute the unique edge list of the mesh (port of
+ * morpho3d/mesh.py::Mesh3D.edges / _compute_edges).  Each triangle
+ * contributes its three edges; duplicates are removed by ordering each
+ * pair (min, max).
+ */
+export function computeEdges(mesh: Mesh3D): MeshEdge[] {
+  const seen = new Set<string>();
+  const edges: MeshEdge[] = [];
+  for (const face of mesh.faces) {
+    for (let i = 0; i < 3; i++) {
+      const a = face[i], b = face[(i + 1) % 3];
+      const key = a < b ? `${a}-${b}` : `${b}-${a}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        edges.push(a < b ? [a, b] : [b, a]);
+      }
+    }
+  }
+  return edges;
+}
+
+/** Face areas (0.5 · |cross(e1, e2)| per triangle). */
+function _faceAreas(mesh: Mesh3D): number[] {
+  return mesh.faces.map(face => {
+    const v0 = mesh.vertices[face[0]], v1 = mesh.vertices[face[1]], v2 = mesh.vertices[face[2]];
+    const ax = v1[0] - v0[0], ay = v1[1] - v0[1], az = v1[2] - v0[2];
+    const bx = v2[0] - v0[0], by = v2[1] - v0[1], bz = v2[2] - v0[2];
+    const nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx;
+    return 0.5 * Math.sqrt(nx * nx + ny * ny + nz * nz);
+  });
+}
+
+/**
+ * Compute the enclosed volume of a closed triangle mesh using the
+ * divergence theorem (port of morpho3d/mesh.py::Mesh3D.compute_volume):
+ *
+ *     V = |Σ_faces det(v₀, v₁, v₂)| / 6
+ *
+ * where each triangle forms a tetrahedron with the origin
+ * (tetra volume = (1/6)·v₀·(v₁×v₂)).  The result is valid only for
+ * watertight, consistently oriented surfaces; the absolute value removes
+ * the dependence on orientation.
+ */
+export function computeVolume(mesh: Mesh3D): number {
+  let total = 0;
+  for (const face of mesh.faces) {
+    const v0 = mesh.vertices[face[0]], v1 = mesh.vertices[face[1]], v2 = mesh.vertices[face[2]];
+    // (1/6)·v₀·(v₁×v₂)
+    const cx = v1[1] * v2[2] - v1[2] * v2[1];
+    const cy = v1[2] * v2[0] - v1[0] * v2[2];
+    const cz = v1[0] * v2[1] - v1[1] * v2[0];
+    total += v0[0] * cx + v0[1] * cy + v0[2] * cz;
+  }
+  return Math.abs(total) / 6.0;
+}
+
+/**
+ * Sample n points on the mesh surface with area-weighted face selection
+ * and barycentric uniform sampling within each triangle (port of
+ * morpho3d/mesh.py::Mesh3D.sample_points).
+ *
+ * Uses the seeded PRNG from math/random — pass ``rng`` (e.g. from
+ * createSeededRNG) for reproducible sampling; defaults to the global
+ * seeded stream.
+ *
+ * @param mesh  triangle mesh
+ * @param n     number of sample points
+ * @param rng   optional uniform [0,1) generator
+ * @returns sampled points (n × 3)
+ */
+export function samplePoints(mesh: Mesh3D, n: number, rng: (() => number) = rand): number[][] {
+  const areas = _faceAreas(mesh);
+  const totalArea = areas.reduce((a, b) => a + b, 0);
+  if (totalArea <= 0) throw new Error('samplePoints: mesh has zero surface area');
+
+  // Cumulative distribution over faces for area-weighted selection
+  const cum: number[] = new Array(areas.length);
+  let acc = 0;
+  for (let i = 0; i < areas.length; i++) { acc += areas[i] / totalArea; cum[i] = acc; }
+
+  const points: number[][] = [];
+  for (let i = 0; i < n; i++) {
+    // Area-weighted face pick via inverse-CDF on a single uniform draw
+    const u = rng();
+    let faceIdx = areas.length - 1;
+    for (let f = 0; f < cum.length; f++) {
+      if (u <= cum[f]) { faceIdx = f; break; }
+    }
+    const face = mesh.faces[faceIdx];
+    const v0 = mesh.vertices[face[0]], v1 = mesh.vertices[face[1]], v2 = mesh.vertices[face[2]];
+
+    // Barycentric sampling uniform over the triangle:
+    //   r1 = √ξ₁, u = 1−r1, v = r1(1−ξ₂), w = r1·ξ₂
+    const r1 = Math.sqrt(rng());
+    const r2 = rng();
+    const a = 1 - r1, b = r1 * (1 - r2), c = r1 * r2;
+    points.push([
+      a * v0[0] + b * v1[0] + c * v2[0],
+      a * v0[1] + b * v1[1] + c * v2[1],
+      a * v0[2] + b * v1[2] + c * v2[2],
+    ]);
+  }
+  return points;
 }
 
 export function computeNormals(mesh: Mesh3D): number[][] {

@@ -27,8 +27,17 @@ import {
 } from '../analysis/morphometrics/index';
 import {
   parseNewick, fitchParsimony, pic, neighborJoining, buildUPGMA, majorityRuleConsensus,
-  heuristicSearch, strictConsensus, PhyloNode
+  heuristicSearch, strictConsensus, PhyloNode,
+  phylogeneticSignal as phylogeneticSignalUnified, simulateBrownianMotion, computeRFDistance
 } from '../analysis/phylogenetics/index';
+import { tukeyHsd, cohensD, etaSquared, omegaSquared, partialEtaSquared, computeAicc, compareModels } from '../analysis/statistics/index';
+import { chao1ConfidenceInterval, dtwDistanceMatrix } from '../analysis/ecology/index';
+import {
+  brokenStickTest, pyperPetermanCorrection, computePaleotemperatureErezLuz,
+  computePaleotemperatureBemis, computePaleotemperatureKimONeil, blockBootstrapCI,
+  armaCrossValidate, binForRose
+} from '../analysis/stratigraphy/index';
+import type { AiccModelSpec } from '../analysis/statistics/index';
 
 /**
  * StatisticsController — orchestrates all analysis calls.
@@ -427,5 +436,124 @@ export class StatisticsController {
 
   runComputeCorrelation(x: number[], y: number[], method: 'pearson' | 'spearman' = 'pearson') {
     return computeCorrelation(x, y, method);
+  }
+
+  // ─── Newly ported functions (2026-09 parity pass) ───────────────
+
+  runTukeyHSD(groups: number[][]) {
+    return tukeyHsd(groups);
+  }
+
+  runPairedTTest(before: number[], after: number[]) {
+    return tTest(before, after, true);
+  }
+
+  runEffectSizes(group1: number[], group2: number[]) {
+    return {
+      cohensD: cohensD(group1, group2),
+      etaSquared,
+      omegaSquared,
+      partialEtaSquared,
+    };
+  }
+
+  runAICc(logLik: number, nParams: number, nObs: number) {
+    return computeAicc(logLik, nParams, nObs);
+  }
+
+  runModelComparison(models: { name: string; logLik: number; nParams: number; nObs: number }[]) {
+    const specs: AiccModelSpec[] = models.map(m => ({
+      name: m.name, logLik: m.logLik, nParams: m.nParams, nObs: m.nObs,
+    }));
+    return compareModels(specs);
+  }
+
+  /** Unified phylogenetic signal: canonical Blomberg K + Pagel λ (signal.py). */
+  runPhylogeneticSignalUnified(tree: PhyloNode, traitData: Record<string, number>, nPermutations = 999) {
+    const tips = tree.getLeaves();
+    const values = tips.map(t => traitData[t.name] ?? 0);
+    return phylogeneticSignalUnified(tree, values, nPermutations);
+  }
+
+  /** Simulate a Brownian-motion trait on the tree (signal.py). */
+  runSimulateBrownianMotion(tree: PhyloNode, rootValue = 0, sigma = 0.1, seed?: number) {
+    return simulateBrownianMotion(tree, rootValue, sigma, seed);
+  }
+
+  /** Robinson-Foulds distance between two trees. */
+  runRFDistance(tree1: PhyloNode, tree2: PhyloNode) {
+    return computeRFDistance(tree1, tree2);
+  }
+
+  /** Ancestral state reconstruction (pcm.py reconstruct_ancestral_states). */
+  runAncestralStates(model: string = 'bm') {
+    const result = reconstructAncestralStates(this.runGetRootTree(), this._numericColumn(0), model);
+    this.state.cacheResult('asr_result', result);
+    return result;
+  }
+
+  private runGetRootTree(): PhyloNode {
+    const cached = this.state.getCachedResult<{ tree: PhyloNode }>('parsed_tree');
+    if (cached?.tree) return cached.tree;
+    throw new Error('No tree parsed. Import a Newick tree first.');
+  }
+
+  private _numericColumn(colIdx: number): Record<string, number> {
+    const dm = this.getDM();
+    const out: Record<string, number> = {};
+    for (let i = 0; i < Math.min(dm.nSamples, dm.rowLabels.length); i++) {
+      out[dm.rowLabels[i]] = dm.data.get(i, colIdx);
+    }
+    return out;
+  }
+
+  /** Chao1 estimate + log-transformed CI (diversity.py). */
+  runChao1CI(row: number, confidenceLevel = 0.95) {
+    return chao1ConfidenceInterval(this.getData().row(row), confidenceLevel);
+  }
+
+  /** Paleotemperature from δ18O (isotope_analysis.py: erez_luz/bemis/kim_oneil). */
+  runPaleotemperature(delta18OSw: number, delta18Oc: number, formula: 'erez_luz' | 'bemis' | 'kim_oneil' = 'kim_oneil', genus = 'generic') {
+    if (formula === 'erez_luz') return { temperatureC: computePaleotemperatureErezLuz(delta18OSw, delta18Oc) };
+    if (formula === 'bemis') return { temperatureC: computePaleotemperatureBemis(delta18Oc, genus) };
+    return { temperatureC: computePaleotemperatureKimONeil(delta18OSw, delta18Oc) };
+  }
+
+  /** Broken-stick significance for CONISS zones (coniss.py). */
+  runBrokenStick(row?: number, nPermutations = 999) {
+    void row;
+    const c = this.runCONISS(4);
+    const bd = (c as { linkageMatrix?: number[][] }).linkageMatrix?.map(r => r[2]) ?? [];
+    return brokenStickTest(bd, nPermutations);
+  }
+
+  /** Pyper-Peterman autocorrelation-corrected correlation (correlation.py). */
+  runPyperPeterman(x: number[], y: number[]) {
+    return pyperPetermanCorrection(x, y);
+  }
+
+  /** Block-bootstrap CI of the mean (isotope_analysis.py). */
+  runBlockBootstrap(data: number[], blockSize?: number, nBootstrap = 1000) {
+    return blockBootstrapCI(data, (s) => s.reduce((a, b) => a + b, 0) / s.length, blockSize, nBootstrap);
+  }
+
+  /** ARIMA order selection by AIC/BIC grid (arma.py cross_validate). */
+  runArmaCrossValidate(maxP = 2, maxQ = 1, d = 0) {
+    const dm = this.getDM();
+    const series = dm.data.col(0);
+    return armaCrossValidate(series, series, maxP, maxQ, d);
+  }
+
+  /** Pairwise DTW distance matrix (dtw.py). */
+  runDTWDistanceMatrix() {
+    const dm = this.getDM();
+    const rows: number[][] = [];
+    for (let i = 0; i < dm.nSamples; i++) rows.push(dm.data.row(i));
+    return dtwDistanceMatrix(rows);
+  }
+
+  /** Rose-diagram binning (directional.py bin_for_rose). */
+  runBinRose(angles: number[], nBins = 12) {
+    return binForRose(angles, nBins);
   }
 }

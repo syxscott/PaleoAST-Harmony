@@ -1,7 +1,34 @@
+import router from '@ohos.router';
+
 @Entry
 @Component
 struct Splash {
   @State progress: number = 0;
+  private timerId: number = -1;
+
+  aboutToAppear(): void {
+    // Animate progress to 100, then enter the main page
+    this.timerId = setInterval(() => {
+      this.progress += 5;
+      if (this.progress >= 100) {
+        if (this.timerId >= 0) {
+          clearInterval(this.timerId);
+          this.timerId = -1;
+        }
+        router.pushUrl({ url: 'pages/Index' }).catch((err: Error) => {
+          console.error('Splash: navigation to Index failed: ' + err.message);
+        });
+      }
+    }, 100);
+  }
+
+  aboutToDisappear(): void {
+    if (this.timerId >= 0) {
+      clearInterval(this.timerId);
+      this.timerId = -1;
+    }
+  }
+
   build() {
     Column() {
       Text("PaleoAST").fontSize(36).fontWeight(FontWeight.Bold).fontColor("#3498DB").margin({bottom:8})

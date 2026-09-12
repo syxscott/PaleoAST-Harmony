@@ -1,6 +1,6 @@
 @Component
 export struct RarefactionDialog {
-  @State visible: boolean = false;
+  @Link visible: boolean;
   @State max_n: number = 100;
   @State n_points: number = 50;
   @State showTips: boolean = false;
@@ -22,6 +22,6 @@ export struct RarefactionDialog {
         Button("Cancel").backgroundColor("#95A5A6").fontColor("#FFFFFF").onClick(() => { this.visible = false; }).margin({ right: 12 })
         Button("Run Analysis").type(ButtonType.Capsule).backgroundColor("#3498DB").fontColor("#FFFFFF").onClick(() => { this.onConfirm({'max_n': this.max_n, 'n_points': this.n_points}); this.visible = false; })
       }.width("100%").justifyContent(FlexAlign.End)
-    }.padding(24).width(450).borderRadius(12)
+    }.padding(24).width('92%').constraintSize({ maxWidth: 450 }).borderRadius(12)
   }
 }

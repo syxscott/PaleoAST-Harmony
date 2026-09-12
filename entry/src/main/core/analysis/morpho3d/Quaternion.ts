@@ -1,10 +1,106 @@
 /**
  * Quaternion operations �� replaces morpho3d/quaternion.py
  * Used for 3D rotations in GPA and TPS.
+ *
+ * Mathematical foundation (see Python source):
+ *   q = w + xi + yj + zk,  i² = j² = k² = ijk = −1
+ *   Rotation quaternion: q = [cos(θ/2), sin(θ/2)·u] with unit axis u
+ *   Rotation matrix from q:
+ *     R = ┌ 1−2(y²+z²)   2(xy−wz)    2(xz+wy)  ┐
+ *         │  2(xy+wz)    1−2(x²+z²)   2(yz−wx)  │
+ *         └  2(xz−wy)     2(yz+wx)   1−2(x²+y²) ┘
  */
 
 export class Quaternion {
-  constructor(public w: number, public x: number, public y: number, public z: number) {}
+  /**
+   * Construct a quaternion.  Mirrors the Python ``__post_init__``: the
+   * components are auto-normalized to a unit quaternion (after the
+   * zero-norm guard), so ``new Quaternion(1, 2, 3, 4)`` yields a rotation.
+   * Callers that need the raw components should use {@link Quaternion.fromRaw}.
+   */
+  constructor(public w: number, public x: number, public y: number, public z: number) {
+    const norm = Math.sqrt(w * w + x * x + y * y + z * z);
+    if (norm < 1e-10) throw new Error('Quaternion magnitude too small');
+    this.w = w / norm;
+    this.x = x / norm;
+    this.y = y / norm;
+    this.z = z / norm;
+  }
+
+  /**
+   * Create a quaternion-like value WITHOUT automatic normalization, for
+   * intermediate linear algebra (e.g. SLERP's linear fallback).
+   * Port of morpho3d/quaternion.py::Quaternion.from_raw.
+   */
+  static fromRaw(w: number, x: number, y: number, z: number): Quaternion {
+    const norm = Math.sqrt(w * w + x * x + y * y + z * z);
+    if (norm < 1e-10) throw new Error('Quaternion magnitude too small');
+    const q = Object.create(Quaternion.prototype) as Quaternion;
+    q.w = w;
+    q.x = x;
+    q.y = y;
+    q.z = z;
+    return q;
+  }
+
+  /** Components [w, x, y, z] (port of the Python ``components`` property). */
+  get components(): number[] {
+    return [this.w, this.x, this.y, this.z];
+  }
+
+  /** Vector part [x, y, z] (port of the Python ``vector`` property). */
+  get vector(): number[] {
+    return [this.x, this.y, this.z];
+  }
+
+  /** |q| */
+  get magnitude(): number {
+    return Math.sqrt(this.w ** 2 + this.x ** 2 + this.y ** 2 + this.z ** 2);
+  }
+
+  /** Unit-norm copy. */
+  normalize(): Quaternion {
+    const n = this.magnitude;
+    if (n < 1e-10) throw new Error('Quaternion magnitude too small');
+    return new Quaternion(this.w / n, this.x / n, this.y / n, this.z / n);
+  }
+
+  /** Alias matching the Python ``normalized()`` name. */
+  normalized(): Quaternion {
+    return this.normalize();
+  }
+
+  /** q* = w − xi − yj − zk (unit quaternions: q* = q⁻¹). */
+  conjugate(): Quaternion { return new Quaternion(this.w, -this.x, -this.y, -this.z); }
+
+  /**
+   * Quaternion inverse q⁻¹ = q* / |q|² (port of the Python ``inverse``
+   * property).  For unit quaternions this equals the conjugate.
+   */
+  get inverse(): Quaternion {
+    const normSq = this.w ** 2 + this.x ** 2 + this.y ** 2 + this.z ** 2;
+    if (normSq < 1e-10) throw new Error('Quaternion magnitude too small for inversion');
+    return new Quaternion(this.w / normSq, -this.x / normSq, -this.y / normSq, -this.z / normSq);
+  }
+
+  /**
+   * Rotation angle θ ∈ [0, π] (port of the Python ``rotation_angle``
+   * property).  q and −q describe the same rotation; angles are folded
+   * into the non-negative half so 2·acos(w) never exceeds π.
+   */
+  get rotationAngle(): number {
+    const c = Math.max(-1, Math.min(1, this.w));
+    let angle = 2 * Math.acos(c);
+    if (angle > Math.PI) angle = 2 * Math.PI - angle;
+    return angle;
+  }
+
+  /** Unit rotation axis (port of the Python ``rotation_axis`` property). */
+  get rotationAxis(): [number, number, number] {
+    const sinHalf = Math.sqrt(Math.max(0, 1 - this.w * this.w));
+    if (sinHalf < 1e-10) return [0, 0, 1];
+    return [this.x / sinHalf, this.y / sinHalf, this.z / sinHalf];
+  }
 
   static fromAxisAngle(axis: [number, number, number], angle: number): Quaternion {
     const half = angle / 2;
@@ -46,6 +142,26 @@ export class Quaternion {
     ];
   }
 
+  /**
+   * Convert to ZYZ Euler angles (α, β, γ) in radians.
+   * Port of morpho3d/quaternion.py::Quaternion.to_zyz_euler.
+   */
+  toZYZEuler(): [number, number, number] {
+    const { w, x, y, z } = this;
+    const cosBeta = w * w + z * z - x * x - y * y;
+    const beta = Math.acos(Math.max(-1, Math.min(1, cosBeta)));
+
+    if (Math.abs(Math.sin(beta)) < 1e-10) {
+      // Gimbal lock
+      const alpha = 0.0;
+      const gamma = 2 * Math.atan2(w, z);
+      return [alpha, beta, gamma];
+    }
+    const alpha = Math.atan2(2 * (w * x + y * z), w * w - x * x - y * y + z * z);
+    const gamma = Math.atan2(2 * (w * z + x * y), w * w + x * x - y * y - z * z);
+    return [alpha, beta, gamma];
+  }
+
   multiply(q: Quaternion): Quaternion {
     return new Quaternion(
       this.w*q.w - this.x*q.x - this.y*q.y - this.z*q.z,
@@ -55,15 +171,11 @@ export class Quaternion {
     );
   }
 
-  conjugate(): Quaternion { return new Quaternion(this.w, -this.x, -this.y, -this.z); }
-  norm(): number { return Math.sqrt(this.w**2 + this.x**2 + this.y**2 + this.z**2); }
-  normalize(): Quaternion { const n = this.norm(); return new Quaternion(this.w/n, this.x/n, this.y/n, this.z/n); }
-
   slerp(q: Quaternion, t: number): Quaternion {
     let dot = this.w*q.w + this.x*q.x + this.y*q.y + this.z*q.z;
     if (dot < 0) { q = new Quaternion(-q.w, -q.x, -q.y, -q.z); dot = -dot; }
     if (dot > 0.9995) {
-      const r = new Quaternion(this.w+t*(q.w-this.w), this.x+t*(q.x-this.x), this.y+t*(q.y-this.y), this.z+t*(q.z-this.z));
+      const r = Quaternion.fromRaw(this.w+t*(q.w-this.w), this.x+t*(q.x-this.x), this.y+t*(q.y-this.y), this.z+t*(q.z-this.z));
       return r.normalize();
     }
     const theta = Math.acos(dot);
@@ -73,11 +185,41 @@ export class Quaternion {
     return new Quaternion(a*this.w+b*q.w, a*this.x+b*q.x, a*this.y+b*q.y, a*this.z+b*q.z);
   }
 
+  /**
+   * Rotate a 3D point/vector by this quaternion.
+   *
+   * Implemented with the expanded form (avoids constructing the pure
+   * quaternion (0, p), which the auto-normalizing constructor would
+   * project onto the unit sphere, losing |p| — the same trap documented in
+   * the Python rotate_vector):
+   *   t = 2·(q_vec × p);  p' = p + w·t + q_vec × t
+   */
   rotatePoint(p: [number, number, number]): [number, number, number] {
-    const qp = new Quaternion(0, p[0], p[1], p[2]);
-    const result = this.multiply(qp).multiply(this.conjugate());
-    return [result.x, result.y, result.z];
+    const qv = [this.x, this.y, this.z];
+    const t = [
+      2 * (qv[1] * p[2] - qv[2] * p[1]),
+      2 * (qv[2] * p[0] - qv[0] * p[2]),
+      2 * (qv[0] * p[1] - qv[1] * p[0]),
+    ];
+    const crossQT = [
+      qv[1] * t[2] - qv[2] * t[1],
+      qv[2] * t[0] - qv[0] * t[2],
+      qv[0] * t[1] - qv[1] * t[0],
+    ];
+    return [
+      p[0] + this.w * t[0] + crossQT[0],
+      p[1] + this.w * t[1] + crossQT[1],
+      p[2] + this.w * t[2] + crossQT[2],
+    ];
   }
+}
+
+function _matmul3(A: number[][], B: number[][]): number[][] {
+  const C: number[][] = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+  for (let i = 0; i < 3; i++)
+    for (let j = 0; j < 3; j++)
+      for (let k = 0; k < 3; k++) C[i][j] += A[i][k] * B[k][j];
+  return C;
 }
 
 // ─── 3×3 Rotation matrix utilities (port of morpho3d/quaternion.py::RotationMatrix) ─
@@ -151,6 +293,45 @@ export class RotationMatrix {
       [R[0][1], R[1][1], R[2][1]],
       [R[0][2], R[1][2], R[2][2]]
     ];
+  }
+
+  /**
+   * Verify orthogonality R·Rᵀ = I (port of
+   * quaternion.py::RotationMatrix.verify_orthogonal).
+   */
+  static verifyOrthogonal(R: number[][], atol: number = 1e-8): boolean {
+    if (!R || R.length !== 3 || R[0].length !== 3) return false;
+    const RRT = _matmul3(R, RotationMatrix.transpose(R));
+    const I = RotationMatrix.identity();
+    for (let i = 0; i < 3; i++)
+      for (let j = 0; j < 3; j++)
+        if (Math.abs(RRT[i][j] - I[i][j]) > atol) return false;
+    return true;
+  }
+
+  /**
+   * Verify membership in SO(3): orthogonal with det = +1 (port of
+   * quaternion.py::RotationMatrix.verify_special).
+   */
+  static verifySpecial(R: number[][], atol: number = 1e-8): boolean {
+    if (!RotationMatrix.verifyOrthogonal(R, atol)) return false;
+    return Math.abs(det3(R) - 1.0) <= atol;
+  }
+
+  /**
+   * Compose rotation matrices; rotations are applied right-to-left
+   * (port of quaternion.py::RotationMatrix.compose).
+   */
+  static compose(...rotations: number[][][]): number[][] {
+    if (rotations.length === 0) return RotationMatrix.identity();
+    let result = RotationMatrix.identity();
+    for (const R of rotations) result = _matmul3(R, result);
+    return result;
+  }
+
+  /** Inverse (= transpose) of a rotation matrix. */
+  static inverse(R: number[][]): number[][] {
+    return RotationMatrix.transpose(R);
   }
 }
 

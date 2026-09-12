@@ -77,7 +77,7 @@ export class TreeComparator {
         if (n.name) out.push(n.name);
         return;
       }
-      for (const c of n.children) walk(c);
+      for (const c of n.children) walk(c as T);
     };
     walk(node);
     return out;
@@ -94,7 +94,7 @@ export class TreeComparator {
         return leaves;
       }
       for (const c of n.children) {
-        const cl = visit(c);
+        const cl = visit(c as T);
         cl.forEach(l => leaves.add(l));
       }
       if (leaves.size > 0 && leaves.size < common.size) {
@@ -120,7 +120,7 @@ export class TreeComparator {
         return leaves;
       }
       for (const c of n.children) {
-        const cl = visit(c);
+        const cl = visit(c as T);
         cl.forEach(l => leaves.add(l));
       }
       if (leaves.size > 0 && leaves.size < all.size) {

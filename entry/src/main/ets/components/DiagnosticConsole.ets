@@ -61,8 +61,7 @@ export struct DiagnosticConsole {
   }
 
   private exportLogs(): void {
-    const text = this.logs.map(l => l.timestamp + ' [' + l.level + '] ' + l.message).join('
-');
+    const text = this.logs.map(l => l.timestamp + ' [' + l.level + '] ' + l.message).join('\n');
     console.log('Export logs: ' + text.substring(0, 100) + '...');
   }
 }

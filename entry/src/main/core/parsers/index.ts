@@ -3,7 +3,8 @@ export { parseNewick, toNewick, countTaxa, getLeafNames, getTreeHeight, readNewi
 export { parseNexus, NexusTokenType, tokenizeNexus } from './NexusParser';
 export { parseTPS } from './TPSParser';
 export { parseDAT } from './DATParser';
-export { serializeMatrix, deserializeMatrix } from './BinaryCache';
-export { Lexer, Token, TokenType, LexerError } from './Lexer';
+export { serializeMatrix, deserializeMatrix, readCacheHeader, crc32 } from './BinaryCache';
+export { Lexer, Token, TokenType } from './Lexer';
 export { TreeComparator, type Split } from './TreeComparator';
 export { parseExcel, parseExcelText, excelToDataMatrix, type ExcelData, type ParseExcelOptions } from './ExcelParser';
+export { NEXUSWriter, writeNexus, type NexusTaxonMetadata, type NexusTreeEntry } from './NexusWriter';

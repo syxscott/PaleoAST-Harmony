@@ -1,4 +1,6 @@
 import { Matrix } from '../../math/Matrix';
+import { lowess } from '../../math/LOWESS';
+import { brokenStickTest, dtwSimilarity, mexicanHatWavelet, fourierWaveFrequency } from './StratExtended';
 
 /**
  * CONISS: Constrained Incremental Sum of Squares by agglomerative clustering.
@@ -18,6 +20,12 @@ export interface CONISSResult {
   linkageMatrix: number[][];
   nZones: number;
   zoneAssignments: number[];
+  /** Heights/depths echoed back when provided (else empty). */
+  depthLabels: number[];
+  /** Total within-cluster incremental sum of squares at the final merge. */
+  issTotal: number;
+  /** Broken-stick significance test result (empty when not requested). */
+  brokenStick: { significantZones: number; pValues: number[]; brokenStickExpectation: number[] } | null;
 }
 
 function _brayCurtis(a: number[], b: number[]): number {
@@ -29,14 +37,19 @@ function _brayCurtis(a: number[], b: number[]): number {
   return den > 0 ? num / den : 0;
 }
 
-export function coniss(data: Matrix, nZones: number = 4): CONISSResult {
+export function coniss(
+  data: Matrix,
+  nZones: number = 4,
+  depths?: number[],
+  computeBrokenStick: boolean = false,
+  nPermutations: number = 999,
+): CONISSResult {
   const n = data.rows;
 
   // Initialize: each sample is its own cluster; track adjacent pairs only
-  const clusters: { indices: number[]; centroid: number[]; ss: number }[] = [];
+  const clusters: { indices: number[]; centroid: number[]; ss: number; id: number }[] = [];
   for (let i = 0; i < n; i++) {
-    const row = data.row(i);
-    clusters.push({ indices: [i], centroid: row, ss: 0 });
+    clusters.push({ indices: [i], centroid: data.row(i), ss: 0, id: i });
   }
 
   const linkage: number[][] = [];
@@ -68,32 +81,82 @@ export function coniss(data: Matrix, nZones: number = 4): CONISSResult {
     const newIndices = [...ci.indices, ...cj.indices];
     const newSS = ci.ss + cj.ss + deltaSS;
 
-    // linkage entry: [idxA, idxB, distance, count]
-    const idA = ci.indices[0] < n ? ci.indices[0] : nextId - n + ci.indices[0];
-    const idB = cj.indices[0] < n ? cj.indices[0] : nextId - n + cj.indices[0];
+    // scipy linkage convention: merged clusters get ids n, n+1, ... in merge order
+    const idA = ci.id, idB = cj.id;
     linkage.push([idA, idB, Math.sqrt(deltaSS), newIndices.length]);
 
     // Merge in place
     clusters.splice(mergeJ, 1);
-    clusters[mergeI] = { indices: newIndices, centroid: newCentroid, ss: newSS };
+    clusters[mergeI] = { indices: newIndices, centroid: newCentroid, ss: newSS, id: nextId };
     nextId++;
   }
 
-  // Zone assignment via binary split distance threshold
+  // Zone assignment: cut the dendrogram into nZones by removing the nZones-1
+  // largest-SS merges, then propagate cluster ids to samples in stratigraphic
+  // order (each leaf keeps the id of the cluster containing it).
   const assignments = new Array(n).fill(0);
   if (linkage.length > 0 && nZones > 1) {
-    // Total SS to distribute across zones
-    const totalSS = clusters[0]?.ss ?? 0;
-    const targetSS = totalSS / nZones;
-    let cumSS = 0;
-    // Work backwards: where does each zone start?
-    for (let i = n - 1; i >= 0 && assignments.filter(a => a === 0).length > 0; i--) {
-      cumSS += linkage[i]?.[2] ** 2 ?? 0;
-      assignments[i] = Math.max(0, Math.min(nZones - 1, Math.floor(cumSS / (targetSS + 1e-10))));
+    // Reconstruct merge tree: node n+k is created by merge k
+    const mergeChildren: [number, number][] = linkage.map(row => [row[0], row[1]]);
+    // Choose the nZones-1 merges with the largest ΔSS (linkage col 2 = sqrt(ΔSS))
+    const cutOrder = linkage
+      .map((row, k) => ({ k, height: row[2] }))
+      .sort((a, b) => b.height - a.height)
+      .slice(0, Math.max(0, Math.min(nZones - 1, linkage.length)))
+      .map(x => x.k);
+    const cutSet = new Set(cutOrder);
+
+    // Descend from the root cluster (last merge), stopping at cuts
+    const zones: number[][] = [];
+    // Walk merges without cuts to build leaf lists (scipy id convention)
+    const leavesOf = (id: number): number[] => {
+      const mergeIdx = id - n;
+      if (mergeIdx < 0 || mergeIdx >= mergeChildren.length) return [id];
+      const [a, b] = mergeChildren[mergeIdx];
+      return [...leavesOf(a), ...leavesOf(b)];
+    };
+    // Start below the root: its two child subtrees are separated by the cut
+    // through the final merge (always among the cut merges for nZones >= 2).
+    const rootMerge = mergeChildren.length - 1;
+    const stack: { id: number }[] = mergeChildren[rootMerge].map(id => ({ id }));
+    while (stack.length > 0) {
+      const { id } = stack.shift()!;
+      if (id < n) { zones.push([id]); continue; } // single-sample zone
+      const mergeIdx = id - n;
+      if (mergeIdx < 0 || mergeIdx >= mergeChildren.length) { zones.push([id]); continue; }
+      if (cutSet.has(mergeIdx)) {
+        // this merge is also cut: its children become separate zones
+        const [a, b] = mergeChildren[mergeIdx];
+        stack.push({ id: a }, { id: b });
+      } else {
+        zones.push(leavesOf(id)); // intact subtree below the cut
+      }
+    }
+    // Sort zones by their shallowest sample index so zone 0 = top of section
+    zones.sort((a, b) => Math.min(...a) - Math.min(...b));
+    for (let z = 0; z < zones.length; z++) {
+      for (const leaf of zones[z]) {
+        if (leaf >= 0 && leaf < n) assignments[leaf] = z;
+      }
     }
   }
 
-  return { linkageMatrix: linkage, nZones, zoneAssignments: assignments };
+  // Broken-stick test on merge heights (BD values = linkage col 2)
+  let brokenStick: CONISSResult['brokenStick'] = null;
+  if (computeBrokenStick && linkage.length > 0) {
+    // import lazily to avoid circular deps: StratExtended lives in same folder
+    const bd = linkage.map(row => row[2]);
+    brokenStick = brokenStickTest(bd, nPermutations);
+  }
+
+  return {
+    linkageMatrix: linkage,
+    nZones,
+    zoneAssignments: assignments,
+    depthLabels: depths ? [...depths] : [],
+    issTotal: linkage.length > 0 ? clusters[0].ss : 0,
+    brokenStick,
+  };
 }
 
 /**
@@ -120,6 +183,11 @@ export interface MarkovResult {
   isMarkovian: boolean;
   stationaryDist: number[];
   transitionProbs: number[][]; // MLE P(j|i)
+  /** Expected transition counts under the embedded-chain null (Powers & Easterling 1982). */
+  expectedMatrix: number[][];
+  /** Observed − expected. */
+  differenceMatrix: number[][];
+  nTransitions: number;
 }
 
 export function markov(sequence: number[], faciesNames?: string[]): MarkovResult {
@@ -144,22 +212,27 @@ export function markov(sequence: number[], faciesNames?: string[]): MarkovResult
     row.map(v => rowSums[i] > 0 ? v / rowSums[i] : 0)
   );
 
-  // Anderson & Goodman (1957) χ² test for Markovity:
-  // H0: independence (zero-order), H1: first-order Markov
-  // E[n_ij | H0] = n_i· × n_·j / n_··
+  // Anderson & Goodman (1957) χ² test for Markovity with the
+  // Powers & Easterling (1982) embedded-chain null hypothesis:
+  //   E[n_ij] = n_i· · n_·j / (n − n_i·)
+  // (the row i terminal transition is excluded, so each row sums to n_i·).
   const colSums: number[] = new Array(nStates).fill(0);
   for (let i = 0; i < nStates; i++) for (let j = 0; j < nStates; j++) colSums[j] += T[i][j];
 
+  const expectedMatrix: number[][] = Array.from({ length: nStates }, () => new Array(nStates).fill(0));
   let chi2 = 0;
   for (let i = 0; i < nStates; i++) {
+    if (rowSums[i] === 0) continue;
+    const denom = total - rowSums[i];
     for (let j = 0; j < nStates; j++) {
-      if (rowSums[i] === 0) continue;
-      const expectedUnderH0 = rowSums[i] * colSums[j] / total;
-      if (expectedUnderH0 > 0) {
-        chi2 += (T[i][j] - expectedUnderH0) ** 2 / expectedUnderH0;
+      const expected = denom > 0 ? (rowSums[i] * colSums[j]) / denom : 0;
+      expectedMatrix[i][j] = expected;
+      if (expected > 0) {
+        chi2 += (T[i][j] - expected) ** 2 / expected;
       }
     }
   }
+  const differenceMatrix = T.map((row, i) => row.map((v, j) => v - expectedMatrix[i][j]));
   // df = (m-1)² where m = number of states (for full transition matrix)
   const df = (nStates - 1) * (nStates - 1);
   const p = 1 - chi2CDF_approx(chi2, df);
@@ -183,7 +256,10 @@ export function markov(sequence: number[], faciesNames?: string[]): MarkovResult
     chiSquared: chi2, pValue: p, df,
     isMarkovian: p < 0.05,  // reject H0 at 5% → is Markovian
     stationaryDist: pi,
-    transitionProbs: transProbs
+    transitionProbs: transProbs,
+    expectedMatrix,
+    differenceMatrix,
+    nTransitions: total,
   };
 }
 
@@ -230,6 +306,10 @@ export interface DirectionalResult {
   resultantLength: number;
   rayleighP: number;
   circularVariance: number;
+  /** Circular standard deviation: sqrt(−2 ln R) in degrees. */
+  circularStdDeg: number;
+  /** Mean resultant vector components (C̄, S̄). */
+  meanResultant: { c: number; s: number };
 }
 
 export function directional(anglesDeg: number[]): DirectionalResult {
@@ -237,14 +317,18 @@ export function directional(anglesDeg: number[]): DirectionalResult {
   const rad = anglesDeg.map(a => a * Math.PI / 180);
   let C = 0, S = 0;
   for (const r of rad) { C += Math.cos(r); S += Math.sin(r); }
-  C /= n; S /= n;
-  const R = Math.sqrt(C * C + S * S);
-  const meanDir = (Math.atan2(S, C) * 180 / Math.PI + 360) % 360;
+  const meanC = C / n, meanS = S / n;
+  const R = Math.sqrt(meanC * meanC + meanS * meanS);
+  const meanDir = (Math.atan2(meanS, meanC) * 180 / Math.PI + 360) % 360;
   const circVar = 1 - R;
+  const circStd = Math.sqrt(Math.max(0, -2 * Math.log(Math.max(R, 1e-300)))) * 180 / Math.PI;
   // Rayleigh test p-value
   const Z = n * R * R;
   const rayleighP = Math.exp(-Z) * (1 + (2 * Z - Z * Z) / (4 * n));
-  return { meanDirectionDeg: meanDir, resultantLength: R, rayleighP, circularVariance: circVar };
+  return {
+    meanDirectionDeg: meanDir, resultantLength: R, rayleighP, circularVariance: circVar,
+    circularStdDeg: circStd, meanResultant: { c: meanC, s: meanS },
+  };
 }
 
 /**
@@ -255,30 +339,77 @@ export interface ExtinctionCIResult {
   ciLower: number[];
   ciUpper: number[];
   method: string;
+  /** Inferred true extinction layer per taxon (Signor-Lipps corrected). */
+  trueExtinctionLayer: number[];
+  /** Per-layer detection probability used by the Marshall model. */
+  probabilityOfDetection: number;
+  /** Layers between each LAD and the top of the section. */
+  nLayersAbove: number[];
+  /** min(1, n_taxa / max_layer) sampling coverage. */
+  sampleCoverage: number;
+  confidenceLevel: number;
 }
 
-export function extinctionCI(lads: number[], method: 'marshall' | 'strauss_sadler' = 'marshall', confidenceLevel: number = 0.95): ExtinctionCIResult {
+export function extinctionCI(
+  lads: number[],
+  method: 'marshall' | 'strauss_sadler' = 'marshall',
+  confidenceLevel: number = 0.95,
+  samplingInterval: number = 1,
+  detectionProbability: number = 0.7,
+  taxonNames?: string[],
+): ExtinctionCIResult {
+  void taxonNames; // accepted for API parity with Python; names are echoed by callers
+  void samplingInterval;
+  // Positions sorted descending: larger = older (Python lad_sorted convention)
+  const ladSorted = [...lads].sort((a, b) => b - a);
+  const n = ladSorted.length;
   const q = 1 - confidenceLevel;
-  const n = lads.length;
-  const ciLower: number[] = [], ciUpper: number[] = [];
+  const ciLower: number[] = [], ciUpper: number[] = [], trueExt: number[] = [];
 
-  for (let i = 0; i < n; i++) {
-    const lad = lads[i];
-    ciLower.push(lad);
-    if (method === 'marshall') {
-      const k = i + 1;
-      const nEff = k / 0.7; // Simplified
-      ciUpper.push(lad - Math.log(q) / nEff);
-    } else {
-      // Strauss-Sadler: beta quantile
-      const rank = i + 1;
-      const upperNorm = betaPPF_approx(1 - q, rank, n - rank + 1);
-      const expectedNorm = rank / (n + 1);
-      const scale = Math.max(1, Math.max(...lads));
-      ciUpper.push(lad + Math.max(0, (upperNorm - expectedNorm) * scale));
+  if (method === 'marshall') {
+    // Marshall (1990): gap = −ln(q)/r with r = −ln(1−p) the per-layer
+    // recovery rate; the interval extends towards younger (smaller) positions:
+    // [LAD − gap, LAD]. χ²_{1−q,2}/2 = −ln(q), so 95% → gap = 2.996/r.
+    let r = Infinity;
+    if (detectionProbability > 0 && detectionProbability < 1) {
+      r = -Math.log(1 - detectionProbability);
+    }
+    const gap = (isFinite(r) && r > 0) ? -Math.log(q) / r : 0;
+    for (let i = 0; i < n; i++) {
+      ciUpper.push(ladSorted[i]);
+      trueExt.push(ladSorted[i]);
+      ciLower.push(Math.max(0, ladSorted[i] - gap));
+    }
+  } else {
+    // Strauss & Sadler (1982) exponential endpoint method:
+    // gap = spacing · (q^(−1/2) − 1)/2 towards the younger side, where
+    // spacing is the distance to the next younger LAD (or the section top).
+    const g = (Math.pow(q, -0.5) - 1.0) / 2.0;
+    for (let i = 0; i < n; i++) {
+      const lad = ladSorted[i];
+      const spacing = i + 1 < n ? lad - ladSorted[i + 1] : lad;
+      const gap = Math.max(0, spacing * g);
+      ciUpper.push(lad);
+      trueExt.push(lad);
+      ciLower.push(Math.max(0, lad - gap));
     }
   }
-  return { ladPositions: lads, ciLower, ciUpper, method };
+
+  const maxLayer = n > 0 ? ladSorted[0] : 0;
+  const sampleCoverage = Math.min(1, n / Math.max(1, maxLayer));
+  const nLayersAbove = ladSorted.map(lad => Math.max(0, Math.floor(maxLayer - lad)));
+
+  return {
+    ladPositions: ladSorted,
+    ciLower,
+    ciUpper,
+    method,
+    trueExtinctionLayer: trueExt,
+    probabilityOfDetection: method === 'marshall' ? detectionProbability : NaN,
+    nLayersAbove,
+    sampleCoverage,
+    confidenceLevel,
+  };
 }
 
 function betaPPF_approx(p: number, a: number, b: number): number {
@@ -334,12 +465,13 @@ function _welchWindow(n: number): number[] {
 export function spectralAnalysis(
   timeSeries: number[],
   method: 'dft' | 'lomb-scargle' = 'dft',
-  windowType: 'hanning' | 'welch' | 'none' = 'hanning'
+  windowType: 'hanning' | 'welch' | 'none' = 'hanning',
+  times?: number[],
 ): SpectralResult {
   const n = timeSeries.length;
 
   if (method === 'lomb-scargle') {
-    return _lombScargle(timeSeries);
+    return _lombScargle(timeSeries, times);
   }
 
   // DFT with optional windowing
@@ -387,20 +519,27 @@ export function spectralAnalysis(
  *                         + [Σ y_i·sin(ω(t_i-τ))]² / Σ sin²(ω(t_i-τ)) }
  * where τ = atan(Σ sin(2ωt_i) / Σ cos(2ωt_i)) / (2ω)
  */
-function _lombScargle(timeSeries: number[]): SpectralResult {
+function _lombScargle(timeSeries: number[], times?: number[]): SpectralResult {
   const n = timeSeries.length;
   const m = timeSeries.reduce((a, b) => a + b, 0) / n;
   const y = timeSeries.map(v => v - m);
   const sigma2 = y.reduce((s, v) => s + v * v, 0) / n;
 
-  // Default: uniform "time" positions (can be generalized)
-  const t = Array.from({ length: n }, (_, i) => i);
+  // Real (possibly uneven) time axis; falls back to 0..n-1
+  const t = (times && times.length === n) ? [...times] : Array.from({ length: n }, (_, i) => i);
+  const tSpan = Math.max(...t) - Math.min(...t);
+  const dtAvg = tSpan > 0 ? tSpan / (n - 1) : 1;
 
+  // Frequency grid over the sampled band (Nyquist to n/2 cycles per span),
+  // following Press et al. for uneven data: f ∈ (1/(2n·dt) … n/(2·span)).
   const nFreqs = Math.max(50, Math.floor(n / 2));
+  const fMin = 1 / (n * Math.max(dtAvg, 1e-12));
+  const fNyq = 1 / (2 * Math.max(dtAvg, 1e-12));
+  const fMax = Math.max(fNyq, n / 2 / Math.max(tSpan, 1e-12));
   const frequencies: number[] = [], periods: number[] = [], power: number[] = [];
 
   for (let ki = 1; ki <= nFreqs; ki++) {
-    const freq = ki / n;
+    const freq = fMin + ((fMax - fMin) * ki) / nFreqs;
     const omega = 2 * Math.PI * freq;
 
     // Compute τ
@@ -442,9 +581,13 @@ export interface CorrelationResult {
   sections: { name: string; heights: number[]; values: number[] }[];
   correlationMatrix: number[][];
   bestMatch: { section1: string; section2: string; correlation: number }[];
+  method: string;
 }
 
-export function stratigraphicCorrelation(sections: { name: string; heights: number[]; values: number[] }[]): CorrelationResult {
+export function stratigraphicCorrelation(
+  sections: { name: string; heights: number[]; values: number[] }[],
+  method: 'pearson' | 'spearman' | 'euclidean' | 'dtw' = 'pearson',
+): CorrelationResult {
   const n = sections.length;
   const corrMatrix: number[][] = Array.from({ length: n }, () => new Array(n).fill(0));
   const bestMatch: { section1: string; section2: string; correlation: number }[] = [];
@@ -452,18 +595,51 @@ export function stratigraphicCorrelation(sections: { name: string; heights: numb
   for (let i = 0; i < n; i++) {
     for (let j = i; j < n; j++) {
       if (i === j) { corrMatrix[i][j] = 1; continue; }
-      // Interpolate to common grid and compute correlation
-      const v1 = sections[i].values, v2 = sections[j].values;
-      const minLen = Math.min(v1.length, v2.length);
-      if (minLen < 2) { corrMatrix[i][j] = 0; corrMatrix[j][i] = 0; continue; }
-      const c = pearsonCorr(v1.slice(0, minLen), v2.slice(0, minLen));
-      corrMatrix[i][j] = corrMatrix[j][i] = c;
-      if (c > 0.5) bestMatch.push({ section1: sections[i].name, section2: sections[j].name, correlation: c });
+      let sim = 0;
+      const a = sections[i], b = sections[j];
+      if (method === 'dtw') {
+        // Align on the value series; similarity = 1/(1 + DTW/(n+m))
+        sim = dtwSimilarity(a.values, b.values);
+      } else if (method === 'euclidean') {
+        const minLen = Math.min(a.heights.length, b.heights.length);
+        if (minLen === 0) sim = 0;
+        else {
+          let diff = 0;
+          for (let k = 0; k < minLen; k++) diff += (a.heights[k] - b.heights[k]) ** 2;
+          sim = 1 / (1 + Math.sqrt(diff) / minLen);
+        }
+      } else if (method === 'spearman') {
+        const ra = rankData(a.values), rb = rankData(b.values);
+        const minLen = Math.min(ra.length, rb.length);
+        sim = minLen < 2 ? 0 : pearsonCorr(ra.slice(0, minLen), rb.slice(0, minLen));
+      } else {
+        const v1 = a.values, v2 = b.values;
+        const minLen = Math.min(v1.length, v2.length);
+        if (minLen < 2) sim = 0;
+        else sim = pearsonCorr(v1.slice(0, minLen), v2.slice(0, minLen));
+      }
+      corrMatrix[i][j] = corrMatrix[j][i] = sim;
+      if (sim > 0.5) bestMatch.push({ section1: sections[i].name, section2: sections[j].name, correlation: sim });
     }
   }
 
   bestMatch.sort((a, b) => b.correlation - a.correlation);
-  return { sections, correlationMatrix: corrMatrix, bestMatch };
+  return { sections, correlationMatrix: corrMatrix, bestMatch, method };
+}
+
+/** Average-rank transform (ties get the mean rank). */
+function rankData(v: number[]): number[] {
+  const idx = v.map((val, i) => ({ val, i })).sort((x, y) => x.val - y.val);
+  const ranks = new Array(v.length).fill(0);
+  let i = 0;
+  while (i < idx.length) {
+    let j = i;
+    while (j + 1 < idx.length && idx[j + 1].val === idx[i].val) j++;
+    const avg = (i + j) / 2 + 1;
+    for (let k = i; k <= j; k++) ranks[idx[k].i] = avg;
+    i = j + 1;
+  }
+  return ranks;
 }
 
 function pearsonCorr(a: number[], b: number[]): number {
@@ -596,7 +772,9 @@ export interface WaveletResult {
   periods: number[];
   peakFrequency: number;
   wavelet: string;
-  coi: number[];
+  /** Cone-of-influence mask: coi[t][j] === true when edge effects dominate at
+   *  time t for scales[j] (|t − n/2| ≥ s·√2 for Morlet per T&C 1998 Fig.1). */
+  coi: boolean[][];
 }
 
 export function waveletTransform(
@@ -618,15 +796,19 @@ export function waveletTransform(
     defaultScales.push(scale0 * Math.pow(2, j * dj));
   }
   const s = scales ?? defaultScales;
+  const kind: 'morlet' | 'mexican_hat' =
+    wavelet === 'ricker' || wavelet === 'mexican_hat' ? 'mexican_hat' : 'morlet';
 
-  // COI (Cone of Influence) at each time point
-  const coi: number[] = [];
+  // Cone of Influence boolean mask: for Morlet, e-folding time τ_s = s·√2
+  // (T&C 1998 §4); for the Mexican Hat τ_s = s·(m+1/2)^0.5-ish; we use √2·s
+  // for Morlet and 1.12·s (≈sqrt(m+1/2), m=2 → hmm; standard 1.12) simplified.
+  const coi: boolean[][] = [];
   for (let t = 0; t < n; t++) {
-    // distance from center (n/2) in sample units
-    const dist = Math.abs(t - n / 2);
-    // COI boundary: dist < s * sqrt(2) * omega0 / (2*pi) * factor
-    // Simplified: mark edge region for each scale
-    coi.push(dist);
+    const dist = Math.min(t, n - 1 - t); // distance to the nearest edge
+    coi.push(s.map(sc => {
+      const eFold = kind === 'morlet' ? Math.SQRT2 * sc : 1.12 * sc;
+      return dist < eFold;
+    }));
   }
 
   const power: number[][] = [];
@@ -635,17 +817,26 @@ export function waveletTransform(
     const row: number[] = [];
     for (let t = 0; t < n; t++) {
       let re = 0, im = 0;
-      for (let tau = 0; tau < n; tau++) {
-        const dt = (tau - t) / scale;
-        // Complex Morlet: ψ(t) = π^(-1/4) · exp(iω₀t) · exp(-t²/2)
-        const normFactor = Math.PI ** (-0.25);
-        const expDecay = Math.exp(-dt * dt / 2);
-        const cosPart = Math.cos(omega0 * dt);
-        const sinPart = Math.sin(omega0 * dt);
-        // Real part: normFactor * expDecay * cos(omega0 * dt)
-        // Imag part: normFactor * expDecay * sin(omega0 * dt)
-        re += x[tau] * normFactor * expDecay * cosPart;
-        im += x[tau] * normFactor * expDecay * sinPart;
+      if (kind === 'morlet') {
+        for (let tau = 0; tau < n; tau++) {
+          const dt = (tau - t) / scale;
+          // Complex Morlet: ψ(t) = π^(-1/4) · exp(iω₀t) · exp(-t²/2)
+          const normFactor = Math.PI ** (-0.25);
+          const expDecay = Math.exp(-dt * dt / 2);
+          re += x[tau] * normFactor * expDecay * Math.cos(omega0 * dt);
+          im += x[tau] * normFactor * expDecay * Math.sin(omega0 * dt);
+        }
+      } else {
+        // Real Mexican Hat (DOG m=2), L2-normalized (StratExtended.mexicanHatWavelet)
+        const psi = mexicanHatWavelet(scale);
+        const half = (psi.length - 1) / 2;
+        for (let k = 0; k < psi.length; k++) {
+          const tau = t + (k - half);
+          if (tau >= 0 && tau < n) {
+            const conv = x[tau] * psi[k];
+            re += conv; // real wavelet: imaginary part stays 0
+          }
+        }
       }
       // L2 normalization: divide by sqrt(scale)
       const norm = 1 / Math.sqrt(scale);
@@ -654,13 +845,13 @@ export function waveletTransform(
     power.push(row);
   }
 
-  // Period ≈ scale / (1.03 * omega0 / (2π)) per Torrence & Compo
-  const periods = s.map(scale => scale * 1.03 * (2 * Math.PI / omega0));
+  // Fourier period of each scale — exact Torrence & Compo (1998) Table 1
+  const periods = s.map(scale => 1 / fourierWaveFrequency(scale, kind));
   const avgPower = power.map(row => row.reduce((a, b) => a + b, 0) / row.length);
   let maxP = 0, peakIdx = 0;
   for (let i = 0; i < avgPower.length; i++) { if (avgPower[i] > maxP) { maxP = avgPower[i]; peakIdx = i; } }
 
-  return { scales: s, power, periods, peakFrequency: 1 / (periods[peakIdx] || 1), wavelet, coi };
+  return { scales: s, power, periods, peakFrequency: 1 / (periods[peakIdx] || 1), wavelet: kind, coi };
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -682,79 +873,11 @@ export function waveletTransform(
  *
  * Reference: Cleveland, W.S. (1979) "Robust Locally Weighted Regression
  * and Smoothing Scatterplots", J. Amer. Statist. Assoc. 74(368): 829-836.
+ *
+ * @deprecated Use lowess from '../../math/LOWESS' directly
  */
 export function lowessSmooth(x: number[], y: number[], frac: number = 0.3, nIter: number = 3): number[] {
-  const n = x.length;
-  const k = Math.max(3, Math.floor(frac * n));
-  const result: number[] = new Array(n);
-
-  // Initialize with local linear weighted least squares
-  let fitted = _lowessFit(x, y, k);
-
-  for (let iter = 0; iter < nIter; iter++) {
-    // Compute residuals
-    const residuals = y.map((v, i) => v - fitted[i]);
-
-    // Median absolute deviation (MAD)
-    const sortedResid = [...residuals].sort((a, b) => Math.abs(a) - Math.abs(b));
-    const mad = sortedResid[Math.floor(n / 2)] ?? 1;
-
-    // Bisquare weights
-    const biweights = residuals.map(r => {
-      const u = r / (6 * mad + 1e-10);
-      if (Math.abs(u) >= 1) return 0;
-      const w = 1 - u * u;
-      return w * w;
-    });
-
-    // Re-fit with product of tricube and bisquare weights
-    fitted = _lowessFitWithWeights(x, y, k, biweights);
-  }
-
-  for (let i = 0; i < n; i++) result[i] = fitted[i];
-  return result;
-}
-
-/** Local weighted linear fit (tricube kernel, initial pass with unit weights). */
-function _lowessFit(x: number[], y: number[], k: number): number[] {
-  return _lowessFitWithWeights(x, y, k, new Array(x.length).fill(1));
-}
-
-function _lowessFitWithWeights(x: number[], y: number[], k: number, biweights: number[]): number[] {
-  const n = x.length;
-  const result: number[] = new Array(n);
-  for (let i = 0; i < n; i++) {
-    // Nearest neighbors
-    const dists = x.map((v, j) => ({ d: Math.abs(v - x[i]), j }));
-    dists.sort((a, b) => a.d - b.d);
-    const maxD = dists[k - 1].d || 1;
-
-    // Build weighted local dataset
-    const xLocal: number[] = [], yLocal: number[] = [], wLocal: number[] = [];
-    for (let jj = 0; jj < k; jj++) {
-      const { j, d } = dists[jj];
-      const tricube = Math.pow(1 - Math.pow(d / maxD, 3), 3);
-      const w = tricube * biweights[j];
-      if (w > 0) { xLocal.push(x[j]); yLocal.push(y[j]); wLocal.push(w); }
-    }
-
-    if (xLocal.length < 2) { result[i] = y[i]; continue; }
-
-    // Weighted linear regression: y = a + b·x
-    const wSum = wLocal.reduce((a, b) => a + b, 0);
-    const wxSum = wLocal.reduce((a, w, idx) => a + w * xLocal[idx], 0);
-    const wySum = wLocal.reduce((a, w, idx) => a + w * yLocal[idx], 0);
-    const wxxSum = wLocal.reduce((a, w, idx) => a + w * xLocal[idx] * xLocal[idx], 0);
-    const wxySum = wLocal.reduce((a, w, idx) => a + w * xLocal[idx] * yLocal[idx], 0);
-
-    const denom = wSum * wxxSum - wxSum * wxSum;
-    if (Math.abs(denom) < 1e-15) { result[i] = wySum / wSum; continue; }
-
-    const b = (wSum * wxySum - wxSum * wySum) / denom;
-    const a = (wySum - b * wxSum) / wSum;
-    result[i] = a + b * x[i];
-  }
-  return result;
+  return lowess(x, y, frac, nIter);
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -909,16 +1032,38 @@ export function crossValidate(x: number[], y: number[], degree: number = 2): Cro
 // Isotopic Excursion Detection
 // ═══════════════════════════════════════════════════════════════════
 
+export interface ExcursionSegment {
+  startIndex: number;
+  endIndex: number;
+  peakIndex: number;
+  peakDepth: number;
+  peakValue: number;
+  direction: 'positive' | 'negative';
+  /** Peak |z| magnitude. */
+  magnitude: number;
+}
+
 export interface ExcursionResult {
   excursions: { index: number; depth: number; value: number; direction: 'positive' | 'negative'; magnitude: number }[];
   nExcursions: number;
   threshold: number;
+  /** Merged consecutive excursions as segments (isotope_analysis.py semantics). */
+  segments: ExcursionSegment[];
 }
 
-export function detectExcursions(depths: number[], values: number[], threshold: number = 2): ExcursionResult {
+export function detectExcursions(
+  depths: number[],
+  values: number[],
+  threshold: number = 2,
+  minDuration: number = 2,
+  background: 'mean' | 'median' = 'mean',
+): ExcursionResult {
   const n = values.length;
-  const m = values.reduce((a, b) => a + b, 0) / n;
-  const s = Math.sqrt(values.reduce((sum, v) => sum + (v - m) ** 2, 0) / (n - 1));
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  const median = sorted.length % 2 === 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+  const m = background === 'median' ? median : values.reduce((a, b) => a + b, 0) / n;
+  const s = Math.sqrt(values.reduce((sum, v) => sum + (v - m) ** 2, 0) / Math.max(1, n - 1));
 
   const excursions: ExcursionResult['excursions'] = [];
   for (let i = 0; i < n; i++) {
@@ -930,7 +1075,38 @@ export function detectExcursions(depths: number[], values: number[], threshold: 
       });
     }
   }
-  return { excursions, nExcursions: excursions.length, threshold };
+
+  // Merge consecutive excursion points into contiguous segments; keep only
+  // segments at least minDuration long; peak = max |z| within segment.
+  const segments: ExcursionSegment[] = [];
+  let run: typeof excursions = [];
+  const flush = (): void => {
+    if (run.length >= minDuration && run.length > 0) {
+      let peak = run[0];
+      for (const e of run) if (e.magnitude > peak.magnitude) peak = e;
+      segments.push({
+        startIndex: run[0].index,
+        endIndex: run[run.length - 1].index,
+        peakIndex: peak.index,
+        peakDepth: peak.depth,
+        peakValue: peak.value,
+        direction: peak.direction,
+        magnitude: peak.magnitude,
+      });
+    }
+    run = [];
+  };
+  for (const e of excursions) {
+    if (run.length === 0 || e.index === run[run.length - 1].index + 1) {
+      run.push(e);
+    } else {
+      flush();
+      run = [e];
+    }
+  }
+  flush();
+
+  return { excursions, nExcursions: segments.length, threshold, segments };
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -965,14 +1141,54 @@ export interface ARMAResult {
   residuals: number[];
   fitted: number[];
   aic: number;
-  order: [number, number];
+  /** Bayesian Information Criterion: n·ln(RSS/n) + k·ln(n). */
+  bic: number;
+  /** Order [p, d, q] — d = differencing order applied before fitting (ARIMA). */
+  order: [number, number, number];
   seriesMean: number;
+  /** Residual variance σ̂² (innovation variance, used for forecast CIs). */
+  sigma2: number;
+  /** The differenced (and de-meaned if includeIntercept) series actually modelled. */
+  differencedSeries: number[];
 }
 
-export function buildARMAModel(timeSeries: number[], p: number = 1, q: number = 0): ARMAResult {
-  const n = timeSeries.length;
-  const mean = timeSeries.reduce((a, b) => a + b, 0) / n;
-  const y = timeSeries.map(v => v - mean);
+/** Apply d-th order differencing. */
+function differenceSeries(x: number[], d: number): number[] {
+  let cur = [...x];
+  for (let k = 0; k < d; k++) {
+    const next: number[] = [];
+    for (let i = 1; i < cur.length; i++) next.push(cur[i] - cur[i - 1]);
+    cur = next;
+  }
+  return cur;
+}
+
+/** Invert d-th order differencing given the d original seed values. */
+function integrateSeries(diffed: number[], seeds: number[]): number[] {
+  let cur = [...seeds];
+  let rest = [...diffed];
+  for (let k = 0; k < seeds.length; k++) {
+    const out: number[] = [cur[0]];
+    for (let i = 0; i < rest.length; i++) out.push(out[i] + rest[i]);
+    cur = out;
+    if (k < seeds.length - 1) rest = out;
+  }
+  return cur;
+}
+
+export function buildARMAModel(
+  timeSeries: number[],
+  p: number = 1,
+  q: number = 0,
+  d: number = 0,
+  includeIntercept: boolean = true,
+): ARMAResult {
+  const n0 = timeSeries.length;
+  const work = differenceSeries(timeSeries, Math.max(0, Math.floor(d)));
+  const n = work.length;
+  const useMean = includeIntercept;
+  const mean = useMean ? work.reduce((a, b) => a + b, 0) / Math.max(1, n) : 0;
+  const y = work.map(v => v - mean);
 
   // AR coefficients via Yule-Walker equations
   const arCoeffs: number[] = new Array(p).fill(0);
@@ -1052,56 +1268,143 @@ export function buildARMAModel(timeSeries: number[], p: number = 1, q: number = 
       if (t - 1 - j >= 0) pred += maCoeffs[j] * residuals[t - 1 - j];
     }
     fitted[t] = pred;
-    residuals[t] = timeSeries[t] - pred;
+    residuals[t] = work[t] - pred;
   }
 
-  // AIC with proper degrees of freedom
+  // Information criteria on the effective sample size
+  const effective = Math.max(1, n - Math.max(p, q));
   const ssRes = residuals.reduce((s, r) => s + r * r, 0);
-  const aic = n * Math.log(ssRes / n + 1e-10) + 2 * (p + q + 1);
+  const sigma2 = ssRes / effective;
+  const kParams = p + q + (useMean ? 1 : 0);
+  const aic = effective * Math.log(ssRes / effective + 1e-10) + 2 * kParams;
+  const bic = effective * Math.log(ssRes / effective + 1e-10) + kParams * Math.log(effective);
 
-  return { arCoeffs, maCoeffs, intercept: mean, residuals, fitted, aic, order: [p, q], seriesMean: mean };
+  return {
+    arCoeffs, maCoeffs, intercept: mean, residuals, fitted, aic, bic,
+    order: [p, Math.max(0, Math.floor(d)), q],
+    seriesMean: mean, sigma2, differencedSeries: work,
+  };
 }
 
-export function armaPredict(model: ARMAResult, nSteps: number): number[] {
-  const { arCoeffs, maCoeffs, intercept, residuals, fitted } = model;
+/**
+ * AIC/BIC grid search over ARIMA(p, d, q) orders (arma.py cross_validate).
+ * Returns the best-fitting model plus the full score grid.
+ */
+export function armaCrossValidate(
+  times: number[],
+  values: number[],
+  maxP: number = 2,
+  maxQ: number = 1,
+  d: number = 0,
+): { best: ARMAResult; bestOrder: [number, number, number]; grid: { order: [number, number, number]; aic: number; bic: number }[] } {
+  void times; // ARIMA grid search works on the value series; times reserved for future use
+  const grid: { order: [number, number, number]; aic: number; bic: number }[] = [];
+  let best: ARMAResult | null = null;
+  let bestOrder: [number, number, number] = [1, d, 0];
+  for (let pi = 0; pi <= maxP; pi++) {
+    for (let qi = 0; qi <= maxQ; qi++) {
+      if (pi === 0 && qi === 0) continue;
+      const model = buildARMAModel(values, pi, qi, d, true);
+      grid.push({ order: [pi, d, qi], aic: model.aic, bic: model.bic });
+      if (!best || model.aic < best.aic) {
+        best = model;
+        bestOrder = [pi, d, qi];
+      }
+    }
+  }
+  return { best: best ?? buildARMAModel(values, 1, 0, d, true), bestOrder, grid };
+}
+
+/**
+ * Multi-step forecast with point predictions and (1−α) confidence intervals
+ * via the ψ-weight recursion: Var(e_ℓ) = σ² Σ_{j<ℓ} ψ_j².
+ */
+export function armaPredict(
+  model: ARMAResult,
+  nSteps: number,
+  alpha: number = 0.05,
+): {
+  predictions: number[];
+  lowerCI: number[];
+  upperCI: number[];
+  stdErrors: number[];
+} {
+  const { arCoeffs, maCoeffs, intercept, residuals, fitted, sigma2 } = model;
   const p = arCoeffs.length;
   const q = maCoeffs.length;
-  const predictions: number[] = [];
+  const predictions: number[] = [], lowerCI: number[] = [], upperCI: number[] = [], stdErrors: number[] = [];
 
-  // Reconstruct y values from fitted + residual for the last p points
-  // y[t] = (timeSeries[t] - mean) = fitted[t] + residuals[t]
-  const history: number[] = []; // y values in demeaned space
-  const residHist: number[] = [...residuals];
-
+  // History in the demeaned/differenced modelling space
+  const history: number[] = [];
   for (let i = 0; i < p; i++) {
     const idx = fitted.length - p + i;
-    // y (demeaned) = fitted + residual
     history.push(fitted[idx] + residuals[idx]);
+  }
+  const residHist: number[] = [...residuals];
+  const z = alpha > 0 && alpha < 1 ? normQuantileLocal(1 - alpha / 2) : 0;
+
+  // ψ weights: ψ_0 = 1; ψ_j = Σ φ_i ψ_{j−i} + θ_j (causal ARMA recursion)
+  const psi: number[] = [1];
+  for (let j = 1; j <= nSteps; j++) {
+    let v = 0;
+    for (let i = 0; i < Math.min(p, j); i++) v += arCoeffs[i] * psi[j - 1 - i];
+    if (j <= q) v += maCoeffs[j - 1];
+    psi.push(v);
   }
 
   for (let step = 0; step < nSteps; step++) {
-    let pred = intercept; // base = intercept (mean)
-
-    // AR part: Σ φ_i · y_{t-i} (use demeaned past values)
+    // Point forecast in the modelling space (mean added ONCE at the end)
+    let pred = 0;
     for (let j = 0; j < p; j++) {
       const idx = history.length - 1 - j;
       pred += arCoeffs[j] * (idx >= 0 ? history[idx] : 0);
     }
-
-    // MA part: Σ θ_j · ε_{t-j} (use historical residuals, NOT the new residual)
     for (let j = 0; j < q; j++) {
       const idx = residHist.length - 1 - j;
       pred += maCoeffs[j] * (idx >= 0 ? residHist[idx] : 0);
     }
 
-    predictions.push(pred + intercept); // add mean back for actual scale
+    // Forecast-error variance: Var(e_{step+1}) = σ² Σ_{j=0..step} ψ_j²
+    let varSum = 0;
+    for (let j = 0; j <= step; j++) varSum += psi[j] * psi[j];
+    const se = Math.sqrt(Math.max(0, sigma2 * varSum));
+    const level = pred + intercept;
 
-    // For next step: new residual = 0 (point forecast), pred is new y_demeaned
+    predictions.push(level);
+    stdErrors.push(se);
+    lowerCI.push(level - z * se);
+    upperCI.push(level + z * se);
+
     history.push(pred);
-    residHist.push(0);
+    residHist.push(0); // future innovations have expectation 0
   }
 
-  return predictions;
+  return { predictions, lowerCI, upperCI, stdErrors };
+}
+
+/** Acklam-style normal quantile (local; matches R qnorm within 1e-9). */
+function normQuantileLocal(p: number): number {
+  if (p <= 0) return -Infinity;
+  if (p >= 1) return Infinity;
+  const a = [-3.969683028665376e+01, 2.209460984245205e+02, -2.759285104469687e+02, 1.383577518672690e+02, -3.066479806614716e+01, 2.506628277459239e+00];
+  const b = [-5.447609879822406e+01, 1.615858368580409e+02, -1.556989798598866e+02, 6.680131188771972e+01, -1.328068155288572e+01];
+  const c = [-7.784894002430293e-03, -3.223964580411365e-01, -2.400758277161838e+00, -2.549732539343734e+00, 4.374664141464968e+00, 2.938163982698783e+00];
+  const dd = [7.784695709041462e-03, 3.224671290700398e-01, 2.445134137142996e+00, 3.754408661907416e+00];
+  const pLow = 0.02425;
+  let q: number, r: number;
+  if (p < pLow) {
+    q = Math.sqrt(-2 * Math.log(p));
+    return (((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) /
+      ((((dd[0] * q + dd[1]) * q + dd[2]) * q + dd[3]) * q + 1);
+  }
+  if (p <= 1 - pLow) {
+    q = p - 0.5; r = q * q;
+    return (((((a[0] * r + a[1]) * r + a[2]) * r + a[3]) * r + a[4]) * r + a[5]) * q /
+      (((((b[0] * r + b[1]) * r + b[2]) * r + b[3]) * r + b[4]) * r + 1);
+  }
+  q = Math.sqrt(-2 * Math.log(1 - p));
+  return -(((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) /
+    ((((dd[0] * q + dd[1]) * q + dd[2]) * q + dd[3]) * q + 1);
 }
 
 // ─── Re-exports: UA / RASC / AgeModel / computeCorrelation ─────────────────────

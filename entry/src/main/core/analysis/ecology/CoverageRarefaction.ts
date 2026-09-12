@@ -24,6 +24,8 @@ export interface CoverageRarefactionResult {
   asymptoteEstimate: number[];
   sampleSizes: number[];
   method: string;
+  /** Hill number order: 0 = richness, 1 = exp(Shannon), 2 = 1/Simpson. */
+  hillOrder?: 0 | 1 | 2;
 }
 
 /**
@@ -97,7 +99,8 @@ export function coverageRarefaction(
   coverageLevels: number[] = [0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 0.99],
   nIterations: number = 200,
   sampleNames?: string[],
-  rngSeed: number = 42
+  rngSeed: number = 42,
+  q: 0 | 1 | 2 = 0,
 ): CoverageRarefactionResult {
   if (!Array.isArray(abundanceMatrix) || abundanceMatrix.length === 0)
     throw new ComputationError('Empty abundance matrix');
@@ -134,49 +137,73 @@ export function coverageRarefaction(
 
   const coverage = coverageLevels.slice();
 
-  // ─── Expected richness: separate rarefaction (Hurlbert) from extrapolation ──
-  // (Chao-Jost).  For each sample we pick the appropriate formula based on
-  // whether the target coverage is below or above the observed coverage.
-  const expectedR = coverage.map(c => {
-    let total = 0;
+  // Individual-level species pools (for the rarefaction bootstrap)
+  const pools: number[][] = abundanceMatrix.map(row => {
+    const pool: number[] = [];
+    for (let j = 0; j < nSpecies; j++) for (let k = 0; k < Math.floor(row[j]); k++) pool.push(j);
+    return pool;
+  });
+
+  seed(rngSeed);
+
+  /** Empirical Hill number of order q for a count vector. */
+  const hillOf = (counts: Map<number, number>, total: number): number => {
+    if (total === 0) return 0;
+    if (q === 0) return counts.size;
+    if (q === 1) {
+      let h = 0;
+      for (const c of counts.values()) { const p = c / total; h -= p * Math.log(p); }
+      return Math.exp(h);
+    }
+    let s = 0;
+    for (const c of counts.values()) { const p = c / total; s += p * p; }
+    return s > 0 ? 1 / s : 0;
+  };
+
+  // ─── Expected qD(coverage): rarefaction (c ≤ c_obs) vs extrapolation ────────
+  // Point estimates AND confidence intervals come from the same individual-level
+  // bootstrap (sub-sampling m = floor(c·N) individuals without replacement,
+  // matching the iNEXT convention Python follows).
+  const expectedR: number[] = [];
+  const lo: number[] = [], hi: number[] = [];
+  for (const c of coverage) {
+    const drawStats: number[] = [];
     for (let s = 0; s < nSamples; s++) {
       const row = abundanceMatrix[s];
-      const D = asymptote[s];
       const N = sampleSizes[s];
-      // Compute observed coverage: c_obs = 1 - f1/N
       const f1 = row.filter(v => v === 1).length;
       const c_obs = N > 0 ? 1 - f1 / N : 1;
       if (c <= c_obs) {
-        // Rarefaction: Hurlbert (1971) formula E(S|m)
-        // Map coverage c to sub-sample size m using m = floor(c * N)
         const m = Math.max(1, Math.floor(c * N));
-        total += rarefaction(row, m);
+        const pool = pools[s];
+        if (m >= pool.length) {
+          const cnt = new Map<number, number>();
+          for (const sp of pool) cnt.set(sp, (cnt.get(sp) ?? 0) + 1);
+          drawStats.push(hillOf(cnt, pool.length));
+        } else {
+          // Partial Fisher-Yates: draw m without replacement
+          const idxs = pool.map((_, i) => i);
+          for (let i = 0; i < m; i++) {
+            const j = i + Math.floor(rand() * (idxs.length - i));
+            const t = idxs[i]; idxs[i] = idxs[j]; idxs[j] = t;
+          }
+          const cnt = new Map<number, number>();
+          for (let i = 0; i < m; i++) {
+            const sp = pool[idxs[i]];
+            cnt.set(sp, (cnt.get(sp) ?? 0) + 1);
+          }
+          drawStats.push(hillOf(cnt, m));
+        }
       } else {
-        // Extrapolation: Chao & Jost (2012) Eq. 8b
-        total += extrapolation(row, c, D);
+        // Extrapolation branch: Chao & Jost (2012) asymptotic form
+        drawStats.push(extrapolation(row, c, asymptote[s]));
       }
     }
-    return total / nSamples;
-  });
-
-  // ─── Bootstrap for confidence intervals (seeded RNG) ─────────────────────
-  const bootstrapped: number[][] = [];
-  seed(rngSeed);
-  for (let it = 0; it < nIterations; it++) {
-    const idx: number[] = [];
-    for (let s = 0; s < nSamples; s++) idx.push(Math.floor(rand() * nSamples));
-    const bootR = coverage.map(c => {
-      let total = 0;
-      for (const s of idx) total += asymptote[s] * c;
-      return total / Math.max(1, idx.length);
-    });
-    bootstrapped.push(bootR);
-  }
-  const lo: number[] = [], hi: number[] = [];
-  for (let j = 0; j < coverage.length; j++) {
-    const col = bootstrapped.map(b => b[j]).sort((a, b) => a - b);
-    lo.push(col[Math.floor(nIterations * 0.025)]);
-    hi.push(col[Math.floor(nIterations * 0.975)]);
+    drawStats.sort((a, b) => a - b);
+    const mean = drawStats.reduce((a, b) => a + b, 0) / drawStats.length;
+    expectedR.push(mean);
+    lo.push(drawStats[Math.max(0, Math.floor(nSamples * 0.025))]);
+    hi.push(drawStats[Math.min(drawStats.length - 1, Math.floor(nSamples * 0.975))]);
   }
 
   return {
@@ -187,6 +214,7 @@ export function coverageRarefaction(
     confidenceUpper: hi,
     asymptoteEstimate: asymptote,
     sampleSizes,
-    method: 'inext'
+    method: 'inext',
+    hillOrder: q,
   };
 }

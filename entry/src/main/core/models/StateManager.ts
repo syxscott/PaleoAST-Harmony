@@ -14,11 +14,145 @@ interface UndoState {
   timestamp: number;
 }
 
+// ─── LRU Cache Entry ─────────────────────────────────────────────────────────
+
+interface LRUCacheEntry {
+  value: unknown;
+  size: number;           // bytes
+  prev: string | null;
+  next: string | null;
+}
+
+/**
+ * LRU cache with size-based eviction.
+ * - Max 100 entries OR 50MB total
+ * - Tracks serialized byte size via Float64Array byteLength
+ * - On access: move to head (most-recently-used)
+ * - On overflow: evict tail (least-recently-used)
+ */
+class LRUCache {
+  private _m: Map<string, LRUCacheEntry> = new Map();
+  private _head: string | null = null;  // MRU end
+  private _tail: string | null = null;  // LRU end
+  private _totalBytes: number = 0;
+  private _maxEntries: number = 100;
+  private _maxBytes: number = 50 * 1024 * 1024; // 50 MB
+
+  /** Serialize a result to bytes; prefer Float64Array. */
+  private static serialize(r: unknown): { bytes: number; normalized: unknown } {
+    if (r instanceof Float64Array) {
+      return { bytes: r.byteLength, normalized: r };
+    }
+    if (r instanceof Float32Array) {
+      return { bytes: r.byteLength, normalized: r };
+    }
+    if (r instanceof Uint8Array) {
+      return { bytes: r.byteLength, normalized: r };
+    }
+    if (ArrayBuffer.isView(r)) {
+      return { bytes: (r as ArrayBufferView).byteLength, normalized: r };
+    }
+    if (Array.isArray(r)) {
+      // Try to detect numeric arrays
+      const dbl = new Float64Array(r as number[]);
+      return { bytes: dbl.byteLength, normalized: dbl };
+    }
+    if (typeof r === 'object' && r !== null) {
+      try {
+        const s = JSON.stringify(r);
+        const b = new TextEncoder().encode(s);
+        return { bytes: b.byteLength, normalized: r };
+      } catch {
+        return { bytes: 256, normalized: r };
+      }
+    }
+    return { bytes: 8, normalized: r };
+  }
+
+  get(k: string): unknown | null {
+    const e = this._m.get(k);
+    if (!e) return null;
+    this._touch(k);
+    return e.value;
+  }
+
+  set(k: string, v: unknown): void {
+    const existing = this._m.get(k);
+    if (existing) {
+      this._totalBytes -= existing.size;
+      existing.value = v;
+      const { bytes } = LRUCache.serialize(v);
+      existing.size = bytes;
+      this._totalBytes += bytes;
+      this._touch(k);
+      this._evictIfNeeded();
+      return;
+    }
+
+    const { bytes } = LRUCache.serialize(v);
+    const entry: LRUCacheEntry = { value: v, size: bytes, prev: null, next: null };
+
+    if (!this._head) {
+      this._head = k;
+      this._tail = k;
+    } else {
+      entry.prev = this._head;
+      this._m.get(this._head)!.next = k;
+      this._head = k;
+    }
+    this._m.set(k, entry);
+    this._totalBytes += bytes;
+    this._evictIfNeeded();
+  }
+
+  has(k: string): boolean { return this._m.has(k); }
+
+  clear(): void { this._m.clear(); this._head = null; this._tail = null; this._totalBytes = 0; }
+
+  get size(): number { return this._m.size; }
+  get totalBytes(): number { return this._totalBytes; }
+
+  /** Move key to head (most recently used). */
+  private _touch(k: string): void {
+    if (this._head === k) return;
+    const e = this._m.get(k)!;
+    // Unlink from current position
+    if (e.prev) { const pe = this._m.get(e.prev); if (pe) pe.next = e.next; }
+    if (e.next) { const ne = this._m.get(e.next); if (ne) ne.prev = e.prev; }
+    if (this._tail === k) this._tail = e.prev;
+    // Insert at head
+    e.prev = this._head;
+    e.next = null;
+    const he = this._m.get(this._head!);
+    if (he) he.next = k;
+    this._head = k;
+    if (!this._tail) this._tail = k;
+  }
+
+  /** Evict LRU entries until within size limits. */
+  private _evictIfNeeded(): void {
+    while (
+      (this._m.size > this._maxEntries || this._totalBytes > this._maxBytes) &&
+      this._tail
+    ) {
+      const tk = this._tail!;
+      const e = this._m.get(tk)!;
+      this._totalBytes -= e.size;
+      if (e.prev) { const pe = this._m.get(e.prev); if (pe) pe.next = null; }
+      this._tail = e.prev;
+      if (!this._tail) this._head = null;
+      this._m.delete(tk);
+    }
+  }
+}
+
+// ─── StateManager ────────────────────────────────────────────────────────────
+
 @Observed
 export class StateManager {
   private static _i: StateManager | null = null;
   private _d: DataMatrix | null = null;
-  private _c: Map<string, unknown> = new Map();
+  private _c: LRUCache = new LRUCache();
   private _m: boolean = false;
   private _u: UndoState[] = [];
   private _r: UndoState[] = [];
@@ -129,4 +263,81 @@ export class StateManager {
   getCachedResult<T>(k: string): T | null { return (this._c.get(k) as T) ?? null; }
   hasCachedResult(k: string): boolean { return this._c.has(k); }
   clearCache(): void { this._c.clear(); }
+
+  /** Cache statistics for diagnostics. */
+  get cacheStats(): { size: number; totalBytes: number } {
+    return { size: this._c.size, totalBytes: this._c.totalBytes };
+  }
+
+  // ─── Command-level undo (state_manager.py) ─────────────────────────────
+  // Whole-data operations (transforms, transpose, subset) snapshot the
+  // previous DataMatrix reference; undoing swaps it back. Cell-level deltas
+  // remain on the separate _u stack.
+
+  private _cmdUndo: DataMatrix[] = [];
+  private _cmdRedo: DataMatrix[] = [];
+  private _maxCommands = 20;
+
+  /** Snapshot the current data before a whole-table command. */
+  pushCommandSnapshot(): void {
+    if (!this._d) return;
+    this._cmdUndo.push(this._d);
+    if (this._cmdUndo.length > this._maxCommands) this._cmdUndo.shift();
+    this._cmdRedo = [];
+  }
+
+  /** Undo the latest whole-table command; returns the restored snapshot. */
+  undoCommand(): DataMatrix | null {
+    const prev = this._cmdUndo.pop();
+    if (!prev || !this._d) return null;
+    this._cmdRedo.push(this._d);
+    this._d = prev;
+    this._m = true;
+    return prev;
+  }
+
+  /** Redo the latest undone whole-table command. */
+  redoCommand(): DataMatrix | null {
+    const next = this._cmdRedo.pop();
+    if (!next || !this._d) return null;
+    this._cmdUndo.push(this._d);
+    this._d = next;
+    this._m = true;
+    return next;
+  }
+
+  get canUndoCommand(): boolean { return this._cmdUndo.length > 0; }
+  get canRedoCommand(): boolean { return this._cmdRedo.length > 0; }
+
+  // ─── File tracking (state_manager.py current_file / mark_saved) ────────
+
+  private _file: string = '';
+
+  get currentFile(): string { return this._file; }
+
+  setCurrentFile(path: string): void {
+    this._file = path;
+    this._m = false; // fresh from disk
+  }
+
+  markSaved(): void { this._m = false; }
+
+  // ─── Visualization settings (state_manager.py) ──────────────────────────
+
+  private _viz: Record<string, number | string | boolean> = {};
+
+  getVizSetting(key: string): number | string | boolean | undefined {
+    return this._viz[key];
+  }
+
+  setVizSetting(key: string, value: number | string | boolean): void {
+    this._viz[key] = value;
+  }
+
+  clearVizSettings(): void { this._viz = {}; }
+}
+
+/** Module-singleton accessor mirroring Python's models.get_state_manager(). */
+export function getStateManager(): StateManager {
+  return StateManager.getInstance();
 }

@@ -121,15 +121,55 @@ export class Matrix {
     }
     return new Matrix(d, this.rows, this.cols);
   }
+  /**
+   * Matrix multiplication with cache-optimized loop ordering.
+   *
+   * For small matrices (< 64x64): blocked algorithm (block size 32)
+   * For large matrices: i-k-j ordering (SIMD-friendly, stride-1 access)
+   *
+   * i-k-j ordering ensures contiguous access to A[i,*] and B[*,j].
+   */
   matmul(o: Matrix): Matrix {
     if (this.cols !== o.rows) throw new Error('matmul shape');
-    const m = this.rows, n = o.cols, k = this.cols, d = new Float64Array(m * n);
-    for (let i = 0; i < m; i++)
-      for (let j = 0; j < n; j++) {
-        let s = 0;
-        for (let p = 0; p < k; p++) s += this.data[i * k + p] * o.data[p * n + j];
-        d[i * n + j] = s;
+    const m = this.rows, n = o.cols, k = this.cols;
+    const d = new Float64Array(m * n);
+
+    const BLOCK = 32;
+    if (m < 64 && n < 64 && k < 64) {
+      // Blocked algorithm for small matrices — improves cache locality
+      for (let i0 = 0; i0 < m; i0 += BLOCK) {
+        for (let j0 = 0; j0 < n; j0 += BLOCK) {
+          for (let k0 = 0; k0 < k; k0 += BLOCK) {
+            const iMax = Math.min(m, i0 + BLOCK);
+            const jMax = Math.min(n, j0 + BLOCK);
+            const kMax = Math.min(k, k0 + BLOCK);
+            for (let i = i0; i < iMax; i++) {
+              const baseI = i * k;
+              for (let kk = k0; kk < kMax; kk++) {
+                const aik = this.data[baseI + kk];
+                const baseD = i * n;
+                for (let j = j0; j < jMax; j++) {
+                  d[baseD + j] += aik * o.data[kk * n + j];
+                }
+              }
+            }
+          }
+        }
       }
+    } else {
+      // i-k-j ordering: stride-1 on A[i,*] and B[*,j]
+      // Ready for SIMD vectorization when available
+      for (let i = 0; i < m; i++) {
+        const baseI = i * n;
+        for (let kk = 0; kk < k; kk++) {
+          const aik = this.data[i * k + kk];
+          const baseK = kk * n;
+          for (let j = 0; j < n; j++) {
+            d[baseI + j] += aik * o.data[baseK + j];
+          }
+        }
+      }
+    }
     return new Matrix(d, m, n);
   }
   negate(): Matrix {
@@ -157,8 +197,51 @@ export class Matrix {
     return new Matrix(d, this.rows, this.cols);
   }
 
-  sum(): number { let s = 0; for (let i = 0; i < this.length; i++) s += this.data[i]; return s; }
-  mean(): number { return this.length > 0 ? this.sum() / this.length : 0; }
+  /**
+   * Sum using Kahan compensated summation.
+   * Compensates for catastrophic cancellation in arrays with >10^6 elements.
+   */
+  sum(): number {
+    let s = 0, c = 0; // c = compensation
+    for (let i = 0; i < this.length; i++) {
+      const vi = this.data[i];
+      const y = vi - c;
+      const t = s + y;
+      c = (t - s) - y;
+      s = t;
+    }
+    return s;
+  }
+  /**
+   * Mean computed via Welford one-pass algorithm.
+   * Numerically stable even for large or near-uniform arrays.
+   */
+  mean(): number {
+    if (this.length === 0) return 0;
+    let mean = 0;
+    for (let i = 0; i < this.length; i++) {
+      const x = this.data[i];
+      const delta = x - mean;
+      mean += delta / (i + 1);
+    }
+    return mean;
+  }
+  /**
+   * Sample variance via Welford one-pass algorithm.
+   * Uses ddof (default 1) for unbiased estimator.
+   */
+  variance(ddof: number = 1): number {
+    if (this.length <= ddof) return NaN;
+    let mean = 0, M2 = 0;
+    for (let i = 0; i < this.length; i++) {
+      const x = this.data[i];
+      const delta = x - mean;
+      mean += delta / (i + 1);
+      const delta2 = x - mean;
+      M2 += delta * delta2;
+    }
+    return M2 / (this.length - ddof);
+  }
   min(): number { let m = Infinity; for (let i = 0; i < this.length; i++) if (this.data[i] < m) m = this.data[i]; return m; }
   max(): number { let m = -Infinity; for (let i = 0; i < this.length; i++) if (this.data[i] > m) m = this.data[i]; return m; }
   sumAxis(axis: number): Matrix {
@@ -177,16 +260,26 @@ export class Matrix {
     if (divisor === 0) throw new Error('meanAxis: dimension is 0');
     return this.sumAxis(axis).div(divisor);
   }
+  /**
+   * Standard deviation along axis using Welford one-pass algorithm.
+   * @param axis - 0: column-wise, 1: row-wise
+   * @param ddof - Delta degrees of freedom (default 1, unbiased estimator)
+   */
   stdAxis(axis: number, ddof: number = 1): Matrix {
-    const mu = this.meanAxis(axis);
     if (axis === 0) {
       const denom = this.rows - ddof;
       if (denom <= 0) throw new Error('stdAxis: degrees of freedom >= sample size');
       const d = new Float64Array(this.cols);
       for (let j = 0; j < this.cols; j++) {
-        let s = 0;
-        for (let i = 0; i < this.rows; i++) { const df = this.data[i * this.cols + j] - mu.data[j]; s += df * df; }
-        d[j] = Math.sqrt(s / denom);
+        let mean = 0, M2 = 0;
+        for (let i = 0; i < this.rows; i++) {
+          const x = this.data[i * this.cols + j];
+          const delta = x - mean;
+          mean += delta / (i + 1);
+          const delta2 = x - mean;
+          M2 += delta * delta2;
+        }
+        d[j] = Math.sqrt(M2 / denom);
       }
       return new Matrix(d, 1, this.cols);
     } else {
@@ -194,16 +287,33 @@ export class Matrix {
       if (denom <= 0) throw new Error('stdAxis: degrees of freedom >= sample size');
       const d = new Float64Array(this.rows);
       for (let i = 0; i < this.rows; i++) {
-        let s = 0;
-        for (let j = 0; j < this.cols; j++) { const df = this.data[i * this.cols + j] - mu.data[i]; s += df * df; }
-        d[i] = Math.sqrt(s / denom);
+        let mean = 0, M2 = 0;
+        for (let j = 0; j < this.cols; j++) {
+          const x = this.data[i * this.cols + j];
+          const delta = x - mean;
+          mean += delta / (j + 1);
+          const delta2 = x - mean;
+          M2 += delta * delta2;
+        }
+        d[i] = Math.sqrt(M2 / denom);
       }
       return new Matrix(d, this.rows, 1);
     }
   }
+  /**
+   * Cumulative sum using Kahan compensated summation.
+   * Reduces numerical error for large arrays.
+   */
   cumsum(): Matrix {
-    const d = new Float64Array(this.length); d[0] = this.data[0];
-    for (let i = 1; i < this.length; i++) d[i] = d[i - 1] + this.data[i];
+    const d = new Float64Array(this.length);
+    let s = 0, c = 0;
+    for (let i = 0; i < this.length; i++) {
+      const vi = this.data[i] - c;
+      const t = s + vi;
+      c = (t - s) - vi;
+      s = t;
+      d[i] = s;
+    }
     return new Matrix(d, this.rows, this.cols);
   }
 
@@ -213,13 +323,42 @@ export class Matrix {
     for (let i = 0; i < d.length; i++) if (Number.isNaN(d[i])) d[i] = v;
     return new Matrix(d, this.rows, this.cols);
   }
+  /**
+   * Stable argsort: returns indices that would sort the matrix.
+   * Tie-breaker uses original index (stable sort).
+   * NaN values are sorted to the end.
+   */
   argsort(): number[] {
     const idx = Array.from({ length: this.length }, (_, i) => i);
-    const d = this.data; idx.sort((a, b) => d[a] - d[b]); return idx;
+    const d = this.data;
+    idx.sort((a, b) => {
+      const da = d[a], db = d[b];
+      const naA = Number.isNaN(da), naB = Number.isNaN(db);
+      if (naA && naB) return a - b;   // both NaN: tie-break by original index
+      if (naA) return 1;              // NaN sorts to end
+      if (naB) return -1;
+      if (da !== db) return da - db;  // value tie-break
+      return a - b;                   // index tie-break (stability)
+    });
+    return idx;
   }
+  /**
+   * Stable descending argsort: returns indices in descending order.
+   * NaN values are sorted to the end.
+   */
   argsortDesc(): number[] {
     const idx = Array.from({ length: this.length }, (_, i) => i);
-    const d = this.data; idx.sort((a, b) => d[b] - d[a]); return idx;
+    const d = this.data;
+    idx.sort((a, b) => {
+      const da = d[a], db = d[b];
+      const naA = Number.isNaN(da), naB = Number.isNaN(db);
+      if (naA && naB) return a - b;
+      if (naA) return 1;
+      if (naB) return -1;
+      if (da !== db) return db - da;
+      return a - b;
+    });
+    return idx;
   }
 
   toString(): string {

@@ -2,70 +2,19 @@ import { DataController } from '../../core/controllers/DataController';
 import { StatisticsController } from '../../core/controllers/StatisticsController';
 import { StateManager } from '../../core/models/index';
 import { parseCSV } from '../../core/parsers/CSVParser';
+import { PhyloNode } from '../../core/analysis/phylogenetics/index';
 import { NavigationTree } from '../components/NavigationTree';
 import { Spreadsheet } from '../components/Spreadsheet';
 import { PlotCanvas } from '../components/PlotCanvas';
-import { DiagnosticConsole } from '../components/DiagnosticConsole';
 import { FloatingToolbar } from '../components/FloatingToolbar';
-import { PCADialog } from '../components/dialogs/PCADialog';
-import { PCoADialog } from '../components/dialogs/PCoADialog';
-import { NMDSDialog } from '../components/dialogs/NMDSDialog';
-import { ClusteringDialog } from '../components/dialogs/ClusteringDialog';
-import { ConissDialog } from '../components/dialogs/ConissDialog';
-import { NullModelDialog } from '../components/dialogs/NullModelDialog';
-import { ExtinctionDialog } from '../components/dialogs/ExtinctionDialog';
-import { EFADialog } from '../components/dialogs/EFADialog';
-import { ImportDialog } from '../components/dialogs/ImportDialog';
-import { ExportDialog } from '../components/dialogs/ExportDialog';
-import { taskpool } from '@kit.ArkTS';
-
-// ─── 鸿蒙特有样式定义 ──────────────────────────────────────────
-
-@Extend(Text)
-function ribbonTabStyle(isActive: boolean, darkMode: boolean) {
-  .fontSize(13)
-  .fontWeight(isActive ? FontWeight.Bold : FontWeight.Medium)
-  .fontColor(isActive ? '#3498DB' : (darkMode ? '#ccc' : '#2C3E50'))
-  .padding({ left: 16, right: 16, top: 8, bottom: 8 })
-  .borderRadius(8)
-  .backgroundColor(isActive ? (darkMode ? '#2a2a4a' : '#EBF5FB') : 'transparent')
-  .animation({ duration: 200, curve: Curve.EaseInOut })
-}
-
-@Extend(Button)
-function primaryButton() {
-  .type(ButtonType.Capsule)
-  .backgroundColor('#3498DB')
-  .fontColor('#FFFFFF')
-  .height(36)
-  .fontSize(13)
-}
-
-@Extend(Button)
-function secondaryButton() {
-  .type(ButtonType.Normal)
-  .backgroundColor('#95A5A6')
-  .fontColor('#FFFFFF')
-  .height(32)
-  .fontSize(12)
-  .borderRadius(6)
-}
-
-@Styles
-function cardStyle() {
-  .backgroundColor('#FFFFFF')
-  .borderRadius(12)
-  .padding(16)
-  .shadow({ radius: 8, color: '#00000010', width: 1, offsetY: 2 })
-}
-
-@Styles
-function darkCardStyle() {
-  .backgroundColor('#16213e')
-  .borderRadius(12)
-  .padding(16)
-  .shadow({ radius: 8, color: '#00000040', width: 1, offsetY: 2 })
-}
+import { RibbonBar } from '../components/RibbonBar';
+import { WelcomeView } from '../components/WelcomeView';
+import { WorkspaceView } from '../components/WorkspaceView';
+import { LoadingView } from '../components/LoadingView';
+import { ConsoleView } from '../components/ConsoleView';
+import { StatusBar } from '../components/StatusBar';
+import { DialogLayer } from '../components/DialogLayer';
+import fs from '@ohos.file.fs';
 
 // ─── 主页面 ──────────────────────────────────────────────────────
 
@@ -89,6 +38,30 @@ struct Index {
   @State showNullModelDialog: boolean = false;
   @State showExtinctionDialog: boolean = false;
   @State showEFADialog: boolean = false;
+  @State showUnivariateDialog: boolean = false;
+  @State showDiversityDialog: boolean = false;
+  @State showRarefactionDialog: boolean = false;
+  @State showSimperDialog: boolean = false;
+  @State showLDADialog: boolean = false;
+  @State showAnosimDialog: boolean = false;
+  @State showPermanovaDialog: boolean = false;
+  @State showCCADialog: boolean = false;
+  @State showGPADialog: boolean = false;
+  @State showAllometryDialog: boolean = false;
+  @State showEvoRateDialog: boolean = false;
+  @State showSpectralDialog: boolean = false;
+  @State showMarkovDialog: boolean = false;
+  @State showDirectionalDialog: boolean = false;
+  @State showIsotopeDialog: boolean = false;
+  @State showStratCorrDialog: boolean = false;
+  @State showBiostratDialog: boolean = false;
+  @State showPaleoEnvDialog: boolean = false;
+  @State showWaveletDialog: boolean = false;
+  @State showPICDialog: boolean = false;
+  @State showPhyloSignalDialog: boolean = false;
+  @State showPhyloAnovaDialog: boolean = false;
+  @State showBetaDivDialog: boolean = false;
+  @State showTPSDialog: boolean = false;
   @State canUndo: boolean = false;
   @State canRedo: boolean = false;
   @State plotDataX: number[] = [];
@@ -98,15 +71,18 @@ struct Index {
   @State isLoading: boolean = false;
   @State progress: number = 0;
 
-  // 鸿蒙特有：AppStorage 持久化暗色模式（单一数据源，不再用 @State darkMode）
+  // 鸿蒙特有：AppStorage 持久化暗色模式
   @StorageLink('darkMode') darkMode: boolean = false;
+
+  // 三折叠/折叠屏适配：EntryAbility 的 windowSizeChange 监听维护此值
+  // (sm=折叠态 / md / lg=展开态 / xl)，断点切换只改布局属性、不重建组件树
+  @StorageLink('breakpoint') breakPoint: string = 'md';
+  @State sidebarOpen: boolean = false; // 小屏抽屉开关
 
   // StateManager singleton stored in AppStorage for reactive UI updates
   @StorageLink('stateMgr') stateMgr: StateManager | null = StateManager.getInstance();
   private dataCtrl = new DataController();
   private statCtrl = new StatisticsController();
-
-  private tabs: string[] = ['Home', 'Analysis', 'Morphometrics', 'Stratigraphy', 'Macroevolution'];
 
   aboutToAppear(): void {
     // Ensure StateManager singleton is stored in AppStorage for reactivity
@@ -115,10 +91,26 @@ struct Index {
 
   build() {
     Column() {
-      // ─── 顶部 Ribbon (使用 Tabs 组件) ───
-      this.RibbonBar()
+      // ─── 顶部 Ribbon ───
+      RibbonBar({
+        currentTab: $currentTab,
+        darkMode: $darkMode,
+        canUndo: $canUndo,
+        canRedo: $canRedo,
+        showConsole: $showConsole,
+        isSmallScreen: this.breakPoint === 'sm',
+        onToggleSidebar: () => {
+          animateTo({ duration: 250, curve: Curve.EaseInOut }, () => {
+            this.sidebarOpen = !this.sidebarOpen;
+          });
+        },
+        onUndo: () => { this.doUndo(); },
+        onRedo: () => { this.doRedo(); }
+      })
 
       // ─── 主内容区 (SideBarContainer 响应式布局) ───
+      // 折叠态(sm)：侧栏收起为抽屉，由 Ribbon 汉堡按钮打开；
+      // 展开态(md/lg/xl)：侧栏常驻，宽度随断点放大。
       SideBarContainer(SideBarContainerType.Embed) {
         // SideBar: 左侧导航
         NavigationTree()
@@ -127,37 +119,100 @@ struct Index {
         // Content: 右侧工作区
         Column() {
           if (this.isLoading) {
-            this.LoadingView()
+            LoadingView({
+              statusText: $statusText,
+              progress: $progress
+            })
           } else if (!this.hasData) {
-            this.WelcomeView()
+            WelcomeView({
+              darkMode: $darkMode,
+              showImportDialog: $showImportDialog
+            })
           } else {
-            this.WorkspaceView()
+            WorkspaceView({
+              currentWidget: $currentWidget,
+              workspaceWidgets: $workspaceWidgets,
+              plotDataX: $plotDataX,
+              plotDataY: $plotDataY,
+              plotTitle: $plotTitle,
+              plotType: $plotType,
+              darkMode: $darkMode
+            })
           }
         }
         .layoutWeight(1)
         .height('100%')
       }
-      .showSideBar(true)
-      .sideBarWidth(220)
+      .showSideBar(this.breakPoint === 'sm' ? this.sidebarOpen : true)
+      .sideBarWidth(this.breakPoint === 'lg' || this.breakPoint === 'xl' ? 280 : 240)
       .minSideBarWidth(180)
-      .maxSideBarWidth(300)
+      .maxSideBarWidth(320)
+      // 防挤压：内容区低于此宽度时系统自动收起侧栏（折叠动画期间平滑）
+      .minContentWidth(this.breakPoint === 'sm' ? 0 : 480)
+      .autoHide(true)
       .height('100%')
 
       // ─── 诊断控制台 (滑出式面板) ───
       if (this.showConsole) {
-        this.ConsolePanel()
+        ConsoleView({
+          showConsole: $showConsole,
+          darkMode: $darkMode
+        })
       }
 
       // ─── 状态栏 ───
-      this.StatusBar()
+      StatusBar({
+        statusText: $statusText,
+        hasData: $hasData,
+        dataInfo: $dataInfo,
+        darkMode: $darkMode
+      })
 
-      // ─── 对话框层 (Bug 修复: 之前未在 build() 中调用) ───
-      this.DialogLayer()
+      // ─── 对话框层 ───
+      DialogLayer({
+        showImportDialog: $showImportDialog,
+        showExportDialog: $showExportDialog,
+        showPCADialog: $showPCADialog,
+        showPCoADialog: $showPCoADialog,
+        showNMDSDialog: $showNMDSDialog,
+        showClusteringDialog: $showClusteringDialog,
+        showConissDialog: $showConissDialog,
+        showNullModelDialog: $showNullModelDialog,
+        showExtinctionDialog: $showExtinctionDialog,
+        showEFADialog: $showEFADialog,
+        showUnivariateDialog: $showUnivariateDialog,
+        showDiversityDialog: $showDiversityDialog,
+        showRarefactionDialog: $showRarefactionDialog,
+        showSimperDialog: $showSimperDialog,
+        showLDADialog: $showLDADialog,
+        showAnosimDialog: $showAnosimDialog,
+        showPermanovaDialog: $showPermanovaDialog,
+        showCCADialog: $showCCADialog,
+        showGPADialog: $showGPADialog,
+        showAllometryDialog: $showAllometryDialog,
+        showEvoRateDialog: $showEvoRateDialog,
+        showSpectralDialog: $showSpectralDialog,
+        showMarkovDialog: $showMarkovDialog,
+        showDirectionalDialog: $showDirectionalDialog,
+        showIsotopeDialog: $showIsotopeDialog,
+        showStratCorrDialog: $showStratCorrDialog,
+        showBiostratDialog: $showBiostratDialog,
+        showPaleoEnvDialog: $showPaleoEnvDialog,
+        showWaveletDialog: $showWaveletDialog,
+        showPICDialog: $showPICDialog,
+        showPhyloSignalDialog: $showPhyloSignalDialog,
+        showPhyloAnovaDialog: $showPhyloAnovaDialog,
+        showBetaDivDialog: $showBetaDivDialog,
+        showTPSDialog: $showTPSDialog,
+        onImportConfirm: (params: Record<string, Object>) => { this.loadFile(params); },
+        onExportConfirm: (params: Record<string, Object>) => { this.exportFile(params); },
+        onAnalysisConfirm: (name: string, params: Record<string, Object>) => { this.runAnalysisWithParams(name, params); },
+        onPCACancel: () => { this.showPCADialog = false; }
+      })
 
       // ─── 浮动工具栏 ───
-      FloatingToolbar({} as Record<string, Object>)
+      FloatingToolbar({ onAction: (action: string) => { this.handleAction(action); } })
         .position({ x: '80%', y: '80%' })
-        .onAction((action: string) => { this.handleAction(action); })
     }
     .width('100%')
     .height('100%')
@@ -173,259 +228,6 @@ struct Index {
           }
         })
     )
-  }
-
-  // ─── 鸿蒙特有：@Builder 组件化构建 ────────────────────────────
-
-  @Builder RibbonBar() {
-    Row() {
-      // 使用 Tabs 组件替代手动 Row
-      ForEach(this.tabs, (tab: string, idx: number) => {
-        Text(tab)
-          .ribbonTabStyle(this.currentTab === idx, this.darkMode)
-          .onClick(() => {
-            animateTo({ duration: 200, curve: Curve.EaseInOut }, () => {
-              this.currentTab = idx
-            })
-          })
-      })
-      Blank()
-      // Undo/Redo
-      Text('Undo')
-        .fontSize(11)
-        .fontColor(this.canUndo ? '#3498DB' : '#BDC3C7')
-        .padding(8)
-        .onClick(() => { this.doUndo(); })
-      Text('Redo')
-        .fontSize(11)
-        .fontColor(this.canRedo ? '#3498DB' : '#BDC3C7')
-        .padding(8)
-        .onClick(() => { this.doRedo(); })
-      // Console toggle
-      Text('Console')
-        .fontSize(11)
-        .fontColor('#7F8C8D')
-        .padding(8)
-        .onClick(() => {
-          animateTo({ duration: 300, curve: Curve.EaseOut }, () => {
-            this.showConsole = !this.showConsole
-          })
-        })
-      // Dark mode toggle
-      Toggle({ type: ToggleType.Switch, isOn: this.darkMode })
-        .onChange((isOn: boolean) => {
-          this.darkMode = isOn
-          AppStorage.setOrCreate('darkMode', isOn)
-        })
-        .width(40)
-        .height(24)
-    }
-    .width('100%')
-    .height(44)
-    .padding({ left: 12, right: 12 })
-    .backgroundColor(this.darkMode ? '#16213e' : '#F8F9FA')
-    .border({ width: { bottom: 1 }, color: '#E4E7EB' })
-  }
-
-  @Builder WelcomeView() {
-    Column() {
-      // 鸿蒙特有：使用 Stack + Image 替代纯文本
-      Stack() {
-        Column() {
-          Text('PaleoAST')
-            .fontSize(48)
-            .fontWeight(FontWeight.Bold)
-            .fontColor('#3498DB')
-            .margin({ bottom: 8 })
-
-          Text('PaleoAST-Harmony')
-            .fontSize(20)
-            .fontWeight(FontWeight.Medium)
-            .fontColor(this.darkMode ? '#ccc' : '#2C3E50')
-
-          Text('Paleontological Advanced Statistical Toolkit')
-            .fontSize(12)
-            .fontColor('#7F8C8D')
-            .margin({ top: 4, bottom: 24 })
-
-          Button('打开 CSV 文件')
-            .primaryButton()
-            .onClick(() => { this.showImportDialog = true; })
-
-          Text('或拖放文件到此区域')
-            .fontSize(11)
-            .fontColor('#BDC3C7')
-            .margin({ top: 8 })
-        }
-      }
-      .cardStyle()
-      .width('60%')
-    }
-    .width('100%')
-    .layoutWeight(1)
-    .justifyContent(FlexAlign.Center)
-  }
-
-  @Builder WorkspaceView() {
-    Column() {
-      // 鸿蒙特有：使用 Tabs + TabContent 管理工作区
-      Tabs({ index: this.currentWidget }) {
-        ForEach(this.workspaceWidgets, (widget: string, idx: number) => {
-          TabContent() {
-            if (widget === 'spreadsheet') {
-              Spreadsheet({
-                dataMatrix: this.stateMgr.dataMatrix,
-              } as Record<string, Object>)
-                .width('100%')
-                .height('100%')
-                .onDataChanged((data: any) => { this.statusText = 'Data modified'; })
-            } else if (this.plotDataX.length > 0) {
-              PlotCanvas({
-                title: this.plotTitle,
-              } as Record<string, Object>)
-                .width('100%')
-                .height('100%')
-            } else {
-              Text('Result: ' + widget)
-                .fontSize(12)
-                .padding(16)
-                .fontColor(this.darkMode ? '#ccc' : '#2C3E50')
-            }
-          }
-          .tabBar(widget)
-        }
-      }
-      .barMode(BarMode.Scrollable)
-      .barWidth('100%')
-      .barHeight(32)
-      .onChange((index: number) => { this.currentWidget = index; })
-      .layoutWeight(1)
-    }
-    .width('100%')
-    .height('100%')
-  }
-
-  @Builder LoadingView() {
-    Column() {
-      // 鸿蒙特有：LoadingProgress 动画
-      LoadingProgress()
-        .width(48)
-        .height(48)
-        .color('#3498DB')
-      Text(this.statusText)
-        .fontSize(13)
-        .fontColor('#7F8C8D')
-        .margin({ top: 16 })
-      // 鸿蒙特有：进度条
-      Progress({ value: this.progress, total: 100, type: ProgressType.Linear })
-        .width('60%')
-        .margin({ top: 8 })
-        .color('#3498DB')
-    }
-    .width('100%')
-    .layoutWeight(1)
-    .justifyContent(FlexAlign.Center)
-  }
-
-  @Builder ConsolePanel() {
-    Column() {
-      Row() {
-        Text('Diagnostic Console').fontSize(12).fontWeight(FontWeight.Bold)
-        Blank()
-        Text('Close').fontSize(11).fontColor('#7F8C8D')
-          .onClick(() => { this.showConsole = false; })
-      }
-      .width('100%')
-      .height(28)
-      .padding({ left: 12, right: 12 })
-      .backgroundColor(this.darkMode ? '#16213e' : '#F8F9FA')
-
-      DiagnosticConsole()
-        .layoutWeight(1)
-    }
-    .height(180)
-    .backgroundColor(this.darkMode ? '#0f3460' : '#FAFBFC')
-    .border({ width: { top: 1 }, color: '#E4E7EB' })
-    // 鸿蒙特有：滑出动画
-    .transition(TransitionEffect.OPACITY.animation({ duration: 300 }))
-  }
-
-  @Builder StatusBar() {
-    Row() {
-      Text(this.statusText)
-        .fontSize(11)
-        .fontColor('#7F8C8D')
-        .layoutWeight(1)
-        .maxLines(1)
-        .textOverflow({ overflow: TextOverflow.Ellipsis })
-
-      if (this.hasData) {
-        Text(this.dataInfo)
-          .fontSize(11)
-          .fontColor('#BDC3C7')
-      }
-    }
-    .width('100%')
-    .height(28)
-    .padding({ left: 12, right: 12 })
-    .backgroundColor(this.darkMode ? '#16213e' : '#F8F9FA')
-    .border({ width: { top: 1 }, color: '#E4E7EB' })
-  }
-
-  // ─── 对话框 (鸿蒙特有：使用 if 条件渲染 + transition) ──────────
-
-  @Builder DialogLayer() {
-    if (this.showImportDialog) {
-      ImportDialog({ visible: this.showImportDialog } as Record<string, Object>)
-        .onConfirm((params: Record<string, Object>) => { this.loadFile(params); })
-        .transition(TransitionEffect.scale({ x: 0.9, y: 0.9 }).combine(TransitionEffect.OPACITY))
-    }
-    if (this.showExportDialog) {
-      ExportDialog({ visible: this.showExportDialog } as Record<string, Object>)
-        .onConfirm((params: Record<string, Object>) => { this.exportFile(params); })
-        .transition(TransitionEffect.scale({ x: 0.9, y: 0.9 }).combine(TransitionEffect.OPACITY))
-    }
-    if (this.showPCADialog) {
-      PCADialog({ visible: this.showPCADialog } as Record<string, Object>)
-        .onConfirm((params: Record<string, Object>) => { this.runAnalysisWithParams('PCA', params); })
-        .onCancel(() => { this.showPCADialog = false; })
-        .transition(TransitionEffect.scale({ x: 0.9, y: 0.9 }).combine(TransitionEffect.OPACITY))
-    }
-    if (this.showPCoADialog) {
-      PCoADialog({ visible: this.showPCoADialog } as Record<string, Object>)
-        .onConfirm((params: Record<string, Object>) => { this.runAnalysisWithParams('PCoA', params); })
-        .transition(TransitionEffect.scale({ x: 0.9, y: 0.9 }).combine(TransitionEffect.OPACITY))
-    }
-    if (this.showNMDSDialog) {
-      NMDSDialog({ visible: this.showNMDSDialog } as Record<string, Object>)
-        .onConfirm((params: Record<string, Object>) => { this.runAnalysisWithParams('NMDS', params); })
-        .transition(TransitionEffect.scale({ x: 0.9, y: 0.9 }).combine(TransitionEffect.OPACITY))
-    }
-    if (this.showClusteringDialog) {
-      ClusteringDialog({ visible: this.showClusteringDialog } as Record<string, Object>)
-        .onConfirm((params: Record<string, Object>) => { this.runAnalysisWithParams('Clustering', params); })
-        .transition(TransitionEffect.scale({ x: 0.9, y: 0.9 }).combine(TransitionEffect.OPACITY))
-    }
-    if (this.showConissDialog) {
-      ConissDialog({ visible: this.showConissDialog } as Record<string, Object>)
-        .onConfirm((params: Record<string, Object>) => { this.runAnalysisWithParams('CONISS', params); })
-        .transition(TransitionEffect.scale({ x: 0.9, y: 0.9 }).combine(TransitionEffect.OPACITY))
-    }
-    if (this.showNullModelDialog) {
-      NullModelDialog({ visible: this.showNullModelDialog } as Record<string, Object>)
-        .onConfirm((params: Record<string, Object>) => { this.runAnalysisWithParams('NullModel', params); })
-        .transition(TransitionEffect.scale({ x: 0.9, y: 0.9 }).combine(TransitionEffect.OPACITY))
-    }
-    if (this.showExtinctionDialog) {
-      ExtinctionDialog({ visible: this.showExtinctionDialog } as Record<string, Object>)
-        .onConfirm((params: Record<string, Object>) => { this.runAnalysisWithParams('Extinction', params); })
-        .transition(TransitionEffect.scale({ x: 0.9, y: 0.9 }).combine(TransitionEffect.OPACITY))
-    }
-    if (this.showEFADialog) {
-      EFADialog({ visible: this.showEFADialog } as Record<string, Object>)
-        .onConfirm((params: Record<string, Object>) => { this.runAnalysisWithParams('EFA', params); })
-        .transition(TransitionEffect.scale({ x: 0.9, y: 0.9 }).combine(TransitionEffect.OPACITY))
-    }
   }
 
   // ─── 业务逻辑方法 ──────────────────────────────────────────────
@@ -454,7 +256,6 @@ struct Index {
       let csv: string;
       if (filePath && filePath.length > 0 && !filePath.includes('Sample,Var1')) {
         // Use @ohos.file.fs to read the selected file
-        import fs from '@ohos.file.fs';
         const fileData = fs.readTextSync(filePath);
         csv = fileData;
       } else {
@@ -486,63 +287,259 @@ struct Index {
     } catch (e) { this.statusText = 'Export error: ' + e; }
   }
 
+  // ─── 同步计算核心（原 taskpool 闭包体，避免跨线程序列化组件 this） ───
+
+  private runDialogAnalysisCore(name: string, params: Record<string, Object>): any {
+    switch (name) {
+      case 'PCA':
+        return this.statCtrl.runPCA(
+          params['nComponents'] as number ?? 3,
+          params['method'] as string ?? 'covariance'
+        );
+      case 'PCoA':
+        return this.statCtrl.runPCoA(
+          params['metric'] as string ?? 'bray_curtis',
+          params['n_components'] as number ?? 10
+        );
+      case 'NMDS':
+        return this.statCtrl.runNMDS(
+          params['metric'] as string ?? 'bray_curtis',
+          params['n_dimensions'] as number ?? 2,
+          params['max_iterations'] as number ?? 300,
+          params['n_restarts'] as number ?? 10
+        );
+      case 'Clustering':
+        return this.statCtrl.runClustering(
+          params['n_clusters'] as number ?? 3,
+          params['method'] as string ?? 'ward',
+          params['metric'] as string ?? 'euclidean'
+        );
+      case 'CONISS':
+        return this.statCtrl.runCONISS(params['n_zones'] as number ?? 4);
+      case 'NullModel':
+        return this.statCtrl.runNullModel(
+          params['metric'] as string ?? 'c_score',
+          params['n_permutations'] as number ?? 999
+        );
+      case 'Extinction':
+        return this.statCtrl.runExtinctionCI(
+          params['method'] as string ?? 'marshall',
+          params['confidence_level'] as number ?? 0.95
+        );
+      case 'EFA':
+        return this.statCtrl.runEFA(
+          params['n_harmonics'] as number ?? 10,
+          params['n_points'] as number ?? 200
+        );
+      // Extended wiring: analyses opened from their dialogs
+      case 'Summary':
+      case 'Univariate':
+        return this.statCtrl.runSummary();
+      case 'Diversity Indices':
+        return this.statCtrl.runDiversity(this.stateMgr.dataMatrix.data.row(params['sample_index'] as number ?? 0));
+      case 'Rarefaction':
+        return this.statCtrl.runRarefaction(this.stateMgr.dataMatrix.data.row(params['sample_index'] as number ?? 0));
+      case 'SIMPER':
+        return this.statCtrl.runSIMPER(this.stateMgr.dataMatrix.getGroups() ?? []);
+      case 'LDA':
+        return this.statCtrl.runLDA(this.stateMgr.dataMatrix.getGroups() ?? []);
+      case 'ANOSIM':
+        return this.statCtrl.runANOSIM(
+          this.stateMgr.dataMatrix.getGroups() ?? [],
+          params['metric'] as string ?? 'bray_curtis',
+          params['n_permutations'] as number ?? 999
+        );
+      case 'PERMANOVA':
+        return this.statCtrl.runPERMANOVA(this.stateMgr.dataMatrix.getGroups() ?? []);
+      case 'CCA':
+        return this.statCtrl.runCCA(this.stateMgr.dataMatrix.data, this.stateMgr.dataMatrix.data);
+      case 'GPA':
+        return this.statCtrl.runGPA();
+      case 'Allometry':
+        return this.statCtrl.runAllometry();
+      case 'Evolution Rate':
+        return this.statCtrl.runEvoRate();
+      case 'Spectral':
+        return this.statCtrl.runSpectral();
+      case 'Markov':
+        return this.statCtrl.runMarkov();
+      case 'Directional':
+        return this.statCtrl.runDirectional();
+      case 'Isotope':
+        return this.statCtrl.runIsotope();
+      case 'Stratigraphic Correlation':
+        return this.statCtrl.runComputeCorrelation(
+          this.stateMgr.dataMatrix.data.col(0),
+          this.stateMgr.dataMatrix.data.col(Math.min(1, this.stateMgr.dataMatrix.data.cols - 1))
+        );
+      case 'Biostratigraphy':
+        return this.statCtrl.runUnitaryAssociations(
+          this.stateMgr.dataMatrix.data.to2D(), this.stateMgr.dataMatrix.data.to2D()
+        );
+      case 'Paleo-Environment':
+        return this.statCtrl.runPaleoEnv();
+      case 'Wavelet':
+        return this.statCtrl.runWavelet();
+      case 'PIC': {
+        const traits: Record<string, number> = {};
+        const labels = this.stateMgr.dataMatrix.rowLabels;
+        const vals = this.stateMgr.dataMatrix.data.col(0);
+        for (let i = 0; i < labels.length; i++) traits[labels[i]] = vals[i] ?? 0;
+        return this.statCtrl.runPIC(new PhyloNode('root', 0, false), traits);
+      }
+      case 'Phylo Signal': {
+        const traits: Record<string, number> = {};
+        const labels = this.stateMgr.dataMatrix.rowLabels;
+        const vals = this.stateMgr.dataMatrix.data.col(0);
+        for (let i = 0; i < labels.length; i++) traits[labels[i]] = vals[i] ?? 0;
+        return this.statCtrl.runPhylogeneticSignalUnified(new PhyloNode('root', 0, false), traits);
+      }
+      case 'Phylo ANOVA': {
+        const traits: Record<string, number> = {};
+        const labels = this.stateMgr.dataMatrix.rowLabels;
+        const vals = this.stateMgr.dataMatrix.data.col(0);
+        for (let i = 0; i < labels.length; i++) traits[labels[i]] = vals[i] ?? 0;
+        return this.statCtrl.runPhyloANOVA(new PhyloNode('root', 0, false), traits, {});
+      }
+      case 'Beta Diversity':
+        return this.statCtrl.runBetaDiv();
+      case 'TPS Grid':
+        return this.statCtrl.runTPSAnalyze(
+          this.stateMgr.dataMatrix.data.to2D(), this.stateMgr.dataMatrix.data.to2D()
+        );
+      default:
+        return null;
+    }
+  }
+
+  private runQuickAnalysisCore(name: string): any {
+    if (!this.stateMgr?.dataMatrix) { return null; }
+    const data = this.stateMgr.dataMatrix.data;
+    const groups = this.stateMgr.dataMatrix.getGroups();
+    const dm = this.stateMgr.dataMatrix;
+
+    // Helper to check empty columns
+    const safeCol = (colIdx: number): number[] => {
+      const c = data.col(colIdx);
+      return c.length === 0 ? [0] : c; // Return [0] as fallback for empty columns
+    };
+
+    switch (name) {
+      case 'LDA': return this.statCtrl.runLDA(groups ?? []);
+      case 'CCA': return this.statCtrl.runCCA(data, data);
+      case 'Summary': return this.statCtrl.runSummary();
+      case 'Normality': return this.statCtrl.runNormalityTest(0);
+      case 't-test': return this.statCtrl.runTTest(safeCol(0), safeCol(1));
+      case 'ANOVA': return this.statCtrl.runANOVA([safeCol(0), safeCol(1)]);
+      case 'Kruskal-Wallis': return this.statCtrl.runKruskal([safeCol(0), safeCol(1)]);
+      case 'Diversity Indices':
+        return this.statCtrl.runDiversity(data.row(0));
+      case 'Rarefaction':
+        return this.statCtrl.runRarefaction(data.row(0));
+      case 'SHE Analysis': return this.statCtrl.runSHE();
+      case 'Clustering': return this.statCtrl.runClustering(3);
+      case 'ANOSIM': return this.statCtrl.runANOSIM(groups ?? []);
+      case 'PERMANOVA': return this.statCtrl.runPERMANOVA(groups ?? []);
+      case 'SIMPER': return this.statCtrl.runSIMPER(groups ?? []);
+      case 'GPA': return this.statCtrl.runGPA();
+      case 'TPS Grid': return this.statCtrl.runTPSAnalyze(data.to2D(), data.to2D());
+      case 'Allometry': return this.statCtrl.runAllometry();
+      case 'Evolution Rate': return this.statCtrl.runEvoRate();
+      case 'Spectral':
+        return this.statCtrl.runSpectral();
+      case 'Markov': return this.statCtrl.runMarkov();
+      case 'Directional': return this.statCtrl.runDirectional();
+      case 'Wavelet': return this.statCtrl.runWavelet();
+      case 'Isotope': return this.statCtrl.runIsotope();
+      case 'Stratigraphic Correlation':
+        // correlate column pairs of the loaded table by height (column 0)
+        return this.statCtrl.runStratCorr([{
+          name: 'S1', heights: data.col(0), values: safeCol(1),
+        }, {
+          name: 'S2', heights: data.col(0), values: safeCol(Math.min(2, data.cols - 1)),
+        }]);
+      case 'Biostratigraphy':
+        return this.statCtrl.runUnitaryAssociations(data.to2D(), data.to2D(), undefined, undefined);
+      case 'Paleo-Environment': return this.statCtrl.runPaleoEnv();
+      case 'Fitch Parsimony': {
+        const seqs: Record<string, string> = {};
+        for (let i = 0; i < dm.rowLabels.length; i++) seqs[dm.rowLabels[i]] = String(Math.round(safeCol(0)[i] ?? 0));
+        return this.statCtrl.runFitch(new PhyloNode('root', 0, false), seqs);
+      }
+      case 'PIC': {
+        const traits: Record<string, number> = {};
+        for (let i = 0; i < dm.rowLabels.length; i++) traits[dm.rowLabels[i]] = safeCol(0)[i] ?? 0;
+        return this.statCtrl.runPIC(new PhyloNode('root', 0, false), traits);
+      }
+      case 'Phylo Signal': {
+        const traits: Record<string, number> = {};
+        for (let i = 0; i < dm.rowLabels.length; i++) traits[dm.rowLabels[i]] = safeCol(0)[i] ?? 0;
+        return this.statCtrl.runPhylogeneticSignalUnified(new PhyloNode('root', 0, false), traits);
+      }
+      case 'Phylo ANOVA': {
+        const traits: Record<string, number> = {};
+        for (let i = 0; i < dm.rowLabels.length; i++) traits[dm.rowLabels[i]] = safeCol(0)[i] ?? 0;
+        return this.statCtrl.runPhyloANOVA(new PhyloNode('root', 0, false), traits, {});
+      }
+      case 'Cohort Survival': {
+        const records: [number, number][] = [];
+        const colA = safeCol(0), colB = safeCol(1);
+        for (let i = 0; i < Math.min(colA.length, colB.length); i++) records.push([colA[i], colB[i]]);
+        return this.statCtrl.runCohort(records, [[0, 1], [1, 2], [2, 3]]);
+      }
+      case 'Diversity Dynamics': {
+        const records: [number, number][] = [];
+        const colA = safeCol(0), colB = safeCol(1);
+        for (let i = 0; i < Math.min(colA.length, colB.length); i++) records.push([colA[i], colB[i]]);
+        return this.statCtrl.runDiversityDyn(records, [[0, 1], [1, 2], [2, 3]]);
+      }
+      case 'FBD Process':
+        return this.statCtrl.runFBD(0.5, 0.2, 0.1, 10);
+      case 'Beta Diversity': return this.statCtrl.runBetaDiv();
+      case 'Mann-Whitney U': {
+        const g1 = safeCol(0), g2 = safeCol(1);
+        if (g1.length === 0 || g2.length === 0) {
+          return { U: 0, p: 1, warning: 'Empty column(s)' };
+        }
+        return this.statCtrl.runMannWhitney(g1, g2);
+      }
+      case 'PLS Integration':
+        return null;
+      case 'Relative Warps': return this.statCtrl.runRelativeWarps();
+      case 'Morphospace Disparity': return this.statCtrl.runMorphospaceDisparity();
+      case 'Convex Hull': return this.statCtrl.runConvexHull(data.to2D());
+      case 'Minimum Spanning Tree': return this.statCtrl.runMST();
+      case 'Coverage Rarefaction': return this.statCtrl.runCoverageRarefaction();
+      case 'Abundance Models': return this.statCtrl.runAbundanceModels();
+      case 'Compute Correlation': return this.statCtrl.runComputeCorrelation(safeCol(0), safeCol(1));
+      case 'Centroid Configuration Blocks': return this.statCtrl.runDivideBlocks('anterior_posterior');
+      case 'LOWESS Smooth': return this.statCtrl.runLowess(safeCol(0), safeCol(1));
+      case 'Polynomial Trend': return this.statCtrl.runPolynomialTrend(safeCol(0), safeCol(1));
+      case 'Remove Outliers': return this.statCtrl.runRemoveOutliers(safeCol(0));
+      case 'Cross Validate': return this.statCtrl.runCrossValidate(safeCol(0), safeCol(1));
+      case 'Detect Excursions': return this.statCtrl.runDetectExcursions(safeCol(0), safeCol(1));
+      case 'Filter Endemic': return this.statCtrl.runFilterEndemic(data.to2D());
+      case 'Build ARMA': return this.statCtrl.runBuildARMA(safeCol(0));
+      case 'ARMA Predict': return this.statCtrl.runARMAPredict(safeCol(0), 5);
+      case 'Kaplan-Meier': return this.statCtrl.runKaplanMeier(safeCol(0), safeCol(0).map(_ => 1));
+      case 'Neutral Simulation': return this.statCtrl.runSimulateNeutral(100, 10);
+      case 'Equilibrium Test': return this.statCtrl.runTestEquilibrium(0.5, 0.4);
+      case 'Exponential Fit': return this.statCtrl.runFitExponential(safeCol(0), safeCol(1));
+      case 'Logistic Fit': return this.statCtrl.runFitLogistic(safeCol(0), safeCol(1));
+      default: return null;
+    }
+  }
+
   private async runAnalysisWithParams(name: string, params: Record<string, Object>): Promise<void> {
     this.isLoading = true;
     this.statusText = 'Running: ' + name + '...';
     try {
       if (!this.stateMgr?.dataMatrix) { throw new Error('No data loaded'); }
-      const data = this.stateMgr.dataMatrix.data;
       let result: any;
 
-      // Use taskpool for heavy computations to avoid blocking UI thread
-      const task = taskpool.execute(() => {
-        switch (name) {
-          case 'PCA':
-            return this.statCtrl.runPCA(
-              params['nComponents'] as number ?? 3,
-              params['method'] as string ?? 'covariance'
-            );
-          case 'PCoA':
-            return this.statCtrl.runPCoA(
-              params['metric'] as string ?? 'bray_curtis',
-              params['n_components'] as number ?? 10
-            );
-          case 'NMDS':
-            return this.statCtrl.runNMDS(
-              params['metric'] as string ?? 'bray_curtis',
-              params['n_dimensions'] as number ?? 2,
-              params['max_iterations'] as number ?? 300,
-              params['n_restarts'] as number ?? 10
-            );
-          case 'Clustering':
-            return this.statCtrl.runClustering(
-              params['n_clusters'] as number ?? 3,
-              params['method'] as string ?? 'ward',
-              params['metric'] as string ?? 'euclidean'
-            );
-          case 'CONISS':
-            return this.statCtrl.runCONISS(params['n_zones'] as number ?? 4);
-          case 'NullModel':
-            return this.statCtrl.runNullModel(
-              params['metric'] as string ?? 'c_score',
-              params['n_permutations'] as number ?? 999
-            );
-          case 'Extinction':
-            return this.statCtrl.runExtinctionCI(
-              params['method'] as string ?? 'marshall',
-              params['confidence_level'] as number ?? 0.95
-            );
-          case 'EFA':
-            return this.statCtrl.runEFA(
-              params['n_harmonics'] as number ?? 10,
-              params['n_points'] as number ?? 200
-            );
-          default:
-            return null;
-        }
-      });
-
-      result = await task;
+      // Run synchronously: closures capturing component `this` cannot be
+      // serialized across threads via taskpool (would crash at runtime).
+      result = this.runDialogAnalysisCore(name, params);
 
       switch (name) {
         case 'PCA':
@@ -583,6 +580,31 @@ struct Index {
           this.plotTitle = 'EFA Contours';
           this.plotType = 'line';
           break;
+        default: {
+          // Generic result handling for the extended dialog-routed analyses:
+          // show a first-two-column scatter/line when the result exposes
+          // coordinates, otherwise leave the title line for the status bar.
+          if (result && typeof result === 'object') {
+            const r = result as Record<string, Object>;
+            const coords = r['coordinates'] as number[][] | undefined;
+            const scores = r['scores'] as number[][] | undefined;
+            if (scores && Array.isArray(scores)) {
+              this.plotDataX = scores.map((row: number[]) => row[0]);
+              this.plotDataY = scores.map((row: number[]) => row[1]);
+              this.plotTitle = name;
+              this.plotType = 'scatter';
+            } else if (coords && Array.isArray(coords)) {
+              this.plotDataX = coords.map((row: number[]) => row[0]);
+              this.plotDataY = coords.map((row: number[]) => row[1]);
+              this.plotTitle = name;
+              this.plotType = 'scatter';
+            } else {
+              this.plotTitle = name + ' result';
+              this.plotType = 'line';
+            }
+          }
+          break;
+        }
       }
 
       this.statusText = name + ' completed';
@@ -596,6 +618,13 @@ struct Index {
   private async handleAnalysis(name: string): Promise<void> {
     if (!this.hasData) { this.statusText = 'Please load data first'; return; }
 
+    // 小屏（折叠态）：选择分析后自动收起抽屉侧栏，让出内容宽度
+    if (this.breakPoint === 'sm' && this.sidebarOpen) {
+      animateTo({ duration: 250, curve: Curve.EaseInOut }, () => {
+        this.sidebarOpen = false;
+      });
+    }
+
     switch (name) {
       case 'PCA': this.showPCADialog = true; return;
       case 'PCoA': this.showPCoADialog = true; return;
@@ -605,6 +634,31 @@ struct Index {
       case 'Null Models': this.showNullModelDialog = true; return;
       case 'Extinction CI': this.showExtinctionDialog = true; return;
       case 'EFA': this.showEFADialog = true; return;
+      // Extended wiring: every remaining analysis opens its dialog
+      case 'Univariate': this.showUnivariateDialog = true; return;
+      case 'Diversity Indices': this.showDiversityDialog = true; return;
+      case 'Rarefaction': this.showRarefactionDialog = true; return;
+      case 'SIMPER': this.showSimperDialog = true; return;
+      case 'LDA': this.showLDADialog = true; return;
+      case 'ANOSIM': this.showAnosimDialog = true; return;
+      case 'PERMANOVA': this.showPermanovaDialog = true; return;
+      case 'CCA': this.showCCADialog = true; return;
+      case 'GPA': this.showGPADialog = true; return;
+      case 'Allometry': this.showAllometryDialog = true; return;
+      case 'Evolution Rate': this.showEvoRateDialog = true; return;
+      case 'Spectral': this.showSpectralDialog = true; return;
+      case 'Markov': this.showMarkovDialog = true; return;
+      case 'Directional': this.showDirectionalDialog = true; return;
+      case 'Isotope': this.showIsotopeDialog = true; return;
+      case 'Stratigraphic Correlation': this.showStratCorrDialog = true; return;
+      case 'Biostratigraphy': this.showBiostratDialog = true; return;
+      case 'Paleo-Environment': this.showPaleoEnvDialog = true; return;
+      case 'Wavelet': this.showWaveletDialog = true; return;
+      case 'PIC': this.showPICDialog = true; return;
+      case 'Phylo Signal': this.showPhyloSignalDialog = true; return;
+      case 'Phylo ANOVA': this.showPhyloAnovaDialog = true; return;
+      case 'Beta Diversity': this.showBetaDivDialog = true; return;
+      case 'TPS Grid': this.showTPSDialog = true; return;
       case 'Eigenshape': this.statusText = 'Eigenshape: use EFA dialog first to generate coefficients'; return;
     }
 
@@ -612,92 +666,11 @@ struct Index {
     this.isLoading = true;
     try {
       if (!this.stateMgr?.dataMatrix) { throw new Error('No data loaded'); }
-      const data = this.stateMgr.dataMatrix.data;
-      const groups = this.stateMgr.dataMatrix.getGroups();
       let result: any;
 
-      // Helper to check empty columns
-      const safeCol = (colIdx: number): number[] => {
-        const c = data.col(colIdx);
-        return c.length === 0 ? [0] : c; // Return [0] as fallback for empty columns
-      };
-
-      // Use taskpool for heavy computations
-      const task = taskpool.execute(() => {
-        switch (name) {
-          case 'LDA': return this.statCtrl.runLDA(groups ?? []);
-          case 'CCA': return this.statCtrl.runCCA(data, data);
-          case 'Summary': return this.statCtrl.runSummary();
-          case 'Normality': return this.statCtrl.runNormalityTest(0);
-          case 't-test': return this.statCtrl.runTTest(safeCol(0), safeCol(1));
-          case 'ANOVA': return this.statCtrl.runANOVA([safeCol(0), safeCol(1)]);
-          case 'Kruskal-Wallis': return this.statCtrl.runKruskal([safeCol(0), safeCol(1)]);
-          case 'Diversity Indices':
-            return this.statCtrl.runDiversity(data.row(0));
-          case 'Rarefaction':
-            return this.statCtrl.runRarefaction(data.row(0));
-          case 'SHE Analysis': return this.statCtrl.runSHE();
-          case 'Clustering': return this.statCtrl.runClustering(3);
-          case 'ANOSIM': return this.statCtrl.runANOSIM(groups ?? []);
-          case 'PERMANOVA': return this.statCtrl.runPERMANOVA(groups ?? []);
-          case 'SIMPER': return this.statCtrl.runSIMPER(groups ?? []);
-          case 'GPA': return this.statCtrl.runGPA();
-          case 'TPS Grid': return this.statCtrl.runGPA();
-          case 'Allometry': return this.statCtrl.runAllometry();
-          case 'Evolution Rate': return this.statCtrl.runEvoRate();
-          case 'Spectral':
-            return this.statCtrl.runSpectral();
-          case 'Markov': return this.statCtrl.runMarkov();
-          case 'Directional': return this.statCtrl.runDirectional();
-          case 'Wavelet': return this.statCtrl.runWavelet();
-          case 'Isotope': return this.statCtrl.runIsotope();
-          case 'Stratigraphic Correlation': return this.statCtrl.runSpectral();
-          case 'Biostratigraphy': return this.statCtrl.runSpectral();
-          case 'Paleo-Environment': return this.statCtrl.runPaleoEnv();
-          case 'Fitch Parsimony': return this.statCtrl.runSummary();
-          case 'PIC': return this.statCtrl.runSummary();
-          case 'Phylo Signal': return this.statCtrl.runSummary();
-          case 'Phylo ANOVA': return this.statCtrl.runSummary();
-          case 'Cohort Survival': return this.statCtrl.runSummary();
-          case 'Diversity Dynamics': return this.statCtrl.runSummary();
-          case 'FBD Process':
-            return this.statCtrl.runFBD(0.5, 0.2, 0.1, 10);
-          case 'Beta Diversity': return this.statCtrl.runBetaDiv();
-          case 'Mann-Whitney U': {
-            const g1 = safeCol(0), g2 = safeCol(1);
-            if (g1.length === 0 || g2.length === 0) {
-              return { U: 0, p: 1, warning: 'Empty column(s)' };
-            }
-            return this.statCtrl.runMannWhitney(g1, g2);
-          }
-          case 'PLS Integration':
-            return null;
-          case 'Relative Warps': return this.statCtrl.runRelativeWarps();
-          case 'Morphospace Disparity': return this.statCtrl.runMorphospaceDisparity();
-          case 'Convex Hull': return this.statCtrl.runConvexHull(data.to2D());
-          case 'Minimum Spanning Tree': return this.statCtrl.runMST();
-          case 'Coverage Rarefaction': return this.statCtrl.runCoverageRarefaction();
-          case 'Abundance Models': return this.statCtrl.runAbundanceModels();
-          case 'Compute Correlation': return this.statCtrl.runComputeCorrelation(safeCol(0), safeCol(1));
-          case 'Centroid Configuration Blocks': return this.statCtrl.runDivideBlocks('anterior_posterior');
-          case 'LOWESS Smooth': return this.statCtrl.runLowess(safeCol(0), safeCol(1));
-          case 'Polynomial Trend': return this.statCtrl.runPolynomialTrend(safeCol(0), safeCol(1));
-          case 'Remove Outliers': return this.statCtrl.runRemoveOutliers(safeCol(0));
-          case 'Cross Validate': return this.statCtrl.runCrossValidate(safeCol(0), safeCol(1));
-          case 'Detect Excursions': return this.statCtrl.runDetectExcursions(safeCol(0), safeCol(1));
-          case 'Filter Endemic': return this.statCtrl.runFilterEndemic(data.to2D());
-          case 'Build ARMA': return this.statCtrl.runBuildARMA(safeCol(0));
-          case 'ARMA Predict': return this.statCtrl.runARMAPredict(safeCol(0), 5);
-          case 'Kaplan-Meier': return this.statCtrl.runKaplanMeier(safeCol(0), safeCol(0).map(_ => 1));
-          case 'Neutral Simulation': return this.statCtrl.runSimulateNeutral(100, 10);
-          case 'Equilibrium Test': return this.statCtrl.runTestEquilibrium(0.5, 0.4);
-          case 'Exponential Fit': return this.statCtrl.runFitExponential(safeCol(0), safeCol(1));
-          case 'Logistic Fit': return this.statCtrl.runFitLogistic(safeCol(0), safeCol(1));
-          default: return null;
-        }
-      });
-
-      result = await task;
+      // Run synchronously: closures capturing component `this` cannot be
+      // serialized across threads via taskpool (would crash at runtime).
+      result = this.runQuickAnalysisCore(name);
 
       // Post-process results and update UI on main thread
       switch (name) {

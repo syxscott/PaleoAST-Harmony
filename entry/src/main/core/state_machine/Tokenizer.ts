@@ -37,7 +37,7 @@ export interface LexerRule {
 
 export class LexerTokenizer {
   rules: LexerRule[];
-  automata: (RegexCompiler | FiniteAutomaton)[];
+  automata: RegexCompiler[];
 
   constructor(rules: LexerRule[] = []) {
     this.rules = rules;

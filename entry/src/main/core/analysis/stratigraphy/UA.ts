@@ -5,8 +5,16 @@
  *   - Vertex i appears in section j iff event i has a FAD ≤ FAD_j ≤ LAD_j ≤ LAD_i in section j.
  *   - Two events are co-occurring in section j iff their intervals intersect.
  *   - Find maximal cliques → biozones (Unitary Associations).
+ *
+ * Pipeline (matching Python UAAnalyzer.analyze):
+ *   1. Endemic-species filtering by min_section_occurrence.
+ *   2. Cyclic FAD/LAD contradiction detection (enable_cyclic_check).
+ *   3. Maximal clique enumeration (Bron-Kerbosch with pivot).
+ *   4. UAZ aggregation of similar cliques (uaz_similarity_threshold,
+ *      Sørensen-style: 2·|A∩B| / (|A|+|B|) ≥ threshold, Guex default 0.8).
  */
 import { ComputationError } from '../../utils/Exceptions';
+import { detectCyclicContradictions, type CyclicContradiction } from './StratExtended';
 
 export interface Zone {
   name: string;
@@ -22,6 +30,10 @@ export interface BioeventResult {
   ladMatrix: number[][];
   method: 'ua';
   uazGroups?: { uazId: number; uazName: string; zoneIndices: number[]; eventUnion: string[] }[];
+  /** Events removed by endemic filtering (fewer than minSectionOccurrence sections). */
+  endemicFiltered?: string[];
+  /** FAD ordering contradictions detected across sections. */
+  cyclicContradictions?: CyclicContradiction[];
 }
 
 /**
@@ -31,34 +43,68 @@ export interface BioeventResult {
  * @param ladMatrix  n_sections × n_events (NaN means absent)
  * @param sectionNames optional names for sections
  * @param eventNames   optional names for events
+ * @param minSectionOccurrence minimum number of sections an event must appear
+ *        in to be retained (endemic filter; Python default 2, use 1 to disable)
+ * @param uazSimilarityThreshold Sørensen-style similarity for merging cliques
+ *        into UAZ (Guex default 0.8; use ≤ 0 to merge on any shared event)
+ * @param enableCyclicCheck run the O(N²) pairwise FAD inversion scan
  */
 export function unitaryAssociations(
   fadMatrix: number[][],
   ladMatrix: number[][],
   sectionNames?: string[],
-  eventNames?: string[]
+  eventNames?: string[],
+  minSectionOccurrence: number = 2,
+  uazSimilarityThreshold: number = 0.8,
+  enableCyclicCheck: boolean = true,
 ): BioeventResult {
   if (!Array.isArray(fadMatrix) || fadMatrix.length === 0)
     throw new ComputationError('Empty FAD matrix');
   if (fadMatrix.length !== ladMatrix.length) throw new ComputationError('FAD/LAD mismatch rows');
-  const nSec = fadMatrix.length;
-  const nEv = fadMatrix[0].length;
+  let nSec = fadMatrix.length;
+  let nEv = fadMatrix[0].length;
   if (nEv === 0) throw new ComputationError('FAD matrix has no events');
   for (const row of ladMatrix) if (row.length !== nEv)
     throw new ComputationError('LAD matrix column count differs from FAD');
 
-  const sections = sectionNames ?? Array.from({ length: nSec }, (_, i) => `Section_${i + 1}`);
-  const events = eventNames ?? Array.from({ length: nEv }, (_, i) => `Event_${i + 1}`);
+  let sections = sectionNames ?? Array.from({ length: nSec }, (_, i) => `Section_${i + 1}`);
+  let events = eventNames ?? Array.from({ length: nEv }, (_, i) => `Event_${i + 1}`);
 
-  // Co-occurrence matrix: cofreq[i][j] = number of sections where events i and j co-occur
+  // ── Step 1: endemic-species filtering (min_section_occurrence) ──────────
+  let fad = fadMatrix, lad = ladMatrix;
+  const endemicFiltered: string[] = [];
+  if (minSectionOccurrence > 1) {
+    const keep: number[] = [];
+    for (let e = 0; e < nEv; e++) {
+      let occ = 0;
+      for (let s = 0; s < nSec; s++) {
+        if (!isNaN(fad[s][e]) && !isNaN(lad[s][e])) occ++;
+      }
+      if (occ >= minSectionOccurrence) keep.push(e);
+      else endemicFiltered.push(events[e]);
+    }
+    if (keep.length < nEv) {
+      fad = fadMatrix.map(row => keep.map(e => row[e]));
+      lad = ladMatrix.map(row => keep.map(e => row[e]));
+      events = keep.map(e => events[e]);
+      nEv = keep.length;
+    }
+  }
+
+  // ── Step 2: cyclic contradiction detection ──────────────────────────────
+  const cyclicContradictions = enableCyclicCheck
+    ? detectCyclicContradictions(fad, events)
+    : undefined;
+
+  // ── Step 3: co-occurrence graph + maximal cliques ───────────────────────
   const cofreq: number[][] = [];
   for (let i = 0; i < nEv; i++) cofreq.push(new Array(nEv).fill(0));
   for (let s = 0; s < nSec; s++) {
     for (let i = 0; i < nEv; i++) {
-      const fi = fadMatrix[s][i], li = ladMatrix[s][i];
+      const fi = fad[s][i], li = lad[s][i];
       if (isNaN(fi) || isNaN(li)) continue;
       for (let j = i + 1; j < nEv; j++) {
-        const fj = fadMatrix[s][j], lj = ladMatrix[s][j];
+        const fj = fad[s][j], lj = lad[s][j];
         if (isNaN(fj) || isNaN(lj)) continue;
         // Co-occur if intervals intersect
         const lo = Math.max(fi, fj), hi = Math.min(li, lj);
@@ -67,7 +113,6 @@ export function unitaryAssociations(
     }
   }
 
-  // Find maximal cliques (Bron-Kerbosch with pivot)
   const adjacency: Set<number>[] = [];
   for (let i = 0; i < nEv; i++) {
     const adj = new Set<number>();
@@ -84,7 +129,7 @@ export function unitaryAssociations(
     for (let s = 0; s < nSec; s++) {
       let ok = true;
       for (const e of clique) {
-        if (isNaN(fadMatrix[s][e]) || isNaN(ladMatrix[s][e])) { ok = false; break; }
+        if (isNaN(fad[s][e]) || isNaN(lad[s][e])) { ok = false; break; }
       }
       if (ok) shared.push(s);
     }
@@ -95,8 +140,8 @@ export function unitaryAssociations(
     });
   });
 
-  // Optional: merge consecutive zones with ≥80% similarity into Unitary Association Zones
-  const uaz = _mergeToUAZ(zones, events);
+  // ── Step 4: merge similar cliques into UAZ ──────────────────────────────
+  const uaz = _mergeToUAZ(zones, events, uazSimilarityThreshold);
 
   return {
     sections,
@@ -105,7 +150,9 @@ export function unitaryAssociations(
     fadMatrix,
     ladMatrix,
     method: 'ua',
-    uazGroups: uaz
+    uazGroups: uaz,
+    endemicFiltered,
+    cyclicContradictions,
   };
 }
 
@@ -140,52 +187,42 @@ function _bronKerbosch(
 /**
  * Merge maximal cliques (zones) into Unitary Association Zones (UAZ).
  *
- * Implements Guex (1991) "Biochronological Correlations" Section 3.3:
- *   - UA zones are the "co-recovery" units derived from maximal cliques.
- *   - Two maximal cliques belong to the same UAZ if their intersection
- *     is non-empty (they share at least one event).
- *   - This is NOT simply merging by similarity threshold.
- *
- * The algorithm:
- *   1. Sort maximal cliques by their "base level" (minimum LAD in the zone).
- *   2. Build a graph where nodes = maximal cliques.
- *   3. Connect two cliques if they share events (intersection non-empty).
- *   4. Connected components = UAZs.
+ * Following Python UAAnalyzer._merge_to_uaz: zones are ordered by base level
+ * (supporting-section count as proxy), then connected components are formed
+ * in the "similarity graph" where two cliques are connected when their
+ * Sørensen-style similarity 2|A∩B| / (|A|+|B|) ≥ uaz_similarity_threshold
+ * (Guex 1991 empirical default 0.8).
  */
 function _mergeToUAZ(
   zones: Zone[],
-  _allEvents: string[]
+  _allEvents: string[],
+  similarityThreshold: number = 0.8,
 ): { uazId: number; uazName: string; zoneIndices: number[]; eventUnion: string[] }[] {
   if (zones.length === 0) return [];
 
-  // Compute base level (minimum LAD index) for each zone to sort
-  const baseLevels = zones.map(z => {
-    // Find the minimum "stratigraphic level" among events in this zone
-    // Using section co-occurrence count as proxy
-    return z.sections.length;
-  });
-
-  // Sort zones by base level (ascending)
+  // Base level proxy: number of supporting sections (Python convention)
+  const baseLevels = zones.map(z => z.sections.length);
   const sorted = zones
     .map((z, i) => ({ zone: z, idx: i, level: baseLevels[i] }))
     .sort((a, b) => b.level - a.level); // descending = older first
 
-  // Build co-occurrence graph: connect zones sharing at least one event
   const n = sorted.length;
   const adj: boolean[][] = Array.from({ length: n }, () => new Array(n).fill(false));
 
   for (let i = 0; i < n; i++) {
     for (let j = i + 1; j < n; j++) {
-      // Check if zones i and j share any event
       const eventsI = new Set(sorted[i].zone.events);
-      const shared = sorted[j].zone.events.filter(e => eventsI.has(e));
-      if (shared.length > 0) {
+      const shared = sorted[j].zone.events.filter(e => eventsI.has(e)).length;
+      const unionSize = sorted[i].zone.events.length + sorted[j].zone.events.length;
+      if (unionSize === 0) continue;
+      const similarity = (2 * shared) / unionSize; // Sørensen/Dice coefficient
+      if (similarity >= similarityThreshold) {
         adj[i][j] = adj[j][i] = true;
       }
     }
   }
 
-  // Find connected components (UAZs)
+  // Connected components (UAZs)
   const visited = new Array(n).fill(false);
   const out: { uazId: number; uazName: string; zoneIndices: number[]; eventUnion: string[] }[] = [];
 
@@ -203,7 +240,6 @@ function _mergeToUAZ(
       }
     }
 
-    // Union of events in this UAZ
     const eventSet = new Set<string>();
     const zoneIndices: number[] = [];
     for (const ci of component) {

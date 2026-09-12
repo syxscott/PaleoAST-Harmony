@@ -4,7 +4,7 @@
  */
 @Component
 export struct EFADialog {
-  @State visible: boolean = false;
+  @Link visible: boolean = false;
   @State n_harmonics: number = 10;
   @State n_points: number = 200;
   @State errorMsg: string = '';
@@ -61,6 +61,6 @@ export struct EFADialog {
             this.visible = false;
           })
       }.width('100%').justifyContent(FlexAlign.End)
-    }.padding(24).width(480).borderRadius(12)
+    }.padding(24).width('92%').constraintSize({ maxWidth: 480 }).borderRadius(12)
   }
 }

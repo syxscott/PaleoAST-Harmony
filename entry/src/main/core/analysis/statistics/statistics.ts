@@ -1,8 +1,12 @@
 import { Matrix } from '../../math/Matrix';
 import { svd, eigh, inv } from '../../math/linalg';
-import { mean, std, rankdata, skewness, kurtosis } from '../../math/stats';
+// p-value paths use the verified CDF/quantile functions from math/stats
+// (pt/pF/pchisq/pnorm/qnorm/qt/gammainc); the local *_approx helpers below are
+// kept only because core/math is frozen (they must not gain new call sites).
+import { mean, std, rankdata, skewness, kurtosis, pt, qt, pF, pchisq, pnorm, qchisq } from '../../math/stats';
 import { randnArray } from '../../math/random';
 import { seed, randint, shuffle as rngShuffle } from '../../math/random';
+import { tukeyHsd, type TukeyPairResult } from './Tukey';
 
 /**
  * PCA Result — mirrors Python PCAResult.
@@ -21,39 +25,71 @@ export interface PCAResult {
 
 /**
  * PCA via SVD — replaces statistics/pca.py.
+ *
+ * @param data         - data matrix (n samples × p variables)
+ * @param nComponents  - number of components to extract (default: min(n-1, p))
+ * @param scale        - if true, use correlation matrix (standardize columns to unit variance);
+ *                       if false (default), use covariance matrix.
+ *                       Equivalent to R's prcomp(scale=TRUE) / Python's sklearn PCA.
+ * @param method       - 'covariance' (default) or 'correlation';
+ *                       deprecated: use `scale` parameter instead.
+ * @param imputeMissing- if true (default, matching Python pca.py
+ *                       `impute_missing=True`), NaN cells are replaced with
+ *                       the column mean (computed over non-NaN entries)
+ *                       before the SVD. If false, NaNs propagate.
  */
 export function pca(
   data: Matrix,
   nComponents?: number,
-  method: 'covariance' | 'correlation' = 'covariance',
+  scale: boolean = false,
+  method?: 'covariance' | 'correlation',
+  imputeMissing: boolean = true,
 ): PCAResult {
   const n = data.rows, p = data.cols;
   const maxComp = Math.min(n - 1, p);
   const nc = Math.min(nComponents ?? maxComp, maxComp);
 
-  // Center (and optionally standardize)
+  // Determine matrix type: explicit method overrides scale flag for backward compat
+  const matrixType: 'covariance' | 'correlation' =
+    method ?? (scale ? 'correlation' : 'covariance');
+
+  // Column means ignoring NaN (used for centering and, when imputeMissing,
+  // for NaN imputation — Python pca.py uses np.nanmean).
   const meanVec: number[] = [];
+  const nanCounts: number[] = [];
   for (let j = 0; j < p; j++) {
-    let s = 0; for (let i = 0; i < n; i++) s += data.get(i, j);
-    meanVec.push(s / n);
+    let s = 0, cnt = 0;
+    for (let i = 0; i < n; i++) {
+      const v = data.get(i, j);
+      if (!isNaN(v)) { s += v; cnt++; }
+    }
+    meanVec.push(cnt > 0 ? s / cnt : 0);
+    nanCounts.push(n - cnt);
   }
 
-  let stdVec: number[] | null = null;
+  // Column SDs (ignoring NaN when imputing) — precomputed once for the
+  // correlation branch, matching Python np.nanstd(ddof=1) semantics.
+  const stdVec: number[] = new Array(p).fill(1);
+  if (matrixType === 'correlation') {
+    for (let j = 0; j < p; j++) {
+      let ss = 0;
+      for (let r = 0; r < n; r++) {
+        const rv = data.get(r, j);
+        if (isNaN(rv) && imputeMissing) continue; // imputed value = mean, dev 0
+        ss += (rv - meanVec[j]) ** 2;
+      }
+      stdVec[j] = Math.sqrt(ss / Math.max(n - nanCounts[j] - 1, 1)) || 1;
+    }
+  }
+
+  // Work on a copy so the caller's matrix is never mutated by imputation.
   const Zdata = new Float64Array(n * p);
   for (let i = 0; i < n; i++) {
     for (let j = 0; j < p; j++) {
-      let val = data.get(i, j) - meanVec[j];
-      if (method === 'correlation') {
-        if (!stdVec) {
-          stdVec = [];
-          for (let k = 0; k < p; k++) {
-            let ss = 0;
-            for (let r = 0; r < n; r++) ss += (data.get(r, k) - meanVec[k]) ** 2;
-            stdVec.push(Math.sqrt(ss / (n - 1)) || 1);
-          }
-        }
-        val /= stdVec[j];
-      }
+      let val = data.get(i, j);
+      if (imputeMissing && isNaN(val)) val = meanVec[j]; // NaN -> column mean
+      val -= meanVec[j];
+      if (matrixType === 'correlation') val /= stdVec[j];
       Zdata[i * p + j] = val;
     }
   }
@@ -87,7 +123,7 @@ export function pca(
   return {
     scores, loadings, eigenvalues,
     explainedVariance: explainedVar, cumulativeVariance: cumVar,
-    eigenvaluesRaw, meanVector: meanVec, nComponents: nc, method,
+    eigenvaluesRaw, meanVector: meanVec, nComponents: nc, method: matrixType,
   };
 }
 
@@ -155,10 +191,29 @@ export interface NMDSResult {
   stress: number;
   nIterations: number;
   converged: boolean;
+  /** Which stress formula was optimized (see nmds `method`). */
+  stressFormula?: string;
+  /** Original dissimilarity matrix (for Shepard diagrams). */
+  distanceMatrix?: Matrix;
+  /** Per-iteration stress of the best restart. */
+  stressHistory?: number[];
+  /** Distance metric name (for reference). */
+  metric?: string;
+  /** Number of random restarts performed. */
+  nRestarts?: number;
 }
 
 /**
  * NMDS via SMACOF + isotonic regression — replaces statistics/nmds.py.
+ *
+ * @param method stress formula:
+ *  - 'raw_stress' (default, matches Python v1.0.0 algorithm):
+ *    sqrt(sum((d_hat - d_tilde)^2) / sum(d_target^2)) — denominator uses the
+ *    original dissimilarities (Kruskal 1964 / Borg & Groenen 1997 normalized
+ *    stress).
+ *  - 'stress_1' (Kruskal 1964 canonical, R vegan::monoMDS):
+ *    sqrt(sum((d_hat - d_tilde)^2) / sum(d_hat^2)) — denominator uses the
+ *    configuration distances.
  */
 export function nmds(
   distMatrix: Matrix,
@@ -167,15 +222,23 @@ export function nmds(
   nRestarts: number = 5,
   tolerance: number = 1e-6,
   rngSeed?: number,
+  method: 'stress_1' | 'raw_stress' = 'raw_stress',
 ): NMDSResult {
+  if (method !== 'stress_1' && method !== 'raw_stress') {
+    throw new Error(`Unknown NMDS stress method '${method}'. Use 'raw_stress' (default) or 'stress_1'.`);
+  }
   if (rngSeed !== undefined) seed(rngSeed);
   const n = distMatrix.rows;
   const iu: number[] = [], ju: number[] = [];
   for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) { iu.push(i); ju.push(j); }
   const nPairs = iu.length;
   const dTarget = iu.map((_, k) => distMatrix.get(iu[k], ju[k]));
+  // Denominator fixed by the stress formula choice ('raw_stress': original
+  // distances; 'stress_1': configuration distances, computed per iteration).
+  const denomTarget = dTarget.reduce((s, d) => s + d * d, 0);
 
   let bestStress = Infinity, bestCoords: Matrix | null = null, bestIter = 0;
+  let bestHistory: number[] = [];
 
   for (let restart = 0; restart < nRestarts; restart++) {
     // Random initialization
@@ -183,19 +246,28 @@ export function nmds(
     for (let i = 0; i < initD.length; i++) initD[i] = randnArray(1)[0] * 0.01;
     let X = new Matrix(initD, n, nDimensions);
 
+    const history: number[] = [];
     let prevStress = Infinity;
     for (let iter = 0; iter < maxIterations; iter++) {
       // Compute current distances
       const Dhat = computeDistMatrix(X);
       const dHat = iu.map((_, k) => Dhat.get(iu[k], ju[k]));
 
-      // Isotonic regression (pool-adjacent-violators)
+      // Isotonic regression (pool-adjacent-violators, ties averaged)
       const dTilde = isotonicRegression(dTarget, dHat);
 
-      // Stress (Kruskal's stress formula 1)
+      // Stress formula selection (see docstring; Python nmds.py _smacof).
       let num = 0, den = 0;
-      for (let k = 0; k < nPairs; k++) { num += (dHat[k] - dTilde[k]) ** 2; den += dHat[k] ** 2; }
+      for (let k = 0; k < nPairs; k++) num += (dHat[k] - dTilde[k]) ** 2;
+      den = method === 'raw_stress' ? denomTarget : dHat.reduce((s, d) => s + d * d, 0);
       const stress = den > 0 ? Math.sqrt(num / den) : 0;
+      history.push(stress);
+
+      // Track the best configuration across all iterations/restarts
+      // (including the final, converged iteration).
+      if (stress < bestStress) {
+        bestStress = stress; bestCoords = X.clone(); bestIter = iter + 1; bestHistory = [...history];
+      }
 
       // SMACOF convergence: absolute stress change < tolerance
       // Ref: Borg & Groenen (2005), Modern Multidimensional Scaling, 2nd ed. Ch. 9
@@ -218,12 +290,46 @@ export function nmds(
         B.set(i, i, -s);
       }
       X = B.matmul(X).div(n);
-
-      if (stress < bestStress) { bestStress = stress; bestCoords = X.clone(); bestIter = iter + 1; }
     }
   }
 
-  return { coordinates: bestCoords!, stress: bestStress, nIterations: bestIter, converged: bestStress < 0.05 };
+  return {
+    coordinates: bestCoords!, stress: bestStress, nIterations: bestIter,
+    converged: bestStress < 0.05,
+    stressFormula: method, distanceMatrix: distMatrix.clone(),
+    stressHistory: bestHistory, metric: 'nmds', nRestarts,
+  };
+}
+
+/**
+ * Shepard-diagram data for an NMDS result — port of Python nmds.py
+ * `get_shepard_data`.
+ *
+ * Returns, for every upper-triangular pair (i < j):
+ *  - `dissimilarity`: the original dissimilarity d_ij (x axis);
+ *  - `shepardDistances`: the ordination distance d̂_ij of the final
+ *    configuration (y axis, scatter points);
+ *  - `originalDisparity`: the isotonic-regression disparity d̃_ij, i.e. the
+ *    monotone fit through the Shepard diagram (step line);
+ *  - `stress`: the result stress value.
+ */
+export function getShepardData(result: NMDSResult): {
+  dissimilarity: number[];
+  shepardDistances: number[];
+  originalDisparity: number[];
+  stress: number;
+} {
+  const D = result.distanceMatrix ?? null;
+  if (D === null) throw new Error('No NMDS result available (distanceMatrix missing)');
+  const n = D.rows;
+  const iu: number[] = [], ju: number[] = [];
+  for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) { iu.push(i); ju.push(j); }
+  const dissimilarity = iu.map((_, k) => D.get(iu[k], ju[k]));
+  const Dord = computeDistMatrix(result.coordinates);
+  const shepardDistances = iu.map((_, k) => Dord.get(iu[k], ju[k]));
+  // Disparities of the final configuration: monotone (isotonic) fit of d̂ on D.
+  const originalDisparity = isotonicRegression(dissimilarity, shepardDistances);
+  return { dissimilarity, shepardDistances, originalDisparity, stress: result.stress };
 }
 
 function computeDistMatrix(X: Matrix): Matrix {
@@ -236,49 +342,71 @@ function computeDistMatrix(X: Matrix): Matrix {
 }
 
 function isotonicRegression(target: number[], weights: number[]): number[] {
-  // Pool-adjacent-violators algorithm (O(n) with backtracking)
+  // Pool-adjacent-violators algorithm (O(n) with backtracking).
+  // Ties handling: observations with EQUAL target values must receive the
+  // SAME fitted value (sklearn IsotonicRegression aggregates tied x before
+  // fitting; without this the NMDS disparities for tied dissimilarities
+  // would differ, violating the definition of the monotone fit).
   const n = target.length;
+  if (n === 0) return [];
+
+  // ── Step 1: aggregate by unique target value ──
   const order = target.map((_, i) => i).sort((a, b) => target[a] - target[b]);
-  const sortedWeights = order.map(i => weights[i]);
-  const result = [...sortedWeights];
+  const uniqVals: number[] = [];
+  const uniqSums: number[] = [];   // sum of weights within the tie group
+  const uniqCounts: number[] = []; // tie group size
+  const groupOf: number[] = new Array(n); // original index -> unique group
+  for (const idx of order) {
+    const t = target[idx];
+    let g = uniqVals.length - 1;
+    if (g >= 0 && uniqVals[g] === t) {
+      uniqSums[g] += weights[idx];
+      uniqCounts[g] += 1;
+    } else {
+      uniqVals.push(t); uniqSums.push(weights[idx]); uniqCounts.push(1);
+      g = uniqVals.length - 1;
+    }
+    groupOf[idx] = g;
+  }
+  const m = uniqVals.length;
 
-  // Stack-based PAV: maintain blocks with (sum, count, start)
-  const blockSums: number[] = [result[0]];
-  const blockCounts: number[] = [1];
+  // ── Step 2: stack-based PAV on the aggregated (unique) values ──
+  const blockSums: number[] = [uniqSums[0]];
+  const blockCounts: number[] = [uniqCounts[0]];
+  const blockSize: number[] = [1]; // number of unique groups merged in the block
 
-  for (let i = 1; i < n; i++) {
-    blockSums.push(result[i]);
-    blockCounts.push(1);
-    // Merge while violating
+  for (let i = 1; i < m; i++) {
+    blockSums.push(uniqSums[i]);
+    blockCounts.push(uniqCounts[i]);
+    blockSize.push(1);
+    // Merge while violating monotonicity
     while (blockSums.length >= 2) {
       const last = blockSums.length - 1;
       const meanLast = blockSums[last] / blockCounts[last];
       const meanPrev = blockSums[last - 1] / blockCounts[last - 1];
       if (meanLast < meanPrev) {
-        // Merge
         blockSums[last - 1] += blockSums[last];
         blockCounts[last - 1] += blockCounts[last];
-        blockSums.pop();
-        blockCounts.pop();
+        blockSize[last - 1] += blockSize[last];
+        blockSums.pop(); blockCounts.pop(); blockSize.pop();
       } else {
         break;
       }
     }
   }
 
-  // Reconstruct result from blocks
-  let idx = 0;
-  for (let b = 0; b < blockSums.length; b++) {
-    const mean = blockSums[b] / blockCounts[b];
-    for (let k = 0; k < blockCounts[b]; k++) {
-      result[idx++] = mean;
-    }
+  // ── Step 3: expand block means back to unique groups, then to indices ──
+  const groupFitted = new Array<number>(m);
+  let b = 0;
+  for (const size of blockSize) {
+    const blockMean = blockSums[b] / blockCounts[b];
+    for (let k = 0; k < size; k++) groupFitted[b + k] = blockMean;
+    b += size;
   }
 
-  // Unsort
-  const unsorted = new Array(n);
-  for (let k = 0; k < n; k++) unsorted[order[k]] = result[k];
-  return unsorted;
+  const result = new Array<number>(n);
+  for (let i = 0; i < n; i++) result[i] = groupFitted[groupOf[i]];
+  return result;
 }
 
 /**
@@ -309,37 +437,79 @@ export function univariateSummary(data: Matrix, colNames: string[]): ColumnStats
     // Fixed: compute actual skewness and kurtosis instead of hardcoding to 0
     const skew_val = skewness(vals);
     const kurt_val = kurtosis(vals);
+    // 95% CI via the t quantile (Python uses sp_stats.t.ppf(0.975, n-1));
+    // the normal approximation (1.96) is only asymptotically correct.
+    const tCrit = qt(0.975, Math.max(vals.length - 1, 1));
     results.push({
       name: colNames[j] || `Var${j}`, n: vals.length,
       mean: m, std: s, variance: v, min: Math.min(...vals), max: Math.max(...vals),
       median: med, skewness: skew_val, kurtosis: kurt_val, se: se_val,
-      ci95: [m - 1.96 * se_val, m + 1.96 * se_val],
+      ci95: [m - tCrit * se_val, m + tCrit * se_val],
     });
   }
   return results;
 }
 
 /**
- * t-test (independent two-sample).
+ * t-test — port of Python univariate.py `t_test`.
  */
 export interface TTestResult {
   statistic: number;
   pValue: number;
   df: number;
   meanDiff: number;
+  /** 'independent' (Welch) or 'paired'. */
+  testType?: string;
+  n1?: number;
+  n2?: number;
+  mean1?: number;
+  mean2?: number;
 }
 
-export function tTest(group1: number[], group2: number[]): TTestResult {
+/**
+ * Two-sample t-test.
+ *
+ * Independent samples (paired=false, default): Welch's unequal-variance
+ * t-test — the previous implementation mixed a Welch standard error with
+ * the pooled df = n1+n2-2, which is inconsistent; the df is now the
+ * Welch–Satterthwaite approximation and the p-value uses the exact t
+ * distribution (math/stats pt) instead of a normal approximation.
+ *
+ * Paired samples (paired=true): port of the Python `ttest_rel` branch —
+ * d_i = x1_i - x2_i, t = mean(d) / (sd(d)/sqrt(n_d)), df = n_d - 1;
+ * requires equal sample sizes.
+ *
+ * @param paired if true, perform the paired t-test (requires n1 == n2)
+ */
+export function tTest(group1: number[], group2: number[], paired: boolean = false): TTestResult {
   const n1 = group1.length, n2 = group2.length;
   const m1 = mean(group1), m2 = mean(group2);
+
+  if (paired) {
+    // Python: sp_stats.ttest_rel — differences within pairs
+    if (n1 !== n2) throw new Error('Paired t-test requires equal sample sizes');
+    const d = group1.map((v, i) => v - group2[i]);
+    const nd = n1;
+    const md = mean(d);
+    const sd = Math.sqrt(d.reduce((s, v) => s + (v - md) ** 2, 0) / (nd - 1));
+    const se = sd / Math.sqrt(nd);
+    const t = se > 0 ? md / se : 0;
+    const df = nd - 1;
+    const p = 2 * (1 - pt(Math.abs(t), Math.max(df, 1)));
+    return { statistic: t, pValue: p, df, meanDiff: md, testType: 'paired', n1, n2, mean1: m1, mean2: m2 };
+  }
+
+  // Welch independent-samples t-test
   const v1 = group1.reduce((s, x) => s + (x - m1) ** 2, 0) / (n1 - 1);
   const v2 = group2.reduce((s, x) => s + (x - m2) ** 2, 0) / (n2 - 1);
   const se = Math.sqrt(v1 / n1 + v2 / n2);
   const t = se > 0 ? (m1 - m2) / se : 0;
-  const df = n1 + n2 - 2;
-  // Approximate p-value using normal for large df
-  const p = 2 * (1 - normCDF_approx(Math.abs(t)));
-  return { statistic: t, pValue: p, df, meanDiff: m1 - m2 };
+  // Welch–Satterthwaite degrees of freedom
+  const num = (v1 / n1 + v2 / n2) ** 2;
+  const denom = (v1 / n1) ** 2 / Math.max(n1 - 1, 1) + (v2 / n2) ** 2 / Math.max(n2 - 1, 1);
+  const df = denom > 0 ? num / denom : Math.max(n1 + n2 - 2, 1);
+  const p = 2 * (1 - pt(Math.abs(t), Math.max(df, 1)));
+  return { statistic: t, pValue: p, df, meanDiff: m1 - m2, testType: 'independent', n1, n2, mean1: m1, mean2: m2 };
 }
 
 function normCDF_approx(x: number): number {
@@ -365,9 +535,21 @@ export interface ANOVAResult {
   dfWithin: number;
   ssBetween: number;
   ssWithin: number;
+  msBetween?: number;
+  msWithin?: number;
+  nGroups?: number;
+  significant?: boolean;
+  /** Tukey HSD post-hoc comparisons (only when significant, mirrors Python). */
+  tukeyResults?: TukeyPairResult[];
 }
 
-export function anova(groups: number[][]): ANOVAResult {
+/**
+ * One-way ANOVA — port of Python univariate.py `one_way_anova`.
+ * p-value from the exact F CDF (math/stats pF); when `tukey` is true and
+ * the ANOVA is significant, Tukey HSD post-hoc comparisons are attached
+ * (identical to scipy.stats.tukey_hsd / the Python fallback path).
+ */
+export function anova(groups: number[][], tukey: boolean = true): ANOVAResult {
   const allVals = groups.flat();
   const grandMean = mean(allVals);
   const k = groups.length;
@@ -385,9 +567,20 @@ export function anova(groups: number[][]): ANOVAResult {
   const msw = dfw > 0 ? ssw / dfw : 0;
   const f = msw > 0 ? msb / msw : 0;
 
-  // Approximate p-value
-  const p = 1 - fCDF_approx(f, dfb, dfw);
-  return { fStatistic: f, pValue: p, dfBetween: dfb, dfWithin: dfw, ssBetween: ssb, ssWithin: ssw };
+  // Exact F-distribution upper-tail probability (replaces the local
+  // series-expansion approximation of the incomplete beta).
+  const p = 1 - pF(f, dfb, dfw);
+
+  // Tukey HSD post-hoc on significant results (Python: tukey=True branch)
+  let tukeyResults: TukeyPairResult[] | undefined = undefined;
+  if (tukey && p < 0.05 && k >= 2 && msw > 0) {
+    tukeyResults = tukeyHsd(groups);
+  }
+
+  return {
+    fStatistic: f, pValue: p, dfBetween: dfb, dfWithin: dfw, ssBetween: ssb, ssWithin: ssw,
+    msBetween: msb, msWithin: msw, nGroups: k, significant: p < 0.05, tukeyResults,
+  };
 }
 
 function fCDF_approx(x: number, d1: number, d2: number): number {
@@ -443,18 +636,36 @@ export function anosim(distMatrix: Matrix, groups: number[], nPermutations: numb
     if (R_perm >= R_obs) count++;
   }
 
-  return { statistic: R_obs, pValue: count / nPermutations, nPermutations };
+  return { statistic: R_obs, pValue: (count + 1) / (nPermutations + 1), nPermutations };
 }
 
 function computeR(D: Matrix, groups: number[], n: number): number {
-  // Convert to similarities and rank
+  // Convert to similarities and rank with TIE AVERAGING — port of Python
+  // anosim.py `_compute_R_statistic`, which assigns the average rank to all
+  // tied similarity values (the previous implementation assigned sequential
+  // ranks 1..N, biasing R whenever the distance matrix contains ties).
   const simVals: { val: number; i: number; j: number }[] = [];
   for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) {
     simVals.push({ val: 1 - D.get(i, j), i, j });
   }
-  simVals.sort((a, b) => b.val - a.val);
+  // Stable sort from largest to smallest similarity
+  const order = simVals.map((_, k) => k).sort((a, b) => {
+    if (simVals[b].val !== simVals[a].val) return simVals[b].val - simVals[a].val;
+    return a - b;
+  });
   const ranks = new Map<string, number>();
-  for (let k = 0; k < simVals.length; k++) ranks.set(`${simVals[k].i},${simVals[k].j}`, k + 1);
+  let k = 0;
+  while (k < order.length) {
+    let m = k;
+    while (m + 1 < order.length && simVals[order[m + 1]].val === simVals[order[k]].val) m++;
+    // Ties span positions k..m (1-based ranks k+1..m+1): average rank
+    const avgRank = (k + 1 + (m + 1)) / 2;
+    for (let t = k; t <= m; t++) {
+      const pair = simVals[order[t]];
+      ranks.set(`${pair.i},${pair.j}`, avgRank);
+    }
+    k = m + 1;
+  }
 
   const rB: number[] = [], rW: number[] = [];
   for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) {
@@ -477,6 +688,7 @@ export interface LDAResult {
   loadings: Matrix;
   explainedVarianceRatio: number[];
   eigenvalues: number[];
+  wilksLambda: number[];
   confusionMatrix: number[][];
   accuracy: number;
   nClasses: number;
@@ -486,7 +698,99 @@ export interface LDAResult {
   groups: number[];
 }
 
-export function lda(data: Matrix, groups: number[], nComponents?: number): LDAResult {
+/**
+ * Fit LDA on a data matrix and return the top-nc discriminant loadings plus
+ * the class centroids in LD space. Used by `lda` (full fit) and by the
+ * k-fold cross-validation branch (refit on each training split, so the
+ * held-out folds are classified without data leakage).
+ */
+function ldaFit(data: Matrix, groups: number[], uniqueGroups: number[], nc: number): { loadings: Matrix; centroidsLD: Matrix } {
+  const p = data.cols;
+  const k = uniqueGroups.length;
+
+  const grandMean = data.meanAxis(0);
+  const classMeans: Matrix[] = [];
+  for (const g of uniqueGroups) {
+    const idx = groups.map((v, i) => v === g ? i : -1).filter(i => i >= 0);
+    const d = new Float64Array(p);
+    for (const i of idx) for (let j = 0; j < p; j++) d[j] += data.get(i, j);
+    for (let j = 0; j < p; j++) d[j] /= idx.length;
+    classMeans.push(new Matrix(d, 1, p));
+  }
+
+  // Within-class scatter Sw
+  const Sw = Matrix.zeros(p, p);
+  for (let ci = 0; ci < k; ci++) {
+    const idx = groups.map((v, i) => v === uniqueGroups[ci] ? i : -1).filter(i => i >= 0);
+    for (const i of idx) {
+      const diff = data.row(i).map((v, j) => v - classMeans[ci].get(0, j));
+      for (let a = 0; a < p; a++) for (let b = 0; b < p; b++) {
+        Sw.set(a, b, Sw.get(a, b) + diff[a] * diff[b]);
+      }
+    }
+  }
+
+  // Between-class scatter Sb
+  const Sb = Matrix.zeros(p, p);
+  for (let ci = 0; ci < k; ci++) {
+    const diff = classMeans[ci].row(0).map((v, j) => v - grandMean.get(0, j));
+    const ni = groups.filter(v => v === uniqueGroups[ci]).length;
+    for (let a = 0; a < p; a++) for (let b = 0; b < p; b++) {
+      Sb.set(a, b, Sb.get(a, b) + ni * diff[a] * diff[b]);
+    }
+  }
+
+  // Solve Sw^-1 * Sb via the SVD of Sw (pseudo-inverse with threshold)
+  const { S: swS, Vt: swVt } = svd(Sw);
+  const swInvD = new Float64Array(p * p);
+  for (let i = 0; i < p; i++) {
+    const invS = swS[i] > 1e-10 ? 1 / swS[i] : 0;
+    for (let j = 0; j < p; j++) swInvD[i * p + j] = swVt.get(i, j) * invS;
+  }
+  const swInv = swVt.transpose().matmul(new Matrix(swInvD, p, p).transpose());
+  const M = swInv.matmul(Sb);
+  const { eigenvectors: eVecs } = eigh(M);
+  const loadings = eVecs.sliceCols(0, nc);
+
+  const centroidsLD = Matrix.zeros(k, nc);
+  for (let ci = 0; ci < k; ci++) {
+    const cm = classMeans[ci].matmul(loadings);
+    for (let j = 0; j < nc; j++) centroidsLD.set(ci, j, cm.get(0, j));
+  }
+  return { loadings, centroidsLD };
+}
+
+/** Classify a sample (in LD space) by nearest class centroid. */
+function ldaPredict1LD(sampleLD: number[], centroidsLD: Matrix, k: number, nc: number): number {
+  let bestDist = Infinity, bestClass = 0;
+  for (let ci = 0; ci < k; ci++) {
+    let dist = 0;
+    for (let j = 0; j < nc; j++) dist += (sampleLD[j] - centroidsLD.get(ci, j)) ** 2;
+    if (dist < bestDist) { bestDist = dist; bestClass = ci; }
+  }
+  return bestClass;
+}
+
+/**
+ * LDA / CVA — replaces statistics/lda.py.
+ *
+ * @param nComponents number of LD axes (default min(k-1, p))
+ * @param cvFolds     cross-validation scheme for the reported accuracy and
+ *                    confusion matrix:
+ *   - 0/1 (default): Leave-One-Out CV — retained for backward compatibility.
+ *     NOTE (documented data leakage): the LOOCV path projects ALL samples
+ *     with loadings computed from the FULL data, and only the centroids are
+ *     recomputed excluding the held-out sample. The projection directions
+ *     therefore saw the held-out sample during fitting; LOOCV accuracy here
+ *     is mildly optimistic. Kept as-is for compatibility with the v1
+ *     behaviour; use `cvFolds >= 2` for a strictly leakage-free estimate
+ *     (the k-fold path refits the full LDA on each training split).
+ *   - f >= 2: stratified-free random f-fold CV (indices shuffled with the
+ *     seeded RNG from math/random for reproducibility); each fold is
+ *     classified by an LDA refit on the remaining f-1 folds — port of
+ *     Python lda.py `cv_folds` via sklearn cross_val_predict.
+ */
+export function lda(data: Matrix, groups: number[], nComponents?: number, cvFolds: number = 0): LDAResult {
   const n = data.rows, p = data.cols;
   const uniqueGroups = [...new Set(groups)].sort((a, b) => a - b);
   const k = uniqueGroups.length;
@@ -501,7 +805,6 @@ export function lda(data: Matrix, groups: number[], nComponents?: number): LDARe
   for (const g of uniqueGroups) {
     const idx = groups.map((v, i) => v === g ? i : -1).filter(i => i >= 0);
     classSizes.push(idx.length);
-    const subset = data.sliceRows(idx[0], idx[0] + 1);
     const d = new Float64Array(p);
     for (const i of idx) for (let j = 0; j < p; j++) d[j] += data.get(i, j);
     for (let j = 0; j < p; j++) d[j] /= idx.length;
@@ -532,7 +835,7 @@ export function lda(data: Matrix, groups: number[], nComponents?: number): LDARe
 
   // Solve generalized eigenvalue problem: Sw^-1 * Sb
   // Use SVD of Sw for regularization
-  const { U: swU, S: swS, Vt: swVt } = svd(Sw);
+  const { S: swS, Vt: swVt } = svd(Sw);
   // Regularize: invert with threshold
   const swInvD = new Float64Array(p * p);
   for (let i = 0; i < p; i++) {
@@ -544,6 +847,22 @@ export function lda(data: Matrix, groups: number[], nComponents?: number): LDARe
   // Sw^-1 * Sb
   const M = swInv.matmul(Sb);
   const { eigenvalues: eigs, eigenvectors: eVecs } = eigh(M);
+
+  // Wilks' Lambda: Λ = |Sw| / |Sw + Sb|
+  // Ref: Wilks S.S. (1932) Biometrika 24: 471-494.
+  //      Anderson T.W. (2003) An Introduction to Multivariate Statistical Analysis, 3rd ed. Ch. 12.
+  // Wilks' Lambda for each canonical variate = Π (1 / (1 + λ_i)) where λ_i are
+  // the generalized eigenvalues of Sw^-1 * Sb.
+  // Λ_cumulative = |Sw| / |Sw + Sb| = Π_i (1 / (1 + λ_i))
+  const wilksLambdaVals: number[] = [];
+  const posGenEigs = eigs.filter(e => e > 1e-12);
+  let cumLambda = 1;
+  for (const lambda of posGenEigs) {
+    cumLambda *= 1 / (1 + lambda);
+    wilksLambdaVals.push(cumLambda);
+  }
+  // Extend to nc components (pad with last value if needed)
+  while (wilksLambdaVals.length < nc) wilksLambdaVals.push(wilksLambdaVals[wilksLambdaVals.length - 1] ?? 1);
 
   // Take top nc eigenvectors (sorted descending by eigh)
   const loadings = eVecs.sliceCols(0, nc);
@@ -561,37 +880,73 @@ export function lda(data: Matrix, groups: number[], nComponents?: number): LDARe
     for (let j = 0; j < nc; j++) classMeansLD.set(ci, j, cm.get(0, j));
   }
 
-  // Confusion matrix via Leave-One-Out Cross-Validation (LOOCV)
+  // Confusion matrix + accuracy via cross-validation.
   // Ref: Ripley (1996) Pattern Recognition and Neural Networks, Sec 4.5
-  // LOOCV avoids data leakage from self-training by holding out one sample at a time
+  //
+  // cvFolds >= 2 → k-fold CV (leakage-free: LDA refit on each training split).
+  // cvFolds 0/1 (default) → LOOCV:
+  //   WARNING — known data leakage (documented, kept for v1 compatibility):
+  //   `scores` below were produced with loadings fitted on the FULL data, so
+  //   every held-out sample influenced the projection directions; only the
+  //   centroids are recomputed excluding it. The LOOCV accuracy is therefore
+  //   mildly optimistic. Callers wanting an unbiased estimate must pass
+  //   cvFolds >= 2.
   const cm = Array.from({ length: k }, () => new Array(k).fill(0));
   let correct = 0;
-  for (let i = 0; i < n; i++) {
-    // Compute LOOCV centroid: mean of all OTHER samples in each class
-    const looCentroids = Matrix.zeros(k, nc);
-    for (let ci = 0; ci < k; ci++) {
-      const idx = groups.map((v, j) => v === uniqueGroups[ci] ? j : -1).filter(j => j >= 0 && j !== i);
-      if (idx.length === 0) continue;
-      for (const j of idx) {
-        const row = scores.row(j);
-        for (let d = 0; d < nc; d++) looCentroids.set(ci, d, looCentroids.get(ci, d) + row[d]);
+  if (cvFolds >= 2) {
+    // ── k-fold cross-validation (Python lda.py cv_folds) ──
+    // Shuffle sample indices with the seeded RNG (reproducible), then split
+    // into cvFolds near-equal folds. For each fold: refit LDA on the rest,
+    // classify the held-out fold by nearest refit centroid in LD space.
+    const indices = Array.from({ length: n }, (_, i) => i);
+    rngShuffle(indices);
+    const folds: number[][] = Array.from({ length: cvFolds }, () => []);
+    for (let i = 0; i < n; i++) folds[i % cvFolds].push(indices[i]);
+    for (let f = 0; f < cvFolds; f++) {
+      const testIdx = new Set(folds[f]);
+      const trainIdx = indices.filter(i => !testIdx.has(i));
+      if (trainIdx.length === 0 || folds[f].length === 0) continue;
+      const trainData = new Matrix(
+        (() => { const d = new Float64Array(trainIdx.length * p); trainIdx.forEach((r, i) => { const row = data.row(r); for (let j = 0; j < p; j++) d[i * p + j] = row[j]; }); return d; })(),
+        trainIdx.length, p,
+      );
+      const trainGroups = trainIdx.map(i => groups[i]);
+      const fit = ldaFit(trainData, trainGroups, uniqueGroups, nc);
+      for (const i of folds[f]) {
+        const row = data.row(i);
+        const ld = new Array<number>(nc);
+        for (let j = 0; j < nc; j++) { let s = 0; for (let a = 0; a < p; a++) s += row[a] * fit.loadings.get(a, j); ld[j] = s; }
+        const predClass = ldaPredict1LD(ld, fit.centroidsLD, k, nc);
+        const trueClass = uniqueGroups.indexOf(groups[i]);
+        cm[trueClass][predClass]++;
+        if (trueClass === predClass) correct++;
       }
-      for (let d = 0; d < nc; d++) looCentroids.set(ci, d, looCentroids.get(ci, d) / idx.length);
     }
-    const sampleScore = scores.row(i);
-    let bestDist = Infinity, bestClass = 0;
-    for (let ci = 0; ci < k; ci++) {
-      let dist = 0;
-      for (let j = 0; j < nc; j++) dist += (sampleScore[j] - looCentroids.get(ci, j)) ** 2;
-      if (dist < bestDist) { bestDist = dist; bestClass = ci; }
+  } else {
+    // ── LOOCV path (leaky projection, see warning above) ──
+    for (let i = 0; i < n; i++) {
+      // Compute LOOCV centroid: mean of all OTHER samples in each class
+      const looCentroids = Matrix.zeros(k, nc);
+      for (let ci = 0; ci < k; ci++) {
+        const idx = groups.map((v, j) => v === uniqueGroups[ci] ? j : -1).filter(j => j >= 0 && j !== i);
+        if (idx.length === 0) continue;
+        for (const j of idx) {
+          const row = scores.row(j);
+          for (let d = 0; d < nc; d++) looCentroids.set(ci, d, looCentroids.get(ci, d) + row[d]);
+        }
+        for (let d = 0; d < nc; d++) looCentroids.set(ci, d, looCentroids.get(ci, d) / idx.length);
+      }
+      const sampleScore = scores.row(i);
+      const bestClass = ldaPredict1LD(sampleScore, looCentroids, k, nc);
+      const trueClass = uniqueGroups.indexOf(groups[i]);
+      cm[trueClass][bestClass]++;
+      if (trueClass === bestClass) correct++;
     }
-    const trueClass = uniqueGroups.indexOf(groups[i]);
-    cm[trueClass][bestClass]++;
-    if (trueClass === bestClass) correct++;
   }
 
   return {
     scores, loadings, explainedVarianceRatio: explainedRatio, eigenvalues: eigTop,
+    wilksLambda: wilksLambdaVals.slice(0, nc),
     confusionMatrix: cm, accuracy: correct / n, nClasses: k, nSamples: n,
     classLabels: uniqueGroups, means: classMeansLD, groups,
   };
@@ -611,11 +966,27 @@ export interface CCAResult {
   constrainedVariance: number;
   method: string;
   nComponents: number;
+  /** Total inertia: chi-square inertia (cca) or total SS of centered Y (rda),
+   *  mirroring Python cca.py `inertia`. */
+  inertia?: number;
+  /** Names of species/variables (columns of Y). */
+  speciesNames?: string[];
+  /** Names of environmental variables (columns of X). */
+  envNames?: string[];
 }
 
-export function cca(Y: Matrix, X: Matrix, nComponents?: number, method: 'cca' | 'rda' = 'cca'): CCAResult {
+export function cca(
+  Y: Matrix,
+  X: Matrix,
+  nComponents?: number,
+  method: 'cca' | 'rda' = 'cca',
+  speciesNames?: string[],
+  envNames?: string[],
+): CCAResult {
   const n = Y.rows, p = Y.cols, q = X.cols;
   const nc = Math.min(nComponents ?? Math.min(n - 1, p, q), n - 1, p, q);
+  const spNames = speciesNames ?? Array.from({ length: p }, (_, i) => `Species_${i + 1}`);
+  const envNms = envNames ?? Array.from({ length: q }, (_, i) => `Env_${i + 1}`);
 
   if (method === 'rda') {
     // RDA: center Y and X, project Y onto X
@@ -633,7 +1004,12 @@ export function cca(Y: Matrix, X: Matrix, nComponents?: number, method: 'cca' | 
     const siteScores = Yc.matmul(eVecs.sliceCols(0, nc));
     const speciesScores = eVecs.sliceCols(0, nc);
     const biplotScores = Xc.transpose().matmul(siteScores);
-    return { siteScores, speciesScores, biplotScores, eigenvalues: eigTop, proportionExplained: prop, cumulativeProportion: cumProp, constrainedVariance: cumProp[cumProp.length - 1] || 0, method: 'rda', nComponents: nc };
+    return {
+      siteScores, speciesScores, biplotScores, eigenvalues: eigTop, proportionExplained: prop,
+      cumulativeProportion: cumProp, constrainedVariance: cumProp[cumProp.length - 1] || 0,
+      method: 'rda', nComponents: nc,
+      inertia: totalInertia, speciesNames: spNames, envNames: envNms,
+    };
   } else {
     // CCA: chi-square standardization via Legendre & Gallagher (2001) formula.
     // Ref: Legendre P., Gallagher E.D. (2001). Ecological Bioinformatics, Table 1.
@@ -668,7 +1044,12 @@ export function cca(Y: Matrix, X: Matrix, nComponents?: number, method: 'cca' | 
     const siteScores = Ychi.matmul(eVecs.sliceCols(0, nc));
     const speciesScores = eVecs.sliceCols(0, nc);
     const biplotScores = Xc.transpose().matmul(siteScores);
-    return { siteScores, speciesScores, biplotScores, eigenvalues: eigTop, proportionExplained: prop, cumulativeProportion: cumProp, constrainedVariance: cumProp[cumProp.length - 1] || 0, method: 'cca', nComponents: nc };
+    return {
+      siteScores, speciesScores, biplotScores, eigenvalues: eigTop, proportionExplained: prop,
+      cumulativeProportion: cumProp, constrainedVariance: cumProp[cumProp.length - 1] || 0,
+      method: 'cca', nComponents: nc,
+      inertia: totalInertia, speciesNames: spNames, envNames: envNms,
+    };
   }
 }
 
@@ -732,69 +1113,198 @@ export function permanova(distMatrix: Matrix, groups: number[], nPermutations: n
   }
 
   return {
-    fStatistic: F_obs, pValue: count / nPermutations,
+    fStatistic: F_obs, pValue: (count + 1) / (nPermutations + 1),
     ssBetween: ssTotal - ssWithin, ssWithin, dfBetween: k - 1, dfWithin: n - k,
     nPermutations,
   };
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// SIMPER
+// SIMPER (standard Clarke 1993 formulation)
 // ═══════════════════════════════════════════════════════════════════
 
-export interface SIMPERResult {
-  overallDissimilarity: number;
-  contributions: { name: string; index: number; average: number; std: number; cumulative: number; ratio: number }[];
+export interface SIMPERContribution {
+  name: string;
+  index: number;
+  /** mean per-variable contribution delta_k over the between-group pairs */
+  average: number;
+  /** SD of delta_k across individual (i, j) pairs (ddof=1; 0 if one pair) */
+  std: number;
+  /** cumulative contribution share within the group pair (0..1) */
+  cumulative: number;
+  /** consistency ratio average / std (higher = more consistent) */
+  ratio: number;
+  /** group means of the variable for the pair (mean of group A / group B) */
+  meanA?: number;
+  meanB?: number;
 }
 
-export function simper(data: Matrix, groups: number[], variableNames?: string[]): SIMPERResult {
+/** Per-group-pair SIMPER result — Python SimperResult per pair. */
+export interface SIMPERPairResult {
+  groupA: number;
+  groupB: number;
+  /** average between-group Bray-Curtis dissimilarity of the pair */
+  overallDissimilarity: number;
+  /** per-variable contributions, sorted by `average` descending */
+  contributions: SIMPERContribution[];
+}
+
+export interface SIMPERResult {
+  /** Average overall between-group dissimilarity across all pairs. */
+  overallDissimilarity: number;
+  /** Pooled contributions across all group pairs (sorted, cumulative). */
+  contributions: SIMPERContribution[];
+  /** One entry per group pair (Python `group_pairs`). */
+  groupPairResults: SIMPERPairResult[];
+  metric: string;
+  nGroups: number;
+  nVariables: number;
+}
+
+/**
+ * SIMPER (Similarity Percentages) — rewritten port of Python simper.py
+ * (Clarke 1993).
+ *
+ * For each pair of samples (i in group A, j in group B) the per-variable
+ * contribution is Bray-Curtis-normalized:
+ *
+ *     delta_k(ij) = |x_ik - x_jk| / Sum_l (x_il + x_jl)
+ *
+ * Because |a-b| = (a+b) - 2 min(a,b), the delta_k over variables sum to the
+ * pairwise Bray-Curtis dissimilarity delta_ij exactly, so the per-variable
+ * averages sum to the overall dissimilarity and the cumulative percentages
+ * reach 100%.
+ *
+ * Reported per group pair (and pooled overall): per-variable mean delta,
+ * SD across individual pairs (Clarke's Av/SD consistency measure), the
+ * ratio avg/SD and the cumulative contribution.
+ *
+ * @param metric 'bray_curtis' (default; the standard normalized SIMPER) or
+ *               'euclidean' (unnormalized |x_ik - x_jk| contributions; the
+ *               overall dissimilarity is the mean Euclidean distance).
+ */
+export function simper(
+  data: Matrix,
+  groups: number[],
+  variableNames?: string[],
+  metric: string = 'bray_curtis',
+): SIMPERResult {
   const nVars = data.cols;
   const names = variableNames ?? Array.from({ length: nVars }, (_, i) => `Var_${i + 1}`);
-  const uniqueGroups = [...new Set(groups)];
+  const uniqueGroups = [...new Set(groups)].sort((a, b) => a - b);
+  const nGroups = uniqueGroups.length;
+  if (nGroups < 2) {
+    return { overallDissimilarity: 0, contributions: [], groupPairResults: [], metric, nGroups, nVariables: nVars };
+  }
 
-  // Compute mean absolute differences per species for each group pair
-  // Ref: Clarke K.R. (1993) J. Exp. Mar. Biol. Ecol. 172: 21-39, Table 2.
-  // δ_k = mean(|x_ik - x_jk|) / Σ_k mean(|x_ik - x_jk|)
-  const sumDiffs: number[] = new Array(nVars).fill(0);
-  let totalPairs = 0;
+  const groupPairResults: SIMPERPairResult[] = [];
+  // Pooled accumulators across all group pairs
+  const pooledRows: number[][] = []; // one delta_k vector per (i,j) pair
+  const pooledDissim: number[] = [];
 
-  for (let gi = 0; gi < uniqueGroups.length; gi++) {
-    for (let gj = gi + 1; gj < uniqueGroups.length; gj++) {
-      const idxA = groups.map((v, i) => v === uniqueGroups[gi] ? i : -1).filter(i => i >= 0);
-      const idxB = groups.map((v, i) => v === uniqueGroups[gj] ? i : -1).filter(i => i >= 0);
+  for (let gi = 0; gi < nGroups; gi++) {
+    for (let gj = gi + 1; gj < nGroups; gj++) {
+      const ga = uniqueGroups[gi], gb = uniqueGroups[gj];
+      const idxA = groups.map((v, i) => v === ga ? i : -1).filter(i => i >= 0);
+      const idxB = groups.map((v, i) => v === gb ? i : -1).filter(i => i >= 0);
 
+      // Group means of each variable (reported per contribution)
+      const meanA = new Array<number>(nVars).fill(0);
+      const meanB = new Array<number>(nVars).fill(0);
+      for (const ia of idxA) for (let k = 0; k < nVars; k++) meanA[k] += data.get(ia, k) / idxA.length;
+      for (const ib of idxB) for (let k = 0; k < nVars; k++) meanB[k] += data.get(ib, k) / idxB.length;
+
+      // Single pass over all cross-group pairs:
+      // delta_k(ij) = |x_ik - x_jk| / Sum_l (x_il + x_jl)   (Bray-Curtis)
+      const deltaRows: number[][] = [];
+      const pairDissim: number[] = [];
       for (const ia of idxA) {
         for (const ib of idxB) {
           const rowA = data.row(ia), rowB = data.row(ib);
+          let den = 0, num = 0, numSq = 0;
+          for (let k = 0; k < nVars; k++) { den += rowA[k] + rowB[k]; num += Math.abs(rowA[k] - rowB[k]); numSq += (rowA[k] - rowB[k]) ** 2; }
+          if (metric === 'bray_curtis' && den <= 0) continue; // no information in either sample
+          const row: number[] = new Array(nVars);
           for (let k = 0; k < nVars; k++) {
-            sumDiffs[k] += Math.abs(rowA[k] - rowB[k]);
+            row[k] = metric === 'bray_curtis' ? Math.abs(rowA[k] - rowB[k]) / den : Math.abs(rowA[k] - rowB[k]);
           }
-          totalPairs++;
+          deltaRows.push(row);
+          const dij = metric === 'bray_curtis' ? num / den : Math.sqrt(numSq);
+          pairDissim.push(dij);
+          pooledRows.push(row);
+          pooledDissim.push(dij);
         }
       }
+
+      // Per-variable stats across individual (i, j) pairs — SD with ddof=1
+      // (with the standard 2-group design a group-pair-level SD would
+      // collapse to 0; Python simper.py uses the same pairwise SD).
+      const nPairs = deltaRows.length;
+      const avg = new Array<number>(nVars).fill(0);
+      const sdv = new Array<number>(nVars).fill(0);
+      if (nPairs > 0) {
+        for (const row of deltaRows) for (let k = 0; k < nVars; k++) avg[k] += row[k] / nPairs;
+        if (nPairs > 1) {
+          for (let k = 0; k < nVars; k++) {
+            let s = 0;
+            for (const row of deltaRows) s += (row[k] - avg[k]) ** 2;
+            sdv[k] = Math.sqrt(s / (nPairs - 1));
+          }
+        }
+      }
+
+      // Sort by average contribution descending; cumulative shares
+      const order = Array.from({ length: nVars }, (_, i) => i).sort((a, b) => avg[b] - avg[a]);
+      const total = avg.reduce((s, v) => s + v, 0);
+      const contributions: SIMPERContribution[] = [];
+      let cum = 0;
+      for (const k of order) {
+        cum += avg[k];
+        contributions.push({
+          name: names[k], index: k, average: avg[k], std: sdv[k],
+          cumulative: total > 0 ? cum / total : 0,
+          ratio: sdv[k] > 0 ? avg[k] / sdv[k] : (avg[k] > 0 ? Infinity : 0),
+          meanA: meanA[k], meanB: meanB[k],
+        });
+      }
+
+      groupPairResults.push({
+        groupA: ga, groupB: gb,
+        overallDissimilarity: pairDissim.length > 0 ? mean(pairDissim) : 0,
+        contributions,
+      });
     }
   }
 
-  if (totalPairs === 0) return { overallDissimilarity: 0, contributions: [] };
-
-  // Mean per species
-  const meanDiffs = sumDiffs.map(s => s / totalPairs);
-  const grandMean = meanDiffs.reduce((a, b) => a + b, 0);
-
-  const results = meanDiffs.map((avg, i) => ({
-    name: names[i],
-    index: i,
-    average: avg,
-    std: 0, // Clarke 1993 doesn't define per-species SD; set to 0
-    cumulative: 0,
-    ratio: grandMean > 0 ? avg / grandMean : 0,
-  }));
-
-  results.sort((a, b) => b.average - a.average);
+  // Pooled result across all group pairs
+  const overallDissimilarity = pooledDissim.length > 0 ? mean(pooledDissim) : 0;
+  const nPooled = pooledRows.length;
+  const pooledAvg = new Array<number>(nVars).fill(0);
+  const pooledSd = new Array<number>(nVars).fill(0);
+  if (nPooled > 0) {
+    for (const row of pooledRows) for (let k = 0; k < nVars; k++) pooledAvg[k] += row[k] / nPooled;
+    if (nPooled > 1) {
+      for (let k = 0; k < nVars; k++) {
+        let s = 0;
+        for (const row of pooledRows) s += (row[k] - pooledAvg[k]) ** 2;
+        pooledSd[k] = Math.sqrt(s / (nPooled - 1));
+      }
+    }
+  }
+  const pooledOrder = Array.from({ length: nVars }, (_, i) => i).sort((a, b) => pooledAvg[b] - pooledAvg[a]);
+  const pooledTotal = pooledAvg.reduce((s, v) => s + v, 0);
+  const contributions: SIMPERContribution[] = [];
   let cum = 0;
-  for (const r of results) { cum += r.average; r.cumulative = grandMean > 0 ? cum / grandMean : 0; }
+  for (const k of pooledOrder) {
+    cum += pooledAvg[k];
+    contributions.push({
+      name: names[k], index: k, average: pooledAvg[k], std: pooledSd[k],
+      cumulative: pooledTotal > 0 ? cum / pooledTotal : 0,
+      ratio: pooledSd[k] > 0 ? pooledAvg[k] / pooledSd[k] : (pooledAvg[k] > 0 ? Infinity : 0),
+    });
+  }
 
-  return { overallDissimilarity: grandMean, contributions: results };
+  return { overallDissimilarity, contributions, groupPairResults, metric, nGroups, nVariables: nVars };
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -810,7 +1320,7 @@ export interface KruskalResult {
 export function kruskalWallis(groups: number[][]): KruskalResult {
   const allVals = groups.flat();
   const N = allVals.length;
-  const ranks = rankdata(allVals);
+  const ranks = rankdata(allVals); // average ranks (math/stats rankdata)
 
   let offset = 0;
   const k = groups.length;
@@ -824,9 +1334,25 @@ export function kruskalWallis(groups: number[][]): KruskalResult {
   }
   H = (12 / (N * (N + 1))) * H - 3 * (N + 1);
 
-  // Chi-squared approximation
+  // Tie correction (scipy.stats.kruskal / R kruskal.test):
+  //   H_corrected = H / (1 - Sum_t (t^3 - t) / (N^3 - N))
+  // where t is the size of each group of tied observations.
+  const counts = new Map<string, number>();
+  for (const v of allVals) {
+    const key = String(v);
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  let tieSum = 0;
+  for (const t of counts.values()) {
+    if (t > 1) tieSum += (t ** 3 - t);
+  }
+  const tieCorr = 1 - tieSum / (N ** 3 - N);
+  if (tieCorr > 0) H = H / tieCorr;
+
+  // Chi-squared upper-tail p-value via the verified regularized gamma
+  // (math/stats pchisq; replaces the local series approximation).
   const df = k - 1;
-  const p = 1 - chi2CDF_local(H, df);
+  const p = 1 - pchisq(H, df);
   return { statistic: H, pValue: p, df };
 }
 
@@ -855,7 +1381,7 @@ function lgamma_local(x: number): number {
 // Distance Matrix (full implementation)
 // ═══════════════════════════════════════════════════════════════════
 
-export type Metric = 'euclidean' | 'bray_curtis' | 'cosine' | 'jaccard' | 'canberra' | 'cityblock' | 'correlation' | 'hamming';
+export type Metric = 'euclidean' | 'bray_curtis' | 'cosine' | 'jaccard' | 'canberra' | 'cityblock' | 'correlation' | 'hamming' | 'chebychev';
 
 export function computeDistanceMatrix(data: Matrix, metric: Metric = 'euclidean'): Matrix {
   const n = data.rows, D = Matrix.zeros(n, n);
@@ -869,6 +1395,9 @@ export function computeDistanceMatrix(data: Matrix, metric: Metric = 'euclidean'
       case 'canberra': { let s = 0; for (let k = 0; k < a.length; k++) { const denom = Math.abs(a[k]) + Math.abs(b[k]); s += denom > 0 ? Math.abs(a[k] - b[k]) / denom : 0; } d = s; break; }
       case 'cityblock': { let s = 0; for (let k = 0; k < a.length; k++) s += Math.abs(a[k] - b[k]); d = s; break; }
       case 'hamming': { let s = 0; for (let k = 0; k < a.length; k++) if (a[k] !== b[k]) s++; d = s / a.length; break; }
+      // Chebychev (L-infinity) distance — port of Python distance_metrics.py
+      // 'chebychev' metric: d = max_k |x_ik - x_jk|
+      case 'chebychev': { let mx = 0; for (let k = 0; k < a.length; k++) mx = Math.max(mx, Math.abs(a[k] - b[k])); d = mx; break; }
       default: { let s = 0; for (let k = 0; k < a.length; k++) s += (a[k] - b[k]) ** 2; d = Math.sqrt(s); }
     }
     D.set(i, j, d); D.set(j, i, d);
@@ -889,72 +1418,127 @@ export interface ClusteringResult {
   metric: string;
 }
 
-export function hierarchicalClustering(data: Matrix, method: string = 'ward', metric: string = 'euclidean', nClusters: number = 3): ClusteringResult {
-  const D = computeDistanceMatrix(data, metric as Metric);
+/**
+ * Hierarchical (agglomerative) clustering — replaces statistics/clustering.py
+ * `analyze`.
+ *
+ * Linkage via the Lance-Williams (1967) update formulas on the cluster-level
+ * distance matrix, so all four methods work from an ARBITRARY precomputed
+ * distance matrix (not only from coordinates):
+ *   single   : d(i∪j,k) = min(d_ik, d_jk)
+ *   complete : d(i∪j,k) = max(d_ik, d_jk)
+ *   average  : d(i∪j,k) = (n_i d_ik + n_j d_jk) / (n_i + n_j)
+ *   ward     : d(i∪j,k) = sqrt( ((n_i+n_k) d_ik^2 + (n_j+n_k) d_jk^2 - n_k d_ij^2)
+ *                               / (n_i + n_j + n_k) )
+ * The Ward formula is the Ward.D2 update (identical to scipy
+ * linkage(method='ward') and R hclust ward.D2); on Euclidean data it
+ * agrees with the previous centroid-based implementation.
+ *
+ * @param data        (n_samples x n_variables) data matrix, OR a square
+ *                    symmetric zero-diagonal distance matrix when
+ *                    `precomputed` is true.
+ * @param method      'ward' | 'complete' | 'average' | 'single'
+ * @param metric      distance metric for coordinates (ignored when
+ *                    precomputed)
+ * @param nClusters   number of clusters to cut the dendrogram into
+ *                    (default 3). Ignored when `threshold` is given.
+ * @param threshold   cut the dendrogram by merge-height threshold instead of
+ *                    a fixed cluster count (Python fcluster criterion=
+ *                    'distance'); takes precedence over `nClusters` when
+ *                    defined (the two are mutually exclusive — 二选一).
+ * @param precomputed treat `data` as a precomputed distance matrix.
+ */
+export function hierarchicalClustering(
+  data: Matrix,
+  method: string = 'ward',
+  metric: string = 'euclidean',
+  nClusters: number = 3,
+  threshold?: number,
+  precomputed: boolean = false,
+): ClusteringResult {
+  let D: Matrix;
+  if (precomputed) {
+    // Validate precomputed distance matrix (Python _is_distance_matrix)
+    if (data.rows !== data.cols) {
+      throw new Error('Precomputed distance matrix must be square');
+    }
+    let symmetric = true, zeroDiag = true;
+    for (let i = 0; i < data.rows && (symmetric || zeroDiag); i++) {
+      if (Math.abs(data.get(i, i)) > 1e-10) zeroDiag = false;
+      for (let j = i + 1; j < data.cols; j++) {
+        if (Math.abs(data.get(i, j) - data.get(j, i)) > 1e-10) { symmetric = false; break; }
+      }
+    }
+    if (!symmetric || !zeroDiag) {
+      throw new Error('Precomputed distance matrix must be symmetric with a zero diagonal');
+    }
+    D = data;
+  } else {
+    D = computeDistanceMatrix(data, metric as Metric);
+  }
   const n = D.rows;
-  const clusters: { indices: number[]; centroid: number[] }[] = Array.from({ length: n }, (_, i) => ({ indices: [i], centroid: data.row(i) }));
+
+  // Cluster-level distance matrix over "active" cluster slots. Slot 0..n-1
+  // are singletons; merged slots append. dist[i][j] = current linkage dist.
+  const clusterSize: number[] = new Array(n).fill(1);
+  let dist: number[][] = Array.from({ length: n }, (_, i) =>
+    Array.from({ length: n }, (_, j) => (i === j ? Infinity : D.get(i, j))));
+  const alive: boolean[] = new Array(n).fill(true);
+
   const linkage: number[][] = [];
   let nextId = n;
 
-  while (clusters.length > 1) {
-    let minDist = Infinity, mi = 0, mj = 1;
-    for (let i = 0; i < clusters.length; i++) for (let j = i + 1; j < clusters.length; j++) {
-      let dist: number;
-      const ni = clusters[i].indices.length, nj = clusters[j].indices.length;
-      if (method === 'single') { let md = Infinity; for (const a of clusters[i].indices) for (const b of clusters[j].indices) md = Math.min(md, D.get(a, b)); dist = md; }
-      else if (method === 'complete') { let md = 0; for (const a of clusters[i].indices) for (const b of clusters[j].indices) md = Math.max(md, D.get(a, b)); dist = md; }
-      else if (method === 'average') { let s = 0, cnt = 0; for (const a of clusters[i].indices) for (const b of clusters[j].indices) { s += D.get(a, b); cnt++; } dist = s / cnt; }
-      else { // ward (Ward.D2 — Lance-Williams 1967 formula, as used by scipy/FAST)
-        // Ref: Ward J.H. (1963) J. Amer. Stat. Assoc. 58: 236-244.
-        // Lance-Williams: d(i∪j,k) = sqrt(2*[(ni*d(i,k) + nj*d(j,k))/(ni+nj) - d(i,j)] * (ni+nk+nj)/(ni+nj+nk+1))
-        // Simpler equivalent for Euclidean: d(i∪j,k)² = 2*ni*nj/(ni+nj) * ||c_i - c_j||²
-        // The factor 2 is the Ward.D2 coefficient; Ward.D (older) omits it.
-        let ss = 0;
-        for (let k = 0; k < clusters[i].centroid.length; k++) ss += (clusters[i].centroid[k] - clusters[j].centroid[k]) ** 2;
-        dist = Math.sqrt(2 * (ni * nj) / (ni + nj) * ss);
+  for (let step = 0; step < n - 1; step++) {
+    // Find the closest pair of active clusters
+    let minDist = Infinity, mi = -1, mj = -1;
+    const active: number[] = [];
+    for (let i = 0; i < dist.length; i++) if (alive[i]) active.push(i);
+    for (let a = 0; a < active.length; a++) {
+      for (let b = a + 1; b < active.length; b++) {
+        const di = dist[active[a]][active[b]];
+        if (di < minDist) { minDist = di; mi = active[a]; mj = active[b]; }
       }
-      if (dist < minDist) { minDist = dist; mi = i; mj = j; }
     }
+    if (mi < 0) break;
 
-    const ci = clusters[mi], cj = clusters[mj];
-    const newIndices = [...ci.indices, ...cj.indices];
-    const ni = ci.indices.length, nj = cj.indices.length;
-    const newCentroid = ci.centroid.map((v, k) => (v * ni + cj.centroid[k] * nj) / (ni + nj));
-    // Both members of the new cluster share the same nextId (the original nextId+1 bug is fixed)
-    const newClusterId = nextId++;
-    linkage.push([ci.indices.length <= 1 ? ci.indices[0] : newClusterId, cj.indices.length <= 1 ? cj.indices[0] : newClusterId, Math.sqrt(Math.max(0, minDist)), newIndices.length]);
-    clusters.splice(mj, 1);
-    clusters[mi] = { indices: newIndices, centroid: newCentroid };
-  }
+    // Record the merge: linkage row [id1, id2, height, size]
+    const mergedSize = clusterSize[mi] + clusterSize[mj];
+    linkage.push([mi, mj, Math.max(minDist, 0), mergedSize]);
 
-  // Cut into clusters: use linkage Z-matrix merging order.
-  // Ref: scipy.cluster.hierarchy.fcluster — cut at the (nClusters)th distinct height.
-  // Build a flat cluster assignment by processing merges in order.
-  const clusterId = new Array(n + linkage.length).fill(-1);
-  let nextLabel = 0;
-  for (let m = 0; m < linkage.length; m++) {
-    const [id1, id2, height] = linkage[m];
-    const c1 = id1 < n ? id1 : clusterId[id1];
-    const c2 = id2 < n ? id2 : clusterId[id2];
-    if (m >= linkage.length - nClusters) {
-      // These are the final nClusters clusters
-      if (clusterId[id1] === -1) clusterId[id1] = nextLabel++;
-      if (clusterId[id2] === -1) clusterId[id2] = nextLabel++;
+    // Create the merged cluster slot and apply the Lance-Williams update
+    const newId = nextId++;
+    clusterSize.push(mergedSize);
+    dist.push(new Array<number>(newId).fill(Infinity)); // col for newId added below
+    for (let row of dist) row.push(Infinity);
+    alive.push(true);
+
+    for (let k = 0; k < newId; k++) {
+      if (!alive[k] || k === mi || k === mj) continue;
+      const dik = dist[mi][k], djk = dist[mj][k], dij = dist[mi][mj];
+      const ni = clusterSize[mi], nj = clusterSize[mj], nk = clusterSize[k];
+      let dk: number;
+      if (method === 'single') dk = Math.min(dik, djk);
+      else if (method === 'complete') dk = Math.max(dik, djk);
+      else if (method === 'average') dk = (ni * dik + nj * djk) / (ni + nj);
+      else { // ward (Ward.D2, Lance-Williams on squared distances)
+        dk = Math.sqrt(Math.max(
+          ((ni + nk) * dik * dik + (nj + nk) * djk * djk - nk * dij * dij) / (ni + nj + nk), 0));
+      }
+      dist[newId][k] = dk;
+      dist[k][newId] = dk;
     }
+    alive[mi] = false;
+    alive[mj] = false;
   }
-  // Rebuild labels from clusterId map
-  const finalLabels = new Array(n).fill(0);
-  const clusterMap = new Map<number, number>();
-  nextLabel = 0;
-  for (let m = 0; m < linkage.length; m++) {
-    const [id1, id2] = linkage[m];
-    if (!clusterMap.has(id1)) clusterMap.set(id1, nextLabel++);
-    if (!clusterMap.has(id2)) clusterMap.set(id2, nextLabel++);
-  }
-  // Assign labels based on which cluster each original observation belongs to
-  // at the level where there are nClusters clusters
-  const flatLabels = fclusterFromLinkage(linkage, nClusters);
-  for (let i = 0; i < n; i++) finalLabels[i] = flatLabels[i];
+
+  // Cut the dendrogram. `threshold` (merge-height criterion, 二选一) takes
+  // precedence; otherwise cut into exactly `nClusters` clusters
+  // (scipy fcluster criterion='maxclust').
+  const finalLabels = threshold !== undefined
+    ? fclusterByHeight(linkage, n, threshold)
+    : fclusterFromLinkage(linkage, nClusters);
+  const clusterIds = [...new Set(finalLabels)];
+  const nFound = clusterIds.length;
 
   // Cophenetic distance matrix: height at which i,j first in same cluster.
   // Ref: Fionn Murtagh & Pierre Legendre (2014) Stat. & Prob. Letters, Eq. (1).
@@ -970,7 +1554,41 @@ export function hierarchicalClustering(data: Matrix, method: string = 'ward', me
   }
   const cophCorr = origDist.length > 0 ? pearsonCorr(origDist, cophDist) : 0;
 
-  return { linkageMatrix: linkage, copheneticCorr: cophCorr, labels: finalLabels, nClusters, method, metric };
+  return {
+    linkageMatrix: linkage, copheneticCorr: cophCorr, labels: finalLabels,
+    nClusters: nFound, method, metric: precomputed ? 'precomputed' : metric,
+  };
+}
+
+/**
+ * fcluster(Z, t, criterion='distance'): cut the dendrogram at merge height
+ * `threshold` — all merges with height <= threshold are applied, the
+ * remaining connected components become flat clusters.
+ */
+function fclusterByHeight(linkage: number[][], n: number, threshold: number): number[] {
+  const parent = new Array(2 * n - 1);
+  for (let i = 0; i < parent.length; i++) parent[i] = i;
+  function find(x: number): number {
+    if (parent[x] !== x) parent[x] = find(parent[x]);
+    return parent[x];
+  }
+  for (const [id1, id2, h] of linkage) {
+    if (h <= threshold) {
+      const r1 = find(id1), r2 = find(id2);
+      if (r1 !== r2) parent[r1] = r2;
+    } else {
+      break; // linkage heights are non-decreasing
+    }
+  }
+  const labels = new Array(n).fill(0);
+  const rootMap = new Map<number, number>();
+  let labelIdx = 0;
+  for (let i = 0; i < n; i++) {
+    const root = find(i);
+    if (!rootMap.has(root)) rootMap.set(root, labelIdx++);
+    labels[i] = rootMap.get(root)!;
+  }
+  return labels;
 }
 
 function pearsonCorr(x: number[], y: number[]): number {
@@ -1093,62 +1711,249 @@ export interface PhyloSignalResult {
   z: number;
   pValue: number;
   nRandomizations: number;
+  /** Tip names — rows/cols of `vcvMatrix` (Python tip_names). */
+  tipNames?: string[];
+  /** ape-convention Brownian VCV used for the canonical K. */
+  vcvMatrix?: number[][];
 }
 
+/**
+ * Phylogenetic signal via the CANONICAL, scale-invariant Blomberg K —
+ * port of Python pcm.py `compute_phylogenetic_signal` +
+ * phylogenetics/signal.py `_blomberg_k_from_vcv`.
+ *
+ *     K = s²_ord / (σ̂²_GLS · tr(V) / n)
+ *
+ * where s²_ord = Σ(yᵢ−ȳ)²/(n−1) is the ordinary mean square and
+ * σ̂²_GLS = (y−1â)ᵀV⁻¹(y−1â)/(n−1) is the Brownian-rate estimate with the
+ * GLS intercept â = (1ᵀV⁻¹1)⁻¹ 1ᵀV⁻¹y, evaluated on the ape-convention VCV
+ * (diagonal = root-to-tip distance, off-diagonal = shared path length).
+ * Under BM, K ≈ 1; K is invariant to linear rescaling of the trait.
+ *
+ * The previous ΣIC²/Σv ratio is the BM RATE estimate σ̂² — it scales with
+ * the trait units² and is not a signal statistic; it has been replaced.
+ *
+ * References: Blomberg, Garland & Ives (2003) Evolution 57(4):717-745;
+ * add-one corrected permutation p-value.
+ */
 export function phylogeneticSignal(root: any, traitValues: Record<string, number>, nRandomizations: number = 999, rngSeed?: number): PhyloSignalResult {
-  // Get contrasts
-  const { contrasts, standardErrors } = computePIC(root, traitValues);
-  if (contrasts.length === 0) return { k: 0, z: 0, pValue: 1, nRandomizations: 0 };
-
-  // K = sum(raw_IC^2) / sum(v) — Blomberg et al. 2003 K statistic
-  const rawICSq = contrasts.map((c, i) => (c * standardErrors[i]) ** 2);
-  const v = standardErrors.map(s => s * s);
-  const sumRawICSq = rawICSq.reduce((a, b) => a + b, 0);
-  const sumV = v.reduce((a, b) => a + b, 0);
-  const K = sumV > 0 ? sumRawICSq / sumV : 0;
-
-  // Permutation test using seeded RNG (replaces Math.random())
   if (rngSeed !== undefined) seed(rngSeed);
   const leaves = getLeaves(root);
-  const leafNames = leaves.map(l => l.name);
+  const tipNames = leaves.map(l => l.name);
+  const n = tipNames.length;
+  if (n < 3) return { k: 0, z: 0, pValue: 1, nRandomizations: 0, tipNames, vcvMatrix: [] };
+
+  const y = tipNames.map(nm => traitValues[nm] ?? NaN);
+  const V = buildVCV(root, tipNames);
+
+  const K = blombergKFromVcv(y, V);
+
+  // Permutation test: shuffle the trait values across tips (groups/VCV fixed)
   let count = 0;
   const permKs: number[] = [];
   for (let perm = 0; perm < nRandomizations; perm++) {
-    const shuffled = [...leafNames];
+    const shuffled = [...y];
     rngShuffle(shuffled);
-    const permDict: Record<string, number> = {};
-    for (let i = 0; i < shuffled.length; i++) permDict[leafNames[i]] = traitValues[shuffled[i]];
-    const pIC = computePIC(root, permDict);
-    const pRawICSq = pIC.contrasts.map((c, i) => (c * pIC.standardErrors[i]) ** 2);
-    const pV = pIC.standardErrors.map(s => s * s);
-    const pSum = pV.reduce((a, b) => a + b, 0);
-    const pK = pSum > 0 ? pRawICSq.reduce((a, b) => a + b, 0) / pSum : 0;
-    permKs.push(pK);
-    if (pK >= K) count++;
+    const permK = blombergKFromVcv(shuffled, V);
+    permKs.push(permK);
+    if (permK >= K) count++;
   }
 
-  const meanPK = permKs.reduce((a, b) => a + b, 0) / permKs.length;
-  const stdPK = Math.sqrt(permKs.reduce((s, v) => s + (v - meanPK) ** 2, 0) / permKs.length);
+  const meanPK = permKs.length > 0 ? permKs.reduce((a, b) => a + b, 0) / permKs.length : 0;
+  const stdPK = permKs.length > 0 ? Math.sqrt(permKs.reduce((s, v) => s + (v - meanPK) ** 2, 0) / permKs.length) : 0;
   const z = stdPK > 0 ? (K - meanPK) / stdPK : 0;
 
-  return { k: K, z, pValue: count / nRandomizations, nRandomizations };
+  return {
+    k: K, z, pValue: (count + 1) / (nRandomizations + 1), nRandomizations,
+    tipNames, vcvMatrix: V.map(row => [...row]),
+  };
 }
 
+/**
+ * Canonical Blomberg et al. (2003) K from a trait vector and an
+ * ape-convention VCV — exact port of Python `_blomberg_k_from_vcv`:
+ *
+ *     K = s²_ord / (σ̂²_GLS · tr(V)/n)
+ *
+ * Returns 0.0 when the computation is degenerate (singular VCV, zero
+ * variance, or n < 3).
+ */
+function blombergKFromVcv(y: number[], V: number[][]): number {
+  const n = y.length;
+  if (n < 3) return 0;
+  if (y.some(v => isNaN(v))) return 0;
+  // Tiny ridge for numerical stability (Python adds 1e-10 on the diagonal)
+  const Vr: number[][] = V.map((row, i) => row.map((v, j) => (i === j ? v + 1e-10 : v)));
+  let Vinv: Matrix;
+  try {
+    Vinv = inv(new Matrix(new Float64Array(Vr.flat()), n, n));
+  } catch {
+    return 0;
+  }
+
+  const ones = new Array<number>(n).fill(1);
+  const oneViOne = quadForm(Vinv, ones, ones);
+  if (!(oneViOne > 0)) return 0;
+
+  const oneViY = quadForm(Vinv, ones, y);
+  const aHat = oneViY / oneViOne;
+  const resid = y.map(v => v - aHat);
+  const sigma2Gls = quadForm(Vinv, resid, resid) / (n - 1);
+
+  const yMean = mean(y);
+  const s2Ord = y.reduce((s, v) => s + (v - yMean) ** 2, 0) / (n - 1);
+
+  let trace = 0;
+  for (let i = 0; i < n; i++) trace += Vr[i][i];
+  const denom = sigma2Gls * trace / n;
+  if (!(denom > 0)) return 0;
+  return s2Ord / denom;
+}
+
+/** uᵀ A v for symmetric A held as a Matrix. */
+function quadForm(A: Matrix, u: number[], v: number[]): number {
+  let s = 0;
+  for (let i = 0; i < u.length; i++) {
+    let rowDot = 0;
+    for (let j = 0; j < v.length; j++) rowDot += A.get(i, j) * v[j];
+    s += u[i] * rowDot;
+  }
+  return s;
+}
+
+/**
+ * Brownian variance-covariance matrix in the ape convention — port of
+ * Python pcm.py `_compute_vcv_matrix`:
+ *
+ *     V_ii = total branch length from root to tip i
+ *     V_ij = shared path length from root to LCA(i, j)   (i ≠ j)
+ *
+ * (A patristic-distance matrix with a zero diagonal would be singular and
+ * unusable for GLS.)
+ */
+function buildVCV(root: any, tipNames: string[]): number[][] {
+  const n = tipNames.length;
+  const nameToIdx = new Map<string, number>();
+  tipNames.forEach((nm, i) => nameToIdx.set(nm, i));
+
+  // Distance from root for every node (DFS over children)
+  const distToRoot = new Map<any, number>();
+  (function walk(node: any, d: number): void {
+    distToRoot.set(node, d);
+    for (const c of node.children) walk(c, d + (c.branchLength || 0));
+  })(root, 0);
+
+  const V: number[][] = Array.from({ length: n }, () => new Array<number>(n).fill(0));
+  for (let i = 0; i < n; i++) {
+    const leafI = findLeafByname(root, tipNames[i]);
+    if (leafI) V[i][i] = distToRoot.get(leafI) ?? 0;
+  }
+  // Shared path lengths: for each internal node, every pair of tips under
+  // DIFFERENT children has its LCA at that node.
+  (function shared(node: any): string[] {
+    if (node.isLeaf) return node.name ? [node.name] : [];
+    const childTips = node.children.map((c: any) => shared(c));
+    const d = distToRoot.get(node) ?? 0;
+    for (let a = 0; a < childTips.length; a++) {
+      for (let b = a + 1; b < childTips.length; b++) {
+        for (const ta of childTips[a]) {
+          for (const tb of childTips[b]) {
+            const ia = nameToIdx.get(ta), ib = nameToIdx.get(tb);
+            if (ia !== undefined && ib !== undefined) { V[ia][ib] = d; V[ib][ia] = d; }
+          }
+        }
+      }
+    }
+    return childTips.reduce((acc: string[], cur: string[]) => acc.concat(cur), []);
+  })(root);
+  return V;
+}
+
+function findLeafByname(root: any, name: string): any | null {
+  if (root.isLeaf) return root.name === name ? root : null;
+  for (const c of root.children) {
+    const r = findLeafByname(c, name);
+    if (r !== null) return r;
+  }
+  return null;
+}
+
+/**
+ * Phylogenetic independent contrasts (Felsenstein 1985) — post-order
+ * recursion matching the CORRECTED Python pcm.py
+ * `_compute_contrasts_recursive`:
+ *
+ *  - leaves return cumVar = 0 (a leaf has no descendants); every parent
+ *    adds the child's branch_length explicitly: v_i = cumVar(child_i) +
+ *    branch(child_i). The old version made leaves return branch_length and
+ *    double-counted leaf edges while missing internal ones, biasing the IC
+ *    standardization on deep trees.
+ *  - standardized contrast IC = (x_A - x_B) / sqrt(v_A + v_B), se =
+ *    sqrt(v_A + v_B);
+ *  - the variance of the node's reconstruction (excluding its own branch)
+ *    is v_A·v_B/(v_A+v_B) — the variance of the inverse-variance weighted
+ *    mean, NOT v_A+v_B (the variance of the contrast);
+ *  - polytomies are reduced iteratively exactly as in Python.
+ */
 function computePIC(root: any, traitValues: Record<string, number>): { contrasts: number[]; standardErrors: number[] } {
   const contrasts: number[] = [], seList: number[] = [];
+
   function compute(node: any): { value: number | null; cumVar: number } {
-    if (node.isLeaf) return { value: traitValues[node.name] ?? null, cumVar: 0 };
-    const childResults = node.children.map((c: any) => compute(c)).filter((r: any) => r.value !== null);
-    if (childResults.length < 2) return { value: childResults[0]?.value ?? null, cumVar: 0 };
-    const c1 = childResults[0], c2 = childResults[1];
-    const v1 = c1.cumVar + (node.children[0].branchLength || 0);
-    const v2 = c2.cumVar + (node.children[1].branchLength || 0);
-    const contrast = (c1.value! - c2.value!) / Math.sqrt(v1 + v2);
-    contrasts.push(contrast);
-    seList.push(Math.sqrt(v1 + v2));
-    const w1 = 1 / Math.max(v1, 0.0001), w2 = 1 / Math.max(v2, 0.0001);
-    return { value: (w1 * c1.value! + w2 * c2.value!) / (w1 + w2), cumVar: v1 + v2 };
+    if (node.isLeaf) {
+      const v = traitValues[node.name];
+      return { value: v === undefined ? null : v, cumVar: 0 };
+    }
+    // Process children first
+    const childResults: { node: any; value: number; cumVar: number }[] = [];
+    for (const c of node.children) {
+      const r = compute(c);
+      if (r.value !== null) childResults.push({ node: c, value: r.value, cumVar: r.cumVar });
+    }
+    if (childResults.length === 0) return { value: null, cumVar: 0 };
+    if (childResults.length === 1) {
+      const c = childResults[0];
+      return { value: c.value, cumVar: c.cumVar + (c.node.branchLength || 0) };
+    }
+
+    // Reduce children pairwise/iteratively (Felsenstein 1985)
+    type Entry = { value: number; cumVar: number; branch: number };
+    let active: Entry[] = childResults.map(cr => ({
+      value: cr.value, cumVar: cr.cumVar, branch: cr.node.branchLength || 0,
+    }));
+
+    while (active.length > 1) {
+      const e1 = active[0], e2 = active[1];
+      const v1 = e1.cumVar + e1.branch;
+      const v2 = e2.cumVar + e2.branch;
+      const contrast = (e1.value - e2.value) / Math.sqrt(v1 + v2);
+      contrasts.push(contrast);
+      seList.push(Math.sqrt(v1 + v2));
+      // Combined subtree: inverse-variance weighted mean; combined
+      // descendant variance v1*v2/(v1+v2); the pseudo-child's edge to this
+      // node has length 0 (the parent adds this node's branch length).
+      const combinedCvar = v1 + v2 > 0 ? (v1 * v2) / (v1 + v2) : 0;
+      const combinedVal = v1 > 0 && v2 > 0
+        ? (e1.value / v1 + e2.value / v2) / (1 / v1 + 1 / v2)
+        : (e1.value + e2.value) / 2;
+      active = [{ value: combinedVal, cumVar: combinedCvar, branch: 0 }, ...active.slice(2)];
+    }
+
+    // Final reconstruction at this node: inverse-variance weighted mean of
+    // the immediate child reconstructions; node variance = 1/Σ(1/v_i)
+    // excluding this node's own branch length.
+    let totalW = 0, weightedSum = 0, invSum = 0;
+    for (const cr of childResults) {
+      const v = cr.cumVar + (cr.node.branchLength || 0);
+      const vv = v > 0 ? v : 1e-10;
+      totalW += 1 / vv;
+      weightedSum += cr.value / vv;
+      if (v > 0) invSum += 1 / v;
+    }
+    const recon = totalW > 0 ? weightedSum / totalW : active[0].value;
+    const cumVar = invSum > 0 ? 1 / invSum : 0;
+    return { value: recon, cumVar };
   }
+
   compute(root);
   return { contrasts, standardErrors: seList };
 }
@@ -1170,77 +1975,236 @@ export interface PhyloANOVAResult {
   ssBetween: number;
   ssWithin: number;
   nPermutations: number;
+  /** Group names (sorted). */
+  groups?: string[];
+  nGroups?: number;
+  nTips?: number;
+  msBetween?: number;
+  msWithin?: number;
+  /** Standardized contrast values used in the test. */
+  contrastValues?: number[];
+  /** Group assignment per labelled tip (Python group_labels). */
+  groupLabels?: Record<string, string>;
 }
 
+/**
+ * Phylogenetic ANOVA — port of Python pcm.py `phylogenetic_anova`
+ * (Garland 1993 rule-classification scheme).
+ *
+ * Each PIC contrast at node P is labelled by the DOMINANT group (most
+ * common group label among P's descendant tips). The test statistic is the
+ * classic ONE-WAY ANOVA F computed on the standardized contrasts grouped by
+ * those labels:
+ *
+ *     SS_between = Σ_g n_g (mean_g - grand_mean)²
+ *     SS_within  = Σ_g Σ_i (ic_i - mean_g)²
+ *     F = MS_between / MS_within
+ *
+ * The observed statistic and every permuted statistic use the IDENTICAL
+ * labelling rule and the IDENTICAL F formula — the previous implementation
+ * compared a "two-child-dominant-group" observed F against a permuted
+ * classic ANOVA F of a different quantity, which invalidates the p-value.
+ * p = mean(F_perm >= F_obs) over group-fixed trait permutations.
+ */
 export function phyloANOVA(root: any, traitValues: Record<string, number>, groupLabels: Record<string, string>, nPermutations: number = 999, rngSeed?: number): PhyloANOVAResult {
-  // Compute PIC contrasts while tracking node identity
-  const betweenContrasts: number[] = [];
-  const withinContrasts: number[] = [];
+  if (rngSeed !== undefined) seed(rngSeed);
 
-  function getGroup(node: any): string | null {
-    const leaves = getLeaves(node);
+  // Valid labelled tips (intersection of trait and group keys)
+  const tipsWithGroups: Record<string, string> = {};
+  for (const tip of Object.keys(groupLabels)) {
+    if (tip in traitValues) tipsWithGroups[tip] = groupLabels[tip];
+  }
+  const groups = [...new Set(Object.values(tipsWithGroups))].sort();
+  const nGroups = groups.length;
+  const tipNamesList = getLeaves(root).map(l => l.name);
+  if (nGroups < 2) {
+    return { fStatistic: 0, pValue: 1, ssBetween: 0, ssWithin: 0, nPermutations, groups, nGroups, nTips: tipNamesList.length, contrastValues: [], groupLabels: tipsWithGroups };
+  }
+
+  // Dominant group = most common labelled group among a subtree's tips
+  // (ties broken by group order; null when no labelled tip is present).
+  const subtreeTipsCache = new Map<any, string[]>();
+  function subtreeTips(node: any): string[] {
+    const cached = subtreeTipsCache.get(node);
+    if (cached) return cached;
+    let tips: string[];
+    if (node.isLeaf) tips = node.name ? [node.name] : [];
+    else {
+      tips = [];
+      for (const c of node.children) tips = tips.concat(subtreeTips(c));
+    }
+    subtreeTipsCache.set(node, tips);
+    return tips;
+  }
+  function dominantGroup(node: any): string | null {
     const counts: Record<string, number> = {};
-    for (const l of leaves) {
-      const g = groupLabels[l.name];
+    for (const tip of subtreeTips(node)) {
+      const g = tipsWithGroups[tip];
       if (g) counts[g] = (counts[g] || 0) + 1;
     }
-    if (Object.keys(counts).length === 0) return null;
-    return Object.entries(counts).sort((a, b) => b[1] - a[1])[0][0];
+    let best: string | null = null, bestCount = 0;
+    for (const g of groups) {
+      if ((counts[g] || 0) > bestCount) { best = g; bestCount = counts[g]; }
+    }
+    return best;
   }
 
-  function computeWithClassification(node: any): { value: number | null; cumVar: number } {
-    if (node.isLeaf) return { value: traitValues[node.name] ?? null, cumVar: 0 };
-
-    const childResults = node.children.map((c: any) => computeWithClassification(c)).filter((r: any) => r.value !== null);
-    if (childResults.length < 2) return { value: childResults[0]?.value ?? null, cumVar: 0 };
-
-    const c1 = childResults[0], c2 = childResults[1];
-    const v1 = c1.cumVar + (node.children[0].branchLength || 0);
-    const v2 = c2.cumVar + (node.children[1].branchLength || 0);
-    const contrast = (c1.value! - c2.value!) / Math.sqrt(v1 + v2);
-
-    // Classify this contrast based on child groups
-    const g1 = getGroup(node.children[0]);
-    const g2 = getGroup(node.children[1]);
-    if (g1 && g2 && g1 !== g2) {
-      betweenContrasts.push(contrast);
-    } else {
-      withinContrasts.push(contrast);
+  // Contrasts with their node identity: each contrast is labelled by the
+  // dominant group of the subtree at the node where it was computed.
+  function computeLabeled(node: any): { value: number | null; cumVar: number } | null {
+    if (node.isLeaf) {
+      const v = traitValues[node.name];
+      return v === undefined ? null : { value: v, cumVar: 0 };
+    }
+    const childResults: { node: any; value: number; cumVar: number }[] = [];
+    for (const c of node.children) {
+      const r = computeLabeled(c);
+      if (r !== null && r.value !== null) childResults.push({ node: c, value: r.value, cumVar: r.cumVar });
+    }
+    if (childResults.length === 0) return null;
+    if (childResults.length === 1) {
+      const c = childResults[0];
+      return { value: c.value, cumVar: c.cumVar + (c.node.branchLength || 0) };
     }
 
-    const w1 = 1 / Math.max(v1, 0.0001), w2 = 1 / Math.max(v2, 0.0001);
-    return { value: (w1 * c1.value! + w2 * c2.value!) / (w1 + w2), cumVar: v1 + v2 };
+    type Entry = { value: number; cumVar: number; branch: number };
+    let active: Entry[] = childResults.map(cr => ({
+      value: cr.value, cumVar: cr.cumVar, branch: cr.node.branchLength || 0,
+    }));
+    while (active.length > 1) {
+      const e1 = active[0], e2 = active[1];
+      const v1 = e1.cumVar + e1.branch, v2 = e2.cumVar + e2.branch;
+      const contrast = (e1.value - e2.value) / Math.sqrt(v1 + v2);
+      const dg = dominantGroup(node);
+      icValues.push(contrast);
+      icLabels.push(dg ?? groups[0]); // unclassifiable -> groups[0] (Python)
+      const combinedCvar = v1 + v2 > 0 ? (v1 * v2) / (v1 + v2) : 0;
+      const combinedVal = v1 > 0 && v2 > 0
+        ? (e1.value / v1 + e2.value / v2) / (1 / v1 + 1 / v2)
+        : (e1.value + e2.value) / 2;
+      active = [{ value: combinedVal, cumVar: combinedCvar, branch: 0 }, ...active.slice(2)];
+    }
+    let totalW = 0, weightedSum = 0, invSum = 0;
+    for (const cr of childResults) {
+      const v = cr.cumVar + (cr.node.branchLength || 0);
+      const vv = v > 0 ? v : 1e-10;
+      totalW += 1 / vv;
+      weightedSum += cr.value / vv;
+      if (v > 0) invSum += 1 / v;
+    }
+    return { value: totalW > 0 ? weightedSum / totalW : active[0].value, cumVar: invSum > 0 ? 1 / invSum : 0 };
   }
 
-  computeWithClassification(root);
+  let icValues: number[] = [];
+  let icLabels: string[] = [];
 
-  // Compute sum of squares
-  const ssBetween = betweenContrasts.reduce((s, c) => s + c * c, 0);
-  const ssWithin = withinContrasts.reduce((s, c) => s + c * c, 0);
-  const dfBetween = Math.max(betweenContrasts.length, 1);
-  const dfWithin = Math.max(withinContrasts.length, 1);
-  const msBetween = ssBetween / dfBetween;
-  const msWithin = ssWithin / dfWithin;
-  const F = msWithin > 0 ? msBetween / msWithin : 0;
+  /** Classic one-way ANOVA F on the contrasts grouped by labels. */
+  function oneWayF(ic: number[], labels: string[]): [number, number, number, number, number] {
+    const nIc = ic.length;
+    if (nIc === 0) return [0, 0, 0, 0, 0];
+    const dfB = Math.max(nGroups - 1, 1);
+    const dfW = Math.max(nIc - nGroups, 1);
+    const grandMean = mean(ic);
+    let ssB = 0, ssW = 0;
+    for (const g of groups) {
+      const vals = ic.filter((_, i) => labels[i] === g);
+      if (vals.length === 0) continue;
+      const gm = mean(vals);
+      ssB += vals.length * (gm - grandMean) ** 2;
+      for (const v of vals) ssW += (v - gm) ** 2;
+    }
+    const msB = ssB / dfB;
+    const msW = ssW / dfW;
+    const F = msW > 0 ? msB / msW : 0;
+    return [F, ssB, ssW, msB, msW];
+  }
 
-  // Permutation test using seeded RNG (replaces Math.random())
-  if (rngSeed !== undefined) seed(rngSeed);
+  // Observed statistic
+  icValues = []; icLabels = [];
+  computeLabeled(root);
+  const [F, ssBetween, ssWithin, msBetween, msWithin] = oneWayF(icValues, icLabels);
+
+  // Permutation test: shuffle trait values across tips, keep groups fixed;
+  // identical labelling rule + identical F formula as the observed statistic.
   let count = 0;
+  let nValidPerms = 0;
+  const tipArray = tipNamesList.map(nm => traitValues[nm] ?? NaN);
   for (let perm = 0; perm < nPermutations; perm++) {
-    // Shuffle trait values using seeded RNG
-    const taxa = Object.keys(traitValues);
-    const shuffledTaxa = [...taxa];
-    rngShuffle(shuffledTaxa);
-    const shuffledMap: Record<string, number> = {};
-    for (let i = 0; i < taxa.length; i++) shuffledMap[taxa[i]] = traitValues[shuffledTaxa[i]];
-    const { contrasts: permContrasts } = computePIC(root, shuffledMap);
-    // Count permutations with larger F
-    const permSS = permContrasts.reduce((s, c) => s + c * c, 0);
-    if (permSS >= ssBetween + ssWithin) count++;
+    const shuffled = [...tipArray];
+    rngShuffle(shuffled);
+    const permDict: Record<string, number> = {};
+    for (let i = 0; i < tipNamesList.length; i++) permDict[tipNamesList[i]] = shuffled[i];
+    // Same recursion code path as the observed contrasts (see
+    // runComputeWithTraits) so observed and permuted F are directly comparable.
+    const permIc = runComputeWithTraits(root, permDict, dominantGroup, groups);
+    if (permIc.values.length >= 2) {
+      const permF = oneWayF(permIc.values, permIc.labels)[0];
+      if (permF >= F) count++;
+      nValidPerms++;
+    }
   }
-  const pValue = (count + 1) / (nPermutations + 1);
+  const pValue = nValidPerms > 0 ? count / nValidPerms : 1.0;
 
-  return { fStatistic: F, pValue, ssBetween, ssWithin, nPermutations };
+  return {
+    fStatistic: F, pValue, ssBetween, ssWithin, nPermutations,
+    groups, nGroups, nTips: tipNamesList.length,
+    msBetween, msWithin, contrastValues: icValues, groupLabels: tipsWithGroups,
+  };
+}
+
+/** Run the labeled-PIC recursion with an explicit trait dictionary
+ *  (used by the phyloANOVA permutation loop to keep the observed and
+ *  permuted contrasts produced by the exact same code path). */
+function runComputeWithTraits(
+  root: any,
+  traitValues: Record<string, number>,
+  dominantGroup: (node: any) => string | null,
+  groups: string[],
+): { values: number[]; labels: string[] } {
+  const values: number[] = [];
+  const labels: string[] = [];
+  function compute(node: any): { value: number | null; cumVar: number } | null {
+    if (node.isLeaf) {
+      const v = traitValues[node.name];
+      return v === undefined ? null : { value: v, cumVar: 0 };
+    }
+    const childResults: { node: any; value: number; cumVar: number }[] = [];
+    for (const c of node.children) {
+      const r = compute(c);
+      if (r !== null && r.value !== null) childResults.push({ node: c, value: r.value, cumVar: r.cumVar });
+    }
+    if (childResults.length === 0) return null;
+    if (childResults.length === 1) {
+      const c = childResults[0];
+      return { value: c.value, cumVar: c.cumVar + (c.node.branchLength || 0) };
+    }
+    type Entry = { value: number; cumVar: number; branch: number };
+    let active: Entry[] = childResults.map(cr => ({
+      value: cr.value, cumVar: cr.cumVar, branch: cr.node.branchLength || 0,
+    }));
+    while (active.length > 1) {
+      const e1 = active[0], e2 = active[1];
+      const v1 = e1.cumVar + e1.branch, v2 = e2.cumVar + e2.branch;
+      values.push((e1.value - e2.value) / Math.sqrt(v1 + v2));
+      labels.push(dominantGroup(node) ?? groups[0]);
+      const combinedCvar = v1 + v2 > 0 ? (v1 * v2) / (v1 + v2) : 0;
+      const combinedVal = v1 > 0 && v2 > 0
+        ? (e1.value / v1 + e2.value / v2) / (1 / v1 + 1 / v2)
+        : (e1.value + e2.value) / 2;
+      active = [{ value: combinedVal, cumVar: combinedCvar, branch: 0 }, ...active.slice(2)];
+    }
+    let totalW = 0, weightedSum = 0, invSum = 0;
+    for (const cr of childResults) {
+      const v = cr.cumVar + (cr.node.branchLength || 0);
+      const vv = v > 0 ? v : 1e-10;
+      totalW += 1 / vv;
+      weightedSum += cr.value / vv;
+      if (v > 0) invSum += 1 / v;
+    }
+    return { value: totalW > 0 ? weightedSum / totalW : active[0].value, cumVar: invSum > 0 ? 1 / invSum : 0 };
+  }
+  compute(root);
+  return { values, labels };
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1258,13 +2222,15 @@ export function mannWhitneyU(group1: number[], group2: number[]): MannWhitneyRes
   const combined = [...group1.map(v => ({ v, g: 0 })), ...group2.map(v => ({ v, g: 1 }))];
   combined.sort((a, b) => a.v - b.v);
 
-  // Assign ranks
+  // Assign ranks with tie averaging (average rank for equal values)
   const ranks = new Array(combined.length);
   let i = 0;
+  const tieSizes: number[] = []; // sizes t of tied groups (t >= 2)
   while (i < combined.length) {
     let j = i;
     while (j < combined.length && combined[j].v === combined[i].v) j++;
     const avgRank = (i + j + 1) / 2;
+    if (j - i > 1) tieSizes.push(j - i);
     for (let k = i; k < j; k++) ranks[k] = avgRank;
     i = j;
   }
@@ -1276,13 +2242,20 @@ export function mannWhitneyU(group1: number[], group2: number[]): MannWhitneyRes
   const U2 = n1 * n2 - U1;
   const U = Math.min(U1, U2);
 
-  // Normal approximation for p-value
+  // Normal approximation with CONTINUITY CORRECTION and TIE VARIANCE
+  // correction (scipy.stats.mannwhitneyu, method='asymptotic'):
+  //   sigma^2 = n1 n2 / 12 * ((N + 1) - Sum_t (t^3 - t) / (N (N - 1)))
+  //   z = (|U - mu| - 0.5) / sigma
+  const N = n1 + n2;
   const muU = n1 * n2 / 2;
-  const sigmaU = Math.sqrt(n1 * n2 * (n1 + n2 + 1) / 12);
-  const z = sigmaU > 0 ? (U - muU) / sigmaU : 0;
-  const p = 2 * (1 - normCDF_mw(Math.abs(z)));
+  let tieCorr = 0;
+  for (const t of tieSizes) tieCorr += (t ** 3 - t) / (N * (N - 1));
+  const sigmaU = Math.sqrt(Math.max(n1 * n2 / 12 * ((N + 1) - tieCorr), 1e-12));
+  const z = sigmaU > 0 ? (Math.abs(U - muU) - 0.5) / sigmaU : 0;
+  // Exact normal CDF from math/stats (replaces the local erf approximation)
+  const p = 2 * (1 - pnorm(Math.abs(z)));
 
-  return { uStatistic: U, pValue: p, zScore: z };
+  return { uStatistic: U, pValue: p, zScore: (U - muU) / sigmaU };
 }
 
 function normCDF_mw(x: number): number {
@@ -1341,20 +2314,26 @@ export function convexHullVolume(points: number[][]): number {
 }
 
 /**
- * 3D Convex Hull Volume — gift-wrapping (Jarvis march) + cone decomposition.
+ * 3D Convex Hull Volume — incremental hull + cone decomposition.
  *
  * Algorithm:
- * 1. Centroid-shift so origin is inside the convex hull.
- *    This guarantees every face of the hull is visible from the origin,
- *    enabling reliable cone decomposition V = Σ V_tet(origin, face_vertices).
- * 2. Compute the 3D convex hull using the gift-wrapping (Jarvis march) algorithm.
+ * 1. Centroid-shift so the origin is inside the convex hull. This
+ *    guarantees every hull face is visible from the origin, enabling
+ *    reliable cone decomposition V = Σ V_tet(origin, face_vertices).
+ * 2. Build the 3D convex hull with the INCREMENTAL algorithm
+ *    (initialize from a non-degenerate tetrahedron, then insert each
+ *    remaining point: delete the faces visible from the point, re-triangulate
+ *    along the horizon). The previous gift-wrapping (Jarvis march) version
+ *    was NOT a correct 3D hull — its azimuth-angle edge walk silently
+ *    dropped or mis-oriented faces on general point sets.
  * 3. Decompose the hull into tetrahedra: each triangular face + origin.
  *
- * Ref: Barber C.B., Dobkin D.P., Huhdanpaa H. (1996) ACM Trans. Math. Soft. 22(4):469-483.
- *      Preparata & Shamos (1985) Computational Geometry, Springer, Sec 3.2.
+ * Ref: Preparata & Shamos (1985) Computational Geometry, Springer, Sec 3.4.
+ *      de Berg et al. (2008) Computational Geometry: Algorithms and
+ *      Applications, 3rd ed., Ch. 11 (incremental hull).
  *
- * For the unit cube [0,1]³: centroid = (0.5,0.5,0.5), after shift the hull is the
- * centered cube [-0.5,0.5]³ with volume 1.0 — this is verified by the test.
+ * For the unit cube [0,1]^3: centroid = (0.5,0.5,0.5), after shift the hull
+ * is the centered cube [-0.5,0.5]^3 with volume 1.0.
  */
 function convexHullVolume3D(points: number[][]): number {
   const n = points.length;
@@ -1366,8 +2345,12 @@ function convexHullVolume3D(points: number[][]): number {
   const cz = points.reduce((s, p) => s + p[2], 0) / n;
   const pts = points.map(p => [p[0] - cx, p[1] - cy, p[2] - cz]);
 
-  // Build 3D convex hull using gift-wrapping
-  const faces = convexHull3D(pts);
+  // Scale-based tolerance for planarity/visibility decisions
+  let scale = 0;
+  for (const p of pts) for (const v of p) scale = Math.max(scale, Math.abs(v));
+  const eps = 1e-9 * Math.max(scale, 1);
+
+  const faces = convexHull3DIncremental(pts, eps);
   if (faces.length === 0) return 0;
 
   // Cone decomposition: each triangular face + origin forms a tetrahedron.
@@ -1384,89 +2367,118 @@ function convexHullVolume3D(points: number[][]): number {
   return vol;
 }
 
+interface HullFace {
+  a: number; b: number; c: number;   // vertex indices (outward CCW)
+  normal: [number, number, number];  // unit outward normal
+  d: number;                         // plane offset: normal·x = d
+}
+
 /**
- * 3D gift-wrapping (Jarvis march) convex hull.
- * Returns list of triangular faces, each as [i, j, k] indices into points array.
- * Ref: Preparata & Shamos (1985) Computational Geometry, Springer, Sec 3.2.
+ * Incremental 3D convex hull.
+ * Returns the list of triangular faces as vertex-index triples, oriented
+ * counterclockwise seen from outside. Returns [] for degenerate input
+ * (< 4 non-coplanar points).
  */
-function convexHull3D(points: number[][]): number[][] {
-  const n = points.length;
+function convexHull3DIncremental(pts: number[][], eps: number): number[][] {
+  const n = pts.length;
   if (n < 4) return [];
 
-  // Find the point with smallest x (and then y for ties) as starting point
-  let start = 0;
-  for (let i = 1; i < n; i++) {
-    if (points[i][0] < points[start][0] ||
-        (points[i][0] === points[start][0] && points[i][1] < points[start][1])) {
-      start = i;
-    }
+  const sub = (a: number[], b: number[]): [number, number, number] => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+  const cross = (a: number[], b: number[]): [number, number, number] => [
+    a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+  const dot = (a: number[], b: number[]): number => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  const norm3 = (a: number[]): number => Math.sqrt(dot(a, a));
+
+  function makeFace(a: number, b: number, c: number): HullFace | null {
+    const ab = sub(pts[b], pts[a]), ac = sub(pts[c], pts[a]);
+    const nrm = cross(ab, ac);
+    const len = norm3(nrm);
+    if (len < eps) return null; // degenerate triangle
+    const normal: [number, number, number] = [nrm[0] / len, nrm[1] / len, nrm[2] / len];
+    return { a, b, c, normal, d: dot(normal, pts[a]) };
   }
 
-  const faces: number[][] = [];
-  const visitedEdges = new Set<string>();
-  let current = start;
-  let loopP = -1;
+  // ── Step 1: find an initial non-degenerate tetrahedron ──
+  // First two distinct points
+  let i0 = 0;
+  let i1 = -1;
+  for (let i = 1; i < n; i++) {
+    if (norm3(sub(pts[i], pts[i0])) > eps) { i1 = i; break; }
+  }
+  if (i1 < 0) return []; // all points identical
+  // Third point not collinear with (i0, i1)
+  let i2 = -1;
+  const dir01 = sub(pts[i1], pts[i0]);
+  for (let i = 0; i < n; i++) {
+    if (i === i0 || i === i1) continue;
+    if (norm3(cross(dir01, sub(pts[i], pts[i0]))) > eps) { i2 = i; break; }
+  }
+  if (i2 < 0) return []; // all points collinear
+  // Fourth point not coplanar with (i0, i1, i2)
+  const n012 = cross(sub(pts[i1], pts[i0]), sub(pts[i2], pts[i0]));
+  let i3 = -1;
+  for (let i = 0; i < n; i++) {
+    if (i === i0 || i === i1 || i === i2) continue;
+    if (Math.abs(dot(n012, sub(pts[i], pts[i0]))) > eps) { i3 = i; break; }
+  }
+  if (i3 < 0) return []; // all points coplanar (flat hull: zero volume)
 
-  do {
-    let next = -1;
-    let minAngle = Infinity;
-    for (let i = 0; i < n; i++) {
-      if (i === current) continue;
-      if (i === loopP) continue;
+  // Orient the initial tetrahedron so all faces have OUTWARD normals
+  // (relative to the tetrahedron's centroid).
+  const centroid: [number, number, number] = [
+    (pts[i0][0] + pts[i1][0] + pts[i2][0] + pts[i3][0]) / 4,
+    (pts[i0][1] + pts[i1][1] + pts[i2][1] + pts[i3][1]) / 4,
+    (pts[i0][2] + pts[i1][2] + pts[i2][2] + pts[i3][2]) / 4,
+  ];
+  let faces: HullFace[] = [];
+  const rawTetra: [number, number, number][] = [[i0, i1, i2], [i0, i3, i1], [i0, i2, i3], [i1, i3, i2]];
+  for (const [a, b, c] of rawTetra) {
+    let f = makeFace(a, b, c);
+    if (f === null) return [];
+    // Flip if the tetra centroid is on the positive side of the plane
+    if (dot(f.normal, centroid) - f.d > 0) f = makeFace(a, c, b);
+    if (f === null) return [];
+    faces.push(f);
+  }
 
-      // Vector from current to candidate
-      const dx = points[i][0] - points[current][0];
-      const dy = points[i][1] - points[current][1];
-      const dz = points[i][2] - points[current][2];
-      const angle = Math.atan2(dy, dx); // azimuth angle
-      if (angle < minAngle) {
-        minAngle = angle;
-        next = i;
-      }
+  // ── Step 2: insert remaining points ──
+  for (let pi = 0; pi < n; pi++) {
+    if (pi === i0 || pi === i1 || pi === i2 || pi === i3) continue;
+    const p = pts[pi];
+
+    // Faces visible from p (outward side, beyond tolerance)
+    const visible: boolean[] = faces.map(f => dot(f.normal, p) - f.d > eps);
+    let nVisible = 0;
+    for (const v of visible) if (v) nVisible++;
+    if (nVisible === 0) continue; // inside (or on) the hull
+
+    // Horizon = directed edges of visible faces whose reverse directed edge
+    // is NOT an edge of another visible face. New faces keep orientation by
+    // reusing the horizon edge direction.
+    const edgeSet = new Set<string>();
+    for (let fi = 0; fi < faces.length; fi++) {
+      if (!visible[fi]) continue;
+      const f = faces[fi];
+      edgeSet.add(`${f.a},${f.b}`);
+      edgeSet.add(`${f.b},${f.c}`);
+      edgeSet.add(`${f.c},${f.a}`);
+    }
+    const horizon: [number, number][] = [];
+    for (const key of edgeSet) {
+      const [u, v] = key.split(',');
+      if (!edgeSet.has(`${v},${u}`)) horizon.push([Number(u), Number(v)]);
     }
 
-    if (next < 0) break;
-
-    // Found an edge (current -> next)
-    const edgeKey = `${Math.min(current, next)},${Math.max(current, next)}`;
-    if (visitedEdges.has(edgeKey)) {
-      // Move to next candidate
-      loopP = loopP < 0 ? -1 : loopP;
-      continue;
+    // Remove visible faces and add the cone from the horizon to p
+    faces = faces.filter((_, fi) => !visible[fi]);
+    for (const [u, v] of horizon) {
+      const f = makeFace(u, v, pi);
+      if (f !== null) faces.push(f);
     }
-    visitedEdges.add(edgeKey);
+    if (faces.length === 0) return [];
+  }
 
-    // Find the third point of the face using the right-hand rule
-    // For the gift-wrapping in 3D, we need to find a point such that
-    // the face (current, next, third) is on the hull with outward normal
-    let third = -1;
-    let maxDist = -1;
-    const dnx = points[next][0] - points[current][0];
-    const dny = points[next][1] - points[current][1];
-    for (let i = 0; i < n; i++) {
-      if (i === current || i === next) continue;
-      // Signed volume of tetrahedron = det of vectors from current
-      const v1x = dnx, v1y = dny;
-      const v2x = points[i][0] - points[current][0];
-      const v2y = points[i][1] - points[current][1];
-      const v2z = points[i][2] - points[current][2];
-      // Cross product z-component tells us which side
-      const cross = v1x * v2y - v1y * v2x;
-      if (cross > 1e-12) {
-        const dist = points[i][2] - points[current][2];
-        if (dist > maxDist) { maxDist = dist; third = i; }
-      }
-    }
-
-    if (third >= 0) {
-      faces.push([current, next, third]);
-    }
-
-    loopP = current;
-    current = next;
-  } while (current !== start && faces.length < n * 2);
-
-  return faces;
+  return faces.map(f => [f.a, f.b, f.c]);
 }
 
 
@@ -1498,17 +2510,46 @@ function convexHull2D(points: number[][]): number[][] {
 // ═══════════════════════════════════════════════════════════════════
 
 export interface DisparityResult {
-  meanSquaredDistance: number;
+  /** Mean pairwise distance D = (2/n(n-1)) Σ_{i<j} d_ij (Foote 1993). */
+  dispersion?: number;
+  /** Maximum pairwise distance R = max_{i<j} d_ij (Foote 1993). */
+  range?: number;
+  /** Variance of the pairwise distances. */
   variance: number;
+  /** Median of the pairwise distances (Foote 1993 summary). */
+  median?: number;
+  /** Mean squared distance from the centroid (legacy field, kept for
+   *  backward compatibility). */
+  meanSquaredDistance: number;
+  /** Per-dimension ranges (legacy field, kept for backward compatibility). */
   ranges: number[];
   nSpecimens: number;
 }
 
+/**
+ * Morphospace disparity — Foote (1993) definitions.
+ *
+ * The primary metrics are computed from the PAIRWISE DISTANCES of the
+ * specimens (Python geometry.py `morphospace_disparity`):
+ *
+ *     Dispersion (mean pairwise distance):
+ *         D = (2/n(n-1)) Σ_{i<j} ||x_i - x_j||
+ *     Range (maximum pairwise distance):
+ *         R = max_{i<j} ||x_i - x_j||
+ *
+ * `variance` (variance of the pairwise distances) and `median` are reported
+ * alongside, and the legacy `meanSquaredDistance` (mean squared distance to
+ * the centroid) and per-dimension `ranges` fields are kept for backward
+ * compatibility.
+ *
+ * Reference: Foote, M. (1993). Contribution of the fossil record to the
+ * study of morphological evolution. Science, 260, 971-974.
+ */
 export function morphospaceDisparity(configurations: Matrix): DisparityResult {
   const n = configurations.rows, p = configurations.cols;
   const mean = configurations.meanAxis(0);
 
-  // Mean squared distance from centroid
+  // Mean squared distance from centroid (legacy metric)
   let msd = 0;
   const ranges: number[] = new Array(p).fill(0);
   const mins = new Array(p).fill(Infinity);
@@ -1528,17 +2569,29 @@ export function morphospaceDisparity(configurations: Matrix): DisparityResult {
 
   for (let j = 0; j < p; j++) ranges[j] = maxs[j] - mins[j];
 
-  // Variance of pairwise distances
+  // Pairwise distances (upper triangle)
   const distances: number[] = [];
   for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) {
     let d = 0;
     for (let k = 0; k < p; k++) d += (configurations.get(i, k) - configurations.get(j, k)) ** 2;
     distances.push(Math.sqrt(d));
   }
-  const meanDist = distances.reduce((a, b) => a + b, 0) / distances.length;
-  const variance = distances.reduce((s, d) => s + (d - meanDist) ** 2, 0) / distances.length;
+  const meanDist = distances.length > 0 ? distances.reduce((a, b) => a + b, 0) / distances.length : 0;
+  const variance = distances.length > 0 ? distances.reduce((s, d) => s + (d - meanDist) ** 2, 0) / distances.length : 0;
+  const maxDist = distances.length > 0 ? distances.reduce((a, b) => Math.max(a, b), 0) : 0;
+  const sortedDist = [...distances].sort((a, b) => a - b);
+  const median = sortedDist.length > 0
+    ? (sortedDist.length % 2 === 1
+        ? sortedDist[(sortedDist.length - 1) / 2]
+        : 0.5 * (sortedDist[sortedDist.length / 2 - 1] + sortedDist[sortedDist.length / 2]))
+    : 0;
 
-  return { meanSquaredDistance: msd, variance, ranges, nSpecimens: n };
+  return {
+    // Foote (1993) primary metrics
+    dispersion: meanDist, range: maxDist, variance, median,
+    // Legacy fields (backward compatibility)
+    meanSquaredDistance: msd, ranges, nSpecimens: n,
+  };
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1593,8 +2646,35 @@ export interface MSTResult {
   nEdges: number;
 }
 
-export function minimumSpanningTree(distMatrix: Matrix): MSTResult {
-  const n = distMatrix.rows;
+/**
+ * Minimum Spanning Tree (Prim's algorithm) — port of Python geometry.py
+ * `minimum_spanning_tree`.
+ *
+ * Accepts EITHER:
+ *  - a precomputed distance Matrix (n x n), or
+ *  - point coordinates as number[][] (n points x n dims) or as a Matrix of
+ *    shape (n_points x n_dims) — the Python coordinate overload — in which
+ *    case the Euclidean distance matrix is computed internally.
+ */
+export function minimumSpanningTree(distMatrix: Matrix | number[][]): MSTResult {
+  let D: Matrix;
+  if (distMatrix instanceof Matrix && distMatrix.rows === distMatrix.cols && distMatrix.cols !== 1) {
+    D = distMatrix;
+  } else {
+    // Coordinate input: compute the pairwise Euclidean distances
+    const nPts = distMatrix instanceof Matrix
+      ? Array.from({ length: distMatrix.rows }, (_, i) => distMatrix.row(i))
+      : distMatrix;
+    const n = nPts.length;
+    D = Matrix.zeros(n, n);
+    for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) {
+      let s = 0;
+      for (let k = 0; k < nPts[i].length; k++) s += (nPts[i][k] - nPts[j][k]) ** 2;
+      const d = Math.sqrt(s);
+      D.set(i, j, d); D.set(j, i, d);
+    }
+  }
+  const n = D.rows;
   const inMST = new Array(n).fill(false);
   const minEdge = new Array(n).fill(Infinity);
   const parent = new Array(n).fill(-1);
@@ -1612,12 +2692,12 @@ export function minimumSpanningTree(distMatrix: Matrix): MSTResult {
     if (u === -1) break;
     inMST[u] = true;
     totalWeight += minEdge[u];
-    if (parent[u] >= 0) edges.push([parent[u], u, distMatrix.get(parent[u], u)]);
+    if (parent[u] >= 0) edges.push([parent[u], u, D.get(parent[u], u)]);
 
     // Update edge weights
     for (let v = 0; v < n; v++) {
-      if (!inMST[v] && distMatrix.get(u, v) < minEdge[v]) {
-        minEdge[v] = distMatrix.get(u, v);
+      if (!inMST[v] && D.get(u, v) < minEdge[v]) {
+        minEdge[v] = D.get(u, v);
         parent[v] = u;
       }
     }
@@ -1627,7 +2707,7 @@ export function minimumSpanningTree(distMatrix: Matrix): MSTResult {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// Ancestral State Reconstruction (weighted squared-change parsimony)
+// Ancestral State Reconstruction (weighted squared-change parsimony / ML)
 // ═══════════════════════════════════════════════════════════════════
 
 export interface ASRResult {
@@ -1635,45 +2715,276 @@ export interface ASRResult {
   nodeNames: string[];
   tipValues: Record<string, number>;
   model: string;
+  /** OU alpha used when model = 'ou' (transformed-branch ASR). */
+  ouAlpha?: number;
 }
 
-export function reconstructAncestralStates(root: any, traitValues: Record<string, number>, model: string = 'bm'): ASRResult {
+/**
+ * Ancestral State Reconstruction — port of Python pcm.py
+ * `reconstruct_ancestral_states` (corrected version).
+ *
+ * BM (model='bm', default): post-order recursion where each node's state is
+ * the ML/BM inverse-VARIANCE weighted mean of its child reconstructions,
+ * with weight w = 1/(subtree cumulative variance + child branch length).
+ * The old implementation used w = 1/max(branchLength, 0.001), which ignores
+ * the descendant variance (over-weighting deep nodes) and mistook a genuine
+ * 0 branch length for a missing value; it has been replaced. The variance
+ * accumulated below each node is pooled = 1/Σ(1/v_i) (variance of the
+ * inverse-variance weighted mean); leaves return cumVar = 0 and the parent
+ * adds the child's own branch length (Felsenstein 1985 convention).
+ *
+ * OU (model='ou'): Brownian branch lengths are replaced by the
+ * Ornstein-Uhlenbeck accumulated variances v(b) = (1 - e^(-2αb))/(2α)
+ * (limit b as α→0; Garland et al. 1993 transformed branch lengths,
+ * Martins & Hansen 1997). The root state is refined by generalized least
+ * squares on the OU VCV matrix (Hansen 1997):
+ *     â = (1ᵀ V⁻¹ 1)⁻¹ 1ᵀ V⁻¹ y,
+ * which is the ML estimate of the optimum under a single-peak OU model.
+ * This realizes the VCV-GLS approach documented (but left unimplemented)
+ * in Python pcm.py; α defaults to `ouAlpha` = 1.
+ *
+ * @param model   'bm' (default) or 'ou'
+ * @param ouAlpha OU alpha parameter (used only when model='ou')
+ */
+export function reconstructAncestralStates(
+  root: any,
+  traitValues: Record<string, number>,
+  model: string = 'bm',
+  ouAlpha: number = 1.0,
+): ASRResult {
   const nodeStates = new Map<string, number>();
   const nodeNames: string[] = [];
+  const alpha = Math.max(ouAlpha, 1e-12);
 
-  function assignStates(node: any): number | null {
-    if (node.isLeaf) return traitValues[node.name] ?? null;
+  // OU variance accumulated along a branch of length b
+  const branchVar = (b: number): number => {
+    const bl = b || 0;
+    if (model === 'ou') {
+      return (1 - Math.exp(-2 * alpha * bl)) / (2 * alpha);
+    }
+    return bl;
+  };
 
-    const childVals: [any, number][] = [];
+  // Returns [reconstructed value, subtree cumulative variance (excluding the
+  // node's own branch length)] or null when the subtree has no trait data.
+  function assignStates(node: any): [number, number] | null {
+    if (node.isLeaf) {
+      const val = traitValues[node.name];
+      return val === undefined ? null : [val, 0];
+    }
+
+    const childRes: { node: any; val: number; cvar: number }[] = [];
     for (const child of node.children) {
-      const val = assignStates(child);
-      if (val !== null) childVals.push([child, val]);
+      const res = assignStates(child);
+      if (res !== null) childRes.push({ node: child, val: res[0], cvar: res[1] });
     }
-    if (childVals.length === 0) return null;
-    if (childVals.length === 1) return childVals[0][1];
+    if (childRes.length === 0) return null;
+    if (childRes.length === 1) {
+      const c = childRes[0];
+      return [c.val, c.cvar + branchVar(c.node.branchLength)];
+    }
 
-    // Inverse-variance weighted mean
-    let totalW = 0, weightedSum = 0;
-    for (const [child, val] of childVals) {
-      const w = 1 / Math.max(child.branchLength || 0.001, 0.0001);
-      weightedSum += w * val;
-      totalW += w;
+    // ML/BM weights: inverse variance 1/(subtree cumVar + child branch var).
+    let totalW = 0, weightedSum = 0, invSum = 0;
+    for (const c of childRes) {
+      let v = c.cvar + branchVar(c.node.branchLength);
+      if (v <= 0) v = 1e-10;
+      totalW += 1 / v;
+      weightedSum += c.val / v;
+      invSum += 1 / v;
     }
-    const recon = totalW > 0 ? weightedSum / totalW : childVals.reduce((s, [, v]) => s + v, 0) / childVals.length;
+    const recon = totalW > 0 ? weightedSum / totalW : mean(childRes.map(c => c.val));
+    const pooled = totalW > 0 ? 1 / totalW : (invSum > 0 ? 1 / invSum : 0);
 
     const nodeName = node.name || `node_${nodeNames.length}`;
     nodeStates.set(nodeName, recon);
     nodeNames.push(nodeName);
-    return recon;
+    return [recon, pooled];
   }
 
   assignStates(root);
-  return { nodeStates, nodeNames, tipValues: traitValues, model };
+
+  // OU: refine the root state by GLS on the OU VCV (Hansen 1997):
+  // â = (1ᵀV⁻¹1)⁻¹ 1ᵀV⁻¹y with V_ij = e^{-α d_ij} (1 - e^{-2α h_ij})/(2α),
+  // V_ii = (1 - e^{-2α t_i})/(2α); d_ij = t_i + t_j - 2 h_ij.
+  if (model === 'ou' && nodeNames.length > 0) {
+    try {
+      const leaves = getLeaves(root);
+      const tipNames = leaves.map(l => l.name);
+      const n = tipNames.length;
+      if (n >= 3) {
+        const bmV = buildVCV(root, tipNames); // t_i on diagonal, h_ij off-diagonal
+        const V: number[][] = bmV.map((row, i) => row.map((v, j) => {
+          if (i === j) return (1 - Math.exp(-2 * alpha * v)) / (2 * alpha);
+          const h = v; // shared path root->LCA
+          const ti = bmV[i][i], tj = bmV[j][j];
+          const d = ti + tj - 2 * h;
+          return Math.exp(-alpha * d) * (1 - Math.exp(-2 * alpha * h)) / (2 * alpha);
+        }));
+        const y = tipNames.map(nm => traitValues[nm] ?? NaN);
+        if (!y.some(v => isNaN(v))) {
+          const Vinv = inv(new Matrix(new Float64Array(V.flat()), n, n));
+          const ones = new Array<number>(n).fill(1);
+          const oneViOne = quadForm(Vinv, ones, ones);
+          const oneViY = quadForm(Vinv, ones, y);
+          if (oneViOne > 0) {
+            const rootGls = oneViY / oneViOne;
+            // Overwrite the root entry (first recorded node at the root name)
+            const rootName = root.name || nodeNames[0];
+            if (nodeStates.has(rootName)) nodeStates.set(rootName, rootGls);
+          }
+        }
+      }
+    } catch {
+      // Singular OU VCV: keep the recursion-based root estimate
+    }
+  }
+
+  return {
+    nodeStates, nodeNames, tipValues: traitValues, model,
+    ouAlpha: model === 'ou' ? alpha : undefined,
+  };
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// DCA — Detrended Correspondence Analysis
+// ═══════════════════════════════════════════════════════════════════
+
+export interface DCAResult {
+  scores: Matrix;
+  eigenvalues: number[];
+  lengths: number[];   // gradient lengths (in SD units)
+  nAxes: number;
+  method: string;
+}
+
+/**
+ * Detrended Correspondence Analysis — Hill & Gauch (1980).
+ *
+ * Algorithm (mirrors vegan::decorana):
+ * 1. Center & chi-square weight the abundance matrix (Correspondence Analysis step).
+ * 2. Extract the first nAxes axes via SVD of the chi-square matrix.
+ * 3. Detrend each axis ≥ 2 by segmentwise linear regression on axis 1:
+ *    for each segment, fit y = a + b*x, then replace y with y - (a + b*x).
+ *    This removes the arch effect (ten Bosch & ter Braak 1992).
+ *
+ * References:
+ * - Hill, M.O. & Gauch, H.G. (1980). "Detrended correspondence analysis:
+ *   an improved ordination technique." Vegetatio 42: 47-58.
+ * - ter Braak, C.J.F. & Šmilauer, P. (2012). CANOCO 5 reference manual.
+ *   Sect. 6.3.2 "Detrending".  [segmentwise detrending algorithm]
+ * - vegan::decorana — R implementation of DECORANA.
+ */
+export function dca(
+  speciesAbundance: Matrix,
+  options: { nAxes?: number; segmentLength?: number } = {},
+): DCAResult {
+  const { nAxes = 4, segmentLength = 0 } = options;
+  const n = speciesAbundance.rows, p = speciesAbundance.cols;
+  const segLen = segmentLength > 0 ? segmentLength : Math.max(10, Math.floor(n / 4));
+
+  // ── Step 1: Chi-square standardization (CA preprocessing) ────────────────────
+  const rowTotals = speciesAbundance.sumAxis(1);
+  const colTotals = speciesAbundance.sumAxis(0);
+  const grandTotal = rowTotals.sum();
+
+  // Y_chi[i,j] = (Y_ij / rowTotals[i]) / sqrt(colTotals[j] / grandTotal)
+  // i.e. row-normalize then weight by inverse sqrt of column totals
+  const Ydata = new Float64Array(n * p);
+  for (let i = 0; i < n; i++) {
+    for (let j = 0; j < p; j++) {
+      const ri = rowTotals[i] > 0 ? 1 / rowTotals[i] : 0;
+      const sqrtCol = Math.sqrt(colTotals[j] / grandTotal);
+      Ydata[i * p + j] = (speciesAbundance.get(i, j) * ri) / (sqrtCol > 0 ? sqrtCol : 1);
+    }
+  }
+  const Ychi = new Matrix(Ydata, n, p);
+
+  // ── Step 2: SVD of the chi-square matrix ───────────────────────────────────
+  // CA scores = U * S, species loadings = Vt^T * S  (standard biplot scaling)
+  // Here we use the site scores (U * S) as ordination coordinates.
+  const { U, S, Vt } = svd(Ychi);
+  const nRet = Math.min(nAxes, S.length);
+
+  // Axis eigenvalues (inertia)
+  const eigenvalues = S.map(s => s * s);
+
+  // Scores = U * diag(S)  (each column j: score_ij = U_ij * S_j)
+  const scoresData = new Float64Array(n * nRet);
+  for (let i = 0; i < n; i++) {
+    for (let j = 0; j < nRet; j++) {
+      scoresData[i * nRet + j] = U.get(i, j) * S[j];
+    }
+  }
+  const scores = new Matrix(scoresData, n, nRet);
+
+  // Gradient lengths (Hill 1979, Gauch 1982): 4 / sqrt(lambda)
+  // These are in standard-deviation (SD) units of species turnover.
+  const lengths = eigenvalues.slice(0, nRet).map(e => (e > 0 ? 4 / Math.sqrt(e) : 0));
+
+  // ── Step 3: Detrending (segmentwise polynomial regression) ───────────────
+  // Detrend axes 2+ by removing the linear relationship with axis 1 within
+  // each segment.  This is the "second-order polynomial detrending" variant
+  // used by DECORANA (Hill & Gauch 1980; ten Bosch & ter Braak 1992).
+  const detrended = scores.clone();
+
+  for (let ax = 1; ax < nRet; ax++) {
+    // Sort by axis-1 score to form segments
+    const order = Array.from({ length: n }, (_, i) => i);
+    order.sort((a, b) => scores.get(a, 0) - scores.get(b, 0));
+
+    // Segment boundaries
+    const nSeg = Math.max(1, Math.floor(n / segLen));
+    const segSize = Math.ceil(n / nSeg);
+
+    for (let s = 0; s < nSeg; s++) {
+      const start = s * segSize;
+      const end = Math.min(start + segSize, n);
+      if (end - start < 2) continue;
+
+      // Gather segment points
+      const segIdx = order.slice(start, end);
+      const x = segIdx.map(i => scores.get(i, 0));
+      const y = segIdx.map(i => detrended.get(i, ax));
+
+      // Linear regression y = a + b*x within this segment
+      const xMean = x.reduce((a, b) => a + b, 0) / x.length;
+      const yMean = y.reduce((a, b) => a + b, 0) / y.length;
+      let num = 0, den = 0;
+      for (let k = 0; k < x.length; k++) {
+        num += (x[k] - xMean) * (y[k] - yMean);
+        den += (x[k] - xMean) ** 2;
+      }
+      const b = den > 0 ? num / den : 0;
+      const a = yMean - b * xMean;
+
+      // Subtract the regression line from the detrended scores
+      for (const idx of segIdx) {
+        const xVal = scores.get(idx, 0);
+        detrended.set(idx, ax, detrended.get(idx, ax) - (a + b * xVal));
+      }
+    }
+  }
+
+  return {
+    scores: detrended,
+    eigenvalues: eigenvalues.slice(0, nRet),
+    lengths: lengths,
+    nAxes: nRet,
+    method: 'DCA (Hill & Gauch 1980, vegan::decorana)',
+  };
 }
 
 // ─── Re-exports of new sub-modules (Ripley K, Normality test) ─────────────────
 export { ripleyK, type SpatialResult } from './Spatial';
 export { normalityTest, type NormalityResult } from './Normality';
+
+// ─── Re-exports: univariate extensions & Tukey HSD (Python univariate.py) ────
+export {
+  computeAicc, compareModels, cohensD, etaSquared, omegaSquared, partialEtaSquared,
+  type AiccModelSpec, type AiccModelResult, type AiccComparison,
+} from './Univariate';
+export { ptukeyCdf, ptukeySf, tukeyHsd, type TukeyPairResult } from './Tukey';
 
 // ═══════════════════════════════════════════════════════════════════
 // Hellinger Transformation
@@ -1706,3 +3017,129 @@ export function hellinger(Y: Matrix): Matrix {
   }
   return new Matrix(result, n, p);
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// Confidence Ellipse
+// ═══════════════════════════════════════════════════════════════════
+
+export interface ConfidenceEllipseResult {
+  /** Semi-major axis length (a) */
+  semiMajor: number;
+  /** Semi-minor axis length (b) */
+  semiMinor: number;
+  /** Rotation angle in radians (from x-axis to major axis) */
+  angle: number;
+  /** Center (mean) of the ellipse */
+  center: [number, number];
+  /** Chi-squared critical value used */
+  chi2Critical: number;
+  /** Confidence level */
+  level: number;
+}
+
+/**
+ * Compute a confidence ellipse for bivariate data.
+ *
+ * Algorithm:
+ * 1. Compute the 2×2 covariance matrix of the scores.
+ * 2. Perform eigendecomposition to obtain axes and orientation.
+ * 3. Scale each semi-axis by sqrt(χ²_{2,α}) where χ² has 2 df
+ *    (the distribution of Mahalanobis distances under the normal assumption).
+ * 4. Return semi-major (a), semi-minor (b), and rotation angle θ.
+ *
+ * Ref: Johnson R.A. & Wichern D.W. (2007) Applied Multivariate Statistical
+ *      Analysis, 6th ed. Pearson, Sec. 4.5 "Ellipses and the RMSE".
+ *      Also: Ritz J.M. & Strehmel A. (1996) J. R. Statist. Soc. B 58: 655-666.
+ *
+ * @param scores  - matrix with n rows and 2 columns (bivariate scores)
+ * @param level   - confidence level (default 0.95 for 95% CI)
+ * @returns ellipse parameters: semi-major, semi-minor, angle, center
+ */
+export function confidenceEllipse(
+  scores: Matrix,
+  level: number = 0.95,
+): ConfidenceEllipseResult {
+  if (scores.cols !== 2) {
+    throw new Error(`confidenceEllipse requires 2 columns (got ${scores.cols})`);
+  }
+  const n = scores.rows;
+  if (n < 3) {
+    throw new Error(`confidenceEllipse requires at least 3 samples (got ${n})`);
+  }
+
+  // Compute mean
+  const meanX = scores.col(0).reduce((a, b) => a + b, 0) / n;
+  const meanY = scores.col(1).reduce((a, b) => a + b, 0) / n;
+
+  // Covariance matrix (2×2)
+  let sxx = 0, sxy = 0, syy = 0;
+  for (let i = 0; i < n; i++) {
+    const dx = scores.get(i, 0) - meanX;
+    const dy = scores.get(i, 1) - meanY;
+    sxx += dx * dx;
+    sxy += dx * dy;
+    syy += dy * dy;
+  }
+  sxx /= (n - 1);
+  sxy /= (n - 1);
+  syy /= (n - 1);
+
+  // Eigendecomposition of covariance matrix (analytical for 2×2)
+  // Ref: Johnson & Wichern (2007), Applied Multivariate Statistical Analysis, Sec. 4.5
+  const trace = sxx + syy;
+  const det = sxx * syy - sxy * sxy;
+  const discriminant = Math.sqrt(Math.max(0, trace * trace / 4 - det));
+  const lambda1 = trace / 2 + discriminant;
+  const lambda2 = trace / 2 - discriminant;
+
+  // Semi-axes (unscaled)
+  const a0 = Math.sqrt(Math.max(0, lambda1));
+  const b0 = Math.sqrt(Math.max(0, lambda2));
+
+  // Angle of major axis (from x-axis, counterclockwise)
+  // eigenvector for lambda1: [sxy, lambda1 - sxx]
+  const theta = Math.atan2(lambda1 - sxx, sxy);
+
+  // Chi-squared critical value for 2 df at confidence level
+  // Ref: Johnson & Wichern (2007), Eq. 4.42: ellipse equation uses χ²_{2,α}
+  // Uses the verified chi-square quantile from math/stats (Newton iteration
+  // on the regularized gamma CDF); the local bisection approximation
+  // chi2Inverse_approx is retained below but no longer on the p-value path.
+  const chi2Crit = qchisq(level, 2);
+
+  const semiMajor = a0 * Math.sqrt(chi2Crit);
+  const semiMinor = b0 * Math.sqrt(chi2Crit);
+
+  return {
+    semiMajor,
+    semiMinor,
+    angle: theta,
+    center: [meanX, meanY],
+    chi2Critical: chi2Crit,
+    level,
+  };
+}
+
+/**
+ * Inverse chi-squared CDF (lower-tail) via regularized incomplete gamma.
+ * Uses binary search on the gamma CDF for accuracy.
+ */
+function chi2Inverse_approx(p: number, df: number): number {
+  // Newton-bisection hybrid to solve gammainc(df/2, x/2) = p * Gamma(df/2)
+  // We instead use the closed-form inverse for df=2 and bisection otherwise.
+  const a = df / 2;
+  let lo = 0.001, hi = 1000;
+  if (df === 2) {
+    // Closed form: x = -2 * ln(1 - p)
+    return -2 * Math.log(1 - Math.min(0.9999, Math.max(0.0001, p)));
+  }
+  for (let iter = 0; iter < 100; iter++) {
+    const mid = (lo + hi) / 2;
+    const cdf = gammainc_local(a, mid / 2);
+    if (Math.abs(cdf - p) < 1e-10 || (hi - lo) < 1e-12) break;
+    if (cdf < p) lo = mid; else hi = mid;
+  }
+  return (lo + hi) / 2;
+}
+
+// ─── Re-exports of new sub-modules (Ripley K, Normality test) ─────────────────

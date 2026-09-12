@@ -4,7 +4,7 @@
  */
 @Component
 export struct ExtinctionDialog {
-  @State visible: boolean = false;
+  @Link visible: boolean = false;
   @State methodIdx: number = 0;
   @State confidence_level: number = 0.95;
   @State showAdvanced: boolean = false;
@@ -39,6 +39,6 @@ export struct ExtinctionDialog {
         Button('Cancel').backgroundColor('#95A5A6').fontColor('#FFFFFF').onClick(() => { this.visible = false; }).margin({ right: 12 })
         Button('Run Analysis').type(ButtonType.Capsule).backgroundColor('#3498DB').fontColor('#FFFFFF').onClick(() => { this.onConfirm({ method: this.methodOpts[this.methodIdx], confidence_level: this.confidence_level }); this.visible = false; })
       }.width('100%').justifyContent(FlexAlign.End)
-    }.padding(24).width(480).borderRadius(12)
+    }.padding(24).width('92%').constraintSize({ maxWidth: 480 }).borderRadius(12)
   }
 }

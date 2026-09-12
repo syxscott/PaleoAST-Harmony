@@ -1,188 +1,123 @@
-"""
-PaleoAST Internationalization Module
+/**
+ * PaleoAST Internationalization Module — ArkTS port of config/i18n/
+ *
+ * Provides Chinese/English language switching for the application.
+ *
+ * Usage:
+ *   import { t, setLanguage, getLanguage, getTranslator } from '../config/i18n';
+ *
+ *   // Simple translation
+ *   const label = t('dialog.pca.title');
+ *
+ *   // With format arguments  ({0}, {1}, ... placeholders)
+ *   t('status.loaded_rows', rows)
+ *
+ *   // Language switching
+ *   setLanguage('zh');
+ */
 
-Provides Chinese/English language switching for the application.
+import { TRANSLATIONS_EN } from './i18n/translations_en';
+import { TRANSLATIONS_ZH } from './i18n/translations_zh';
 
-Usage:
-    from config.i18n import _
+export type Language = 'en' | 'zh';
 
-    # Simple translation
-    label = _("PCA Scores Plot")
+type LanguageChangeListener = (lang: Language) => void;
 
-    # With format arguments
-    label = _("Method: {0}").format(method_name)
+/** Format '{0}', '{1}', ... placeholders the same way Python's str.format does. */
+function formatMessage(template: string, args: (string | number)[]): string {
+  return template.replace(/\{(\d+)\}/g, (match, index: string) => {
+    const i = parseInt(index, 10);
+    return i >= 0 && i < args.length ? String(args[i]) : match;
+  });
+}
 
-    # Language switching
-    from config.i18n import get_translator
-    get_translator().set_language("zh")
+/** Base translator without UI-framework dependency. */
+export class TranslatorBase {
+  protected _translations: Map<Language, Record<string, string>> = new Map();
+  protected _currentLang: Language = 'en';
 
-Author: PaleoAST Development Team
-"""
+  constructor() {
+    this._translations.set('en', TRANSLATIONS_EN);
+    this._translations.set('zh', TRANSLATIONS_ZH);
+  }
 
-from __future__ import annotations
+  /** Translate a key; falls back to English then to the key itself. */
+  translate(key: string): string {
+    const dict = this._translations.get(this._currentLang);
+    if (dict && dict[key] !== undefined) return dict[key];
+    const en = this._translations.get('en');
+    if (en && en[key] !== undefined) return en[key];
+    return key;
+  }
 
-import threading
+  /** Alias of translate() for Qt-style call sites. */
+  tr(key: string): string {
+    return this.translate(key);
+  }
 
-# PyQt6 imports - must be available (i18n initialized after QApplication)
-try:
-    from PyQt6.QtCore import QObject, pyqtSignal
+  setLanguage(lang: Language): void {
+    if (this._translations.has(lang) || lang === 'en' || lang === 'zh') {
+      this._currentLang = lang;
+    }
+  }
 
-    _HAS_QT = True
-except ImportError:
-    _HAS_QT = False
+  getLanguage(): Language {
+    return this._currentLang;
+  }
 
+  availableLanguages(): Language[] {
+    return ['en', 'zh'];
+  }
 
-class TranslatorBase:
-    """Base translator without Qt dependency."""
+  /** Merge additional keys at runtime (used by plugins). */
+  addTranslations(lang: Language, translations: Record<string, string>): void {
+    const existing = this._translations.get(lang);
+    this._translations.set(lang, { ...(existing ?? {}), ...translations });
+  }
+}
 
-    def __init__(self):
-        self._lock = threading.RLock()
-        self._current_lang: str = "en"
-        self._dictionaries: dict[str, dict[str, str]] = {}
+/** Application translator with language-change notification. */
+export class Translator extends TranslatorBase {
+  private _listeners: LanguageChangeListener[] = [];
 
-    def register_dictionary(self, lang: str, dictionary: dict[str, str]) -> None:
-        with self._lock:
-            self._dictionaries[lang] = dictionary
+  setLanguage(lang: Language): void {
+    if (lang === this._currentLang) return;
+    super.setLanguage(lang);
+    for (const cb of this._listeners) cb(lang);
+  }
 
-    def set_language(self, lang: str) -> None:
-        with self._lock:
-            self._current_lang = lang
+  addLanguageChangeListener(cb: LanguageChangeListener): void {
+    this._listeners.push(cb);
+  }
 
-    def get_language(self) -> str:
-        with self._lock:
-            return self._current_lang
+  removeLanguageChangeListener(cb: LanguageChangeListener): void {
+    const i = this._listeners.indexOf(cb);
+    if (i >= 0) this._listeners.splice(i, 1);
+  }
+}
 
-    def translate(self, key: str, *args) -> str:
-        with self._lock:
-            d = self._dictionaries.get(self._current_lang, {})
-            text = d.get(key, key)
-            if args:
-                # Defensive: if the source key provides more positional
-                # placeholders than ``args`` (e.g. a translation drift
-                # or a typo), ``str.format`` would raise ``IndexError``
-                # and propagate up through the UI. ``TypeError`` covers
-                # the case where a format-spec is incompatible with the
-                # actual argument type (e.g. ``{0:.2%}`` with a string).
-                # Fall back to a best-effort formatting that swallows
-                # the error and returns the unformatted text instead so
-                # the user still sees a useful message.
-                try:
-                    return text.format(*args)
-                except (IndexError, KeyError, ValueError, TypeError):
-                    return text
-            return text
+let _translator: Translator | null = null;
 
+/** Global translator singleton (mirrors Python get_translator()). */
+export function getTranslator(): Translator {
+  if (!_translator) _translator = new Translator();
+  return _translator;
+}
 
-if _HAS_QT:
+/** Translate with optional positional format arguments. */
+export function t(key: string, ...args: (string | number)[]): string {
+  const raw = getTranslator().translate(key);
+  return args.length > 0 ? formatMessage(raw, args) : raw;
+}
 
-    class Translator(QObject, _TranslatorBase):
-        """Qt-enabled translator with language change signal.
+export function setLanguage(lang: Language): void {
+  getTranslator().setLanguage(lang);
+}
 
-        QObject initialization is deferred until a QApplication exists,
-        so the singleton can be created early (e.g. at import time)
-        without crashing.
-        """
+export function getLanguage(): Language {
+  return getTranslator().getLanguage();
+}
 
-        language_changed = pyqtSignal(str)
-
-        def __init__(self):
-            _TranslatorBase.__init__(self)
-            self._qt_init_done = False
-            self._try_init_qt()
-
-        def _try_init_qt(self) -> None:
-            if self._qt_init_done:
-                return
-            try:
-                from PyQt6.QtWidgets import QApplication
-
-                if QApplication.instance() is not None:
-                    QObject.__init__(self)
-                    self._qt_init_done = True
-            except Exception:
-                pass
-
-        def set_language(self, lang: str) -> None:
-            self._try_init_qt()
-            with self._lock:
-                old = self._current_lang
-                self._current_lang = lang
-            if old != lang and self._qt_init_done:
-                self.language_changed.emit(lang)
-else:
-
-    class Translator(_TranslatorBase):
-        pass
-
-
-# Module-level singleton
-_translator: _Translator | None = None
-_init_lock = threading.Lock()
-
-
-def _get_or_create_translator() -> _Translator:
-    global _translator
-    if _translator is None:
-        with _init_lock:
-            if _translator is None:
-                _translator = _Translator()
-    return _translator
-
-
-def _reset_translator() -> None:
-    """Reset the singleton so it re-initializes with Qt on next access.
-
-    Called after QApplication is created to ensure the translator
-    picks up the QObject base class.
-    """
-    global _translator
-    with _init_lock:
-        _translator = None
-
-
-def get_translator() -> _Translator:
-    """Get the singleton translator instance."""
-    return _get_or_create_translator()
-
-
-def t(key: str, *args) -> str:
-    """
-    Translate a key to the current language.
-
-    Args:
-        key: English text to translate (also serves as fallback)
-        *args: Positional format arguments
-
-    Returns:
-        Translated text, or the key itself if no translation found.
-
-    Examples:
-        >>> _("PCA Scores Plot")
-        'PCA Scores Plot'  # (English)
-        >>> get_translator().set_language("zh")
-        >>> _("PCA Scores Plot")
-        'PCA 得分图'  # (Chinese)
-        >>> _("Method: {0}").format("correlation")
-        'Method: correlation'
-    """
-    return _get_or_create_translator().translate(key, *args)
-
-
-def get_language() -> str:
-    """Get the current language code."""
-    return _get_or_create_translator().get_language()
-
-
-def set_language(lang: str) -> None:
-    """Set the current language and emit change signal."""
-    _get_or_create_translator().set_language(lang)
-
-
-def register_translations() -> None:
-    """Register built-in translation dictionaries."""
-    from .translations_en import TRANSLATIONS as en_dict
-    from .translations_zh import TRANSLATIONS as zh_dict
-
-    translator = _get_or_create_translator()
-    translator.register_dictionary("en", en_dict)
-    translator.register_dictionary("zh", zh_dict)
+export function tr(key: string): string {
+  return getTranslator().translate(key);
+}

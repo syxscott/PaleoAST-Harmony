@@ -15,7 +15,7 @@
  * - Rohlf, F.J. & Slice, D. (1990). Syst. Zool. 39: 40-59.
  */
 import { MorphometricsError } from '../../utils/Exceptions';
-import { tpsKernel2D, buildKernelMatrix } from './tpsKernel';
+import { tpsKernel2D, tpsKernel3D } from './tpsKernel';
 
 export interface TPSResult {
   source: number[][];
@@ -24,27 +24,66 @@ export interface TPSResult {
   nonAffine: number[][];   // non-affine weights (n_landmarks × n_dims)
   fullCoefficients: number[][]; // w then a stacked (n_landmarks + n_affine) × n_dims
   bendingEnergy: number;
+  /** 2 for planar, 3 for volumetric configurations. */
+  nDims: 2 | 3;
   /** Apply the TPS to arbitrary points. */
   warpPoints: (points: number[][]) => number[][];
 }
 
 /**
+ * Validate and convert a configuration to the standard (n_landmarks, n_dims)
+ * format.  Port of morphometrics/tps.py::_validate_configuration:
+ *
+ * - ``(n_landmarks, n_dims)`` arrays pass through.
+ * - A flat 1D array is parsed landmark-major: an even length is interpreted
+ *   as 2D (x₀, y₀, x₁, y₁, ...), an odd length as 3D (x₀, y₀, z₀, ...).
+ */
+export function validateConfiguration(config: number[] | number[][]): number[][] {
+  if (config.length === 0) throw new MorphometricsError('Empty configuration');
+  const first = config[0];
+  if (typeof first === 'number') {
+    // Flattened (1D) format, landmark-major
+    const flat = config as number[];
+    const nDims = flat.length % 2 === 0 ? 2 : 3;
+    const nLandmarks = Math.floor(flat.length / nDims);
+    const out: number[][] = [];
+    for (let i = 0; i < nLandmarks; i++) {
+      out.push(flat.slice(i * nDims, (i + 1) * nDims));
+    }
+    return out;
+  }
+  const pts = config as number[][];
+  const d = pts[0].length;
+  for (const p of pts) {
+    if (p.length !== d) throw new MorphometricsError('Configuration rows must have consistent length');
+  }
+  if (d !== 2 && d !== 3) throw new MorphometricsError('TPS requires 2D or 3D configurations');
+  return pts.map(p => p.slice());
+}
+
+/**
  * Fit TPS deformation between source and target landmarks.
  *
- * @param source  (n_landmarks × n_dims) reference configuration
+ * @param source  (n_landmarks × n_dims) reference configuration, or a flat
+ *                1D array (parsed landmark-major; even length = 2D, odd = 3D)
  * @param target  same shape, the deformed target
+ *
+ * Kernel: U(r) = r² log(r) in 2D (Bookstein 1989) and U(r) = −|r| in 3D
+ * (Bookstein 1991 — the 3D bending-energy matrix is −|r| so that
+ * E = wᵀKw ≥ 0).
  */
-export function tpsAnalyze(source: number[][], target: number[][]): TPSResult {
+export function tpsAnalyze(sourceInput: number[] | number[][], targetInput: number[] | number[][]): TPSResult {
+  const source = validateConfiguration(sourceInput);
+  const target = validateConfiguration(targetInput);
   if (source.length !== target.length) throw new MorphometricsError('Same number of source/target landmarks');
   const n = source.length;
+  if (n === 0) throw new MorphometricsError('TPS requires at least one landmark');
   const d = source[0].length;
   if (d !== 2 && d !== 3) throw new MorphometricsError('TPS requires 2D or 3D');
-  for (let i = 1; i < n; i++) {
-    if (source[i].length !== d || target[i].length !== d) throw new MorphometricsError('Inconsistent dimensions');
-  }
+  const kernel = d === 2 ? tpsKernel2D : tpsKernel3D;
 
-  // Build kernel matrix K (n × n) with K_ij = U(||s_i - s_j||),  U(r) = r² log r
-  const K = _buildKernel(source);
+  // Build kernel matrix K (n × n) with K_ij = U(||s_i - s_j||)
+  const K = _buildKernel(source, kernel);
 
   // Affine constraint matrix P (n × (d+1))
   const P: number[][] = [];
@@ -97,7 +136,8 @@ export function tpsAnalyze(source: number[][], target: number[][]): TPSResult {
     affine, nonAffine,
     fullCoefficients: x,
     bendingEnergy: E,
-    warpPoints: (points: number[][]) => _tpsWarp(points, source, x, m, d)
+    nDims: d as 2 | 3,
+    warpPoints: (points: number[][]) => _tpsWarp(points, source, x, m, d, kernel)
   };
 }
 
@@ -134,10 +174,13 @@ export function tpsWarpGrid(
     for (let j = 0; j < gridCols; j++) row.push(warped[i * gridCols + j]);
     grid.push(row);
   }
-  return { warpedPoints: grid, grid: xs.map((r, i) => r.map((_, j) => [r[j], ys[i][j]])) };
+  // `grid` is the source lattice that was warped (flat n_pts × 2);
+  // `warpedPoints` is the deformed lattice reshaped to (rows × cols × 2),
+  // matching Python warp_grid's reshape(grid_shape + (2,)).
+  return { warpedPoints: grid, grid: points };
 }
 
-function _buildKernel(src: number[][]): number[][] {
+function _buildKernel(src: number[][], kernel: (r: number) => number): number[][] {
   const n = src.length;
   const K: number[][] = [];
   for (let i = 0; i < n; i++) {
@@ -150,7 +193,7 @@ function _buildKernel(src: number[][]): number[][] {
         sq += d * d;
       }
       const r = Math.sqrt(sq);
-      row.push(tpsKernel2D(r));
+      row.push(kernel(r));
     }
     K.push(row);
   }
@@ -201,7 +244,14 @@ function _solveBlock(L: number[][], rhs: number[][], n: number, m: number): numb
 }
 
 /** Apply TPS coefficients to a new set of points. */
-function _tpsWarp(points: number[][], source: number[][], x: number[][], m: number, d: number): number[][] {
+function _tpsWarp(
+  points: number[][],
+  source: number[][],
+  x: number[][],
+  m: number,
+  d: number,
+  kernel: (r: number) => number,
+): number[][] {
   const n = source.length;
   const out: number[][] = [];
   for (const p of points) {
@@ -220,7 +270,7 @@ function _tpsWarp(points: number[][], source: number[][], x: number[][], m: numb
         sq += dd * dd;
       }
       const r = Math.sqrt(sq);
-      const U = tpsKernel2D(r);
+      const U = kernel(r);
       for (let k = 0; k < d; k++) outPoint[k] += U * x[i][k];
     }
     out.push(outPoint);

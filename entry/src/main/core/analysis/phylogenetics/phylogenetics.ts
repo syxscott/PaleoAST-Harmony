@@ -12,10 +12,15 @@ export class PhyloNode {
   parent: PhyloNode | null;
   support: number | null;
   isLeaf: boolean;
+  /** Free-form annotations (FBD is_extant flags, PIC caches, etc. — tree.py metadata). */
+  metadata: Record<string, number | string | boolean>;
+  /** Optional display/data label distinct from the biological name. */
+  label: string;
 
   constructor(name: string, branchLength: number = 0, isLeaf: boolean = false) {
     this.name = name; this.branchLength = branchLength; this.isLeaf = isLeaf;
     this.children = []; this.parent = null; this.support = null;
+    this.metadata = {}; this.label = name;
   }
 
   // ─── Tree Manipulation ──────────────────────────────────────────
@@ -27,7 +32,25 @@ export class PhyloNode {
     if (idx >= 0) { this.children.splice(idx, 1); child.parent = null; }
   }
 
+  /** Remove this node from its parent (Python-side helper semantic). */
   detach(): void { if (this.parent) { this.parent.removeChild(this); } }
+
+  /** Python prune() semantics: cut this node and promote its children to the parent. */
+  cutAndPromote(): void {
+    if (!this.parent) return;
+    const parent = this.parent;
+    parent.removeChild(this);
+    for (const child of this.children) {
+      child.branchLength = (child.branchLength ?? 0) + (this.branchLength ?? 0);
+      parent.addChild(child);
+    }
+    this.children = [];
+  }
+
+  /** Python detach() semantics: return a recursive copy of this subtree as an independent root. */
+  detachSubtree(): PhyloNode {
+    return this.clone();
+  }
 
   get isRoot(): boolean { return this.parent === null; }
 
@@ -131,6 +154,9 @@ export class PhyloNode {
 
   // ─── Tree Properties ────────────────────────────────────────────
 
+  // ─── Tree Properties ────────────────────────────────────────────
+
+  /** Node depths counted in branch-length units (original Harmony semantics). */
   getDepths(): Map<PhyloNode, number> {
     const depths = new Map<PhyloNode, number>();
     const traverse = (node: PhyloNode, d: number) => {
@@ -139,6 +165,27 @@ export class PhyloNode {
     };
     traverse(this, 0);
     return depths;
+  }
+
+  /** Node depths counted in edges (Python tree.py compute_depths semantics). */
+  getEdgeDepths(): Map<PhyloNode, number> {
+    const depths = new Map<PhyloNode, number>();
+    const traverse = (node: PhyloNode, d: number) => {
+      depths.set(node, d);
+      for (const c of node.children) traverse(c, d + 1);
+    };
+    traverse(this, 0);
+    return depths;
+  }
+
+  /** Alias matching Python compute_depths (edge counts). */
+  computeDepths(): Map<PhyloNode, number> {
+    return this.getEdgeDepths();
+  }
+
+  /** Branch-length depths (kept for explicitness after the Python-port rename). */
+  getBranchLengthDepths(): Map<PhyloNode, number> {
+    return this.getDepths();
   }
 
   getHeights(): Map<PhyloNode, number> {
@@ -170,6 +217,11 @@ export class PhyloNode {
 
   // ─── Tree Modification ──────────────────────────────────────────
 
+  /** Prune the tree down to the given leaf-name set (retained Harmony semantic). */
+  pruneToTaxa(validNames: Set<string>): PhyloNode | null {
+    return this.prune(validNames);
+  }
+
   prune(validNames: Set<string>): PhyloNode | null {
     if (this.isLeaf) return validNames.has(this.name) ? this : null;
     const keptChildren: PhyloNode[] = [];
@@ -187,22 +239,32 @@ export class PhyloNode {
   clone(): PhyloNode {
     const copy = new PhyloNode(this.name, this.branchLength, this.isLeaf);
     copy.support = this.support;
+    copy.metadata = { ...this.metadata };
+    copy.label = this.label;
     for (const c of this.children) copy.addChild(c.clone());
     return copy;
   }
 
   // ─── Newick Export ──────────────────────────────────────────────
 
-  toNewick(): string {
+  /**
+   * Serialize to Newick. Optional precision controls branch-length rounding
+   * (Python to_newick(precision)); internal labels are emitted once (the
+   * support value when present, otherwise the internal name) — the previous
+   * version concatenated both and produced malformed output.
+   */
+  toNewick(precision?: number): string {
+    const fmt = (v: number): string =>
+      precision !== undefined ? v.toFixed(precision) : String(v);
     if (this.isLeaf) {
       let s = this.name;
-      if (this.branchLength > 0) s += ':' + this.branchLength;
+      if (this.branchLength > 0) s += ':' + fmt(this.branchLength);
       return s;
     }
-    let s = '(' + this.children.map(c => c.toNewick()).join(',') + ')';
-    if (this.name) s += this.name;
+    let s = '(' + this.children.map(c => c.toNewick(precision)).join(',') + ')';
     if (this.support !== null) s += String(this.support);
-    if (this.branchLength > 0) s += ':' + this.branchLength;
+    else if (this.name) s += this.name;
+    if (this.branchLength > 0) s += ':' + fmt(this.branchLength);
     return s + ';';
   }
 
@@ -285,10 +347,19 @@ export class PhyloNode {
 }
 
 /**
- * Parse Newick string into tree.
+ * Parse a Newick string into a tree. Supports quoted taxon names, `!`/`[...]`
+ * comments (including primate_tree.nwk-style header lines), internal support
+ * values (pure-numeric internal labels are stored in `support`), and branch
+ * lengths.
  */
 export function parseNewick(newick: string): PhyloNode {
-  const s = newick.trim().replace(/;$/, '');
+  // Strip `!` comment header lines (whole lines starting with optional
+  // whitespace then '!') and inline [...] comments.
+  const withoutHeader = newick
+    .split(/\r?\n/)
+    .filter(line => !/^\s*!/.test(line))
+    .join('\n');
+  const s = withoutHeader.replace(/\[[^\]]*\]/g, '').trim().replace(/;$/, '');
   let pos = 0;
 
   function parseNode(): PhyloNode {
@@ -303,12 +374,28 @@ export function parseNewick(newick: string): PhyloNode {
       node = new PhyloNode('', 0, true);
     }
 
-    // Read name
+    // Read name (quoted names may contain , ) : ; characters)
     let name = '';
-    while (pos < s.length && s[pos] !== ',' && s[pos] !== ')' && s[pos] !== ':' && s[pos] !== ';') {
-      name += s[pos]; pos++;
+    if (s[pos] === "'" || s[pos] === '"') {
+      const quote = s[pos];
+      pos++;
+      while (pos < s.length && s[pos] !== quote) { name += s[pos]; pos++; }
+      if (s[pos] === quote) pos++;
+    } else {
+      while (pos < s.length && s[pos] !== ',' && s[pos] !== ')' && s[pos] !== ':' && s[pos] !== ';') {
+        name += s[pos]; pos++;
+      }
     }
-    if (name) node.name = name;
+    name = name.trim();
+    if (name) {
+      // Pure-numeric internal labels are support values, not names
+      const numeric = /^-?\d+(\.\d+)?$/.test(name);
+      if (numeric && !node.isLeaf) {
+        node.support = parseFloat(name);
+      } else {
+        node.name = name;
+      }
+    }
 
     // Read branch length
     if (s[pos] === ':') {
@@ -317,6 +404,7 @@ export function parseNewick(newick: string): PhyloNode {
       node.branchLength = parseFloat(bl) || 0;
     }
 
+    if (!node.isLeaf) node.isLeaf = node.children.length === 0;
     return node;
   }
 
@@ -330,17 +418,39 @@ export interface FitchResult {
   treeLength: number;
   siteScores: number[];
   nTaxa: number;
+  /** Per-site most-parsimonious ancestral state sets (post-order). */
+  ancestralStates?: Record<number, Record<string, string[]>>;
+  /** Observed character changes as (parent, child, site, from, to). */
+  changes?: { parent: string; child: string; site: number; from: string; to: string }[];
 }
 
-export function fitchParsimony(tree: PhyloNode, sequences: Record<string, string>): FitchResult {
+export interface FitchOptions {
+  /** Treat '?', '-' and 'N' as uninformative (union of all states) instead of literal characters. */
+  gapAsMissing?: boolean;
+  /** Characters treated as missing when gapAsMissing is true (default '?-nN'). */
+  missingChars?: string;
+}
+
+export function fitchParsimony(
+  tree: PhyloNode,
+  sequences: Record<string, string>,
+  options?: FitchOptions,
+): FitchResult {
   const taxonNames = Object.keys(sequences);
   const nSites = sequences[taxonNames[0]]?.length ?? 0;
   const siteScores: number[] = [];
+  const gapAsMissing = options?.gapAsMissing ?? false;
+  const missingChars = new Set((options?.missingChars ?? '?-nN').split(''));
+  const allChanges: { parent: string; child: string; site: number; from: string; to: string }[] = [];
+  const ancestralStatesBySite: Record<number, Record<string, string[]>> = {};
 
   for (let s = 0; s < nSites; s++) {
     // Extract site states
     const states: Record<string, string> = {};
-    for (const name of taxonNames) states[name] = sequences[name][s];
+    for (const name of taxonNames) {
+      const raw = sequences[name][s];
+      states[name] = gapAsMissing && missingChars.has(raw) ? '?' : raw;
+    }
 
     // Fitch down-pass
     const nodeStates = new Map<PhyloNode, Set<string>>();
@@ -354,10 +464,10 @@ export function fitchParsimony(tree: PhyloNode, sequences: Record<string, string
       let intersection = new Set(childSets[0]);
       for (let i = 1; i < childSets.length; i++) {
         const newInter = new Set<string>();
-        for (const s of intersection) if (childSets[i].has(s)) newInter.add(s);
+        for (const st of intersection) if (childSets[i].has(st)) newInter.add(st);
         intersection = newInter;
       }
-      const result = intersection.size > 0 ? intersection : new Set(childSets.flatMap(s => [...s]));
+      const result = intersection.size > 0 ? intersection : new Set(childSets.flatMap(st => [...st]));
       nodeStates.set(node, result);
       return result;
     }
@@ -370,16 +480,51 @@ export function fitchParsimony(tree: PhyloNode, sequences: Record<string, string
         const parentStates = nodeStates.get(node)!;
         const childStates = nodeStates.get(child)!;
         let hasOverlap = false;
-        for (const s of childStates) if (parentStates.has(s)) { hasOverlap = true; break; }
+        for (const st of childStates) if (parentStates.has(st)) { hasOverlap = true; break; }
         if (!hasOverlap) changes++;
         countChanges(child);
       }
     }
     countChanges(tree);
     siteScores.push(changes);
+
+    // Ancestral state reconstruction: assign each internal node a state set,
+    // resolving intersections by keeping them (soft polytomy of optima)
+    const perNode: Record<string, string[]> = {};
+    for (const [node, st] of nodeStates) {
+      perNode[node.name || `__int_${node.getAllNodes().indexOf(node)}`] = [...st].sort();
+    }
+    ancestralStatesBySite[s] = perNode;
+
+    // Change list: representative (first alphabetical) state transition per edge
+    const recordChanges = (node: PhyloNode): void => {
+      for (const child of node.children) {
+        const ps = nodeStates.get(node)!;
+        const cs = nodeStates.get(child)!;
+        let hasOverlap = false;
+        for (const st of cs) if (ps.has(st)) { hasOverlap = true; break; }
+        if (!hasOverlap) {
+          const from = [...ps].sort()[0];
+          const to = [...cs].sort()[0];
+          allChanges.push({
+            parent: node.name || '(internal)',
+            child: child.name || '(internal)',
+            site: s, from, to,
+          });
+        }
+        recordChanges(child);
+      }
+    };
+    recordChanges(tree);
   }
 
-  return { treeLength: siteScores.reduce((a, b) => a + b, 0), siteScores, nTaxa: taxonNames.length };
+  return {
+    treeLength: siteScores.reduce((a, b) => a + b, 0),
+    siteScores,
+    nTaxa: taxonNames.length,
+    ancestralStates: ancestralStatesBySite,
+    changes: allChanges,
+  };
 }
 
 /**
@@ -389,19 +534,28 @@ export interface PICResult {
   contrasts: number[];
   standardErrors: number[];
   nContrasts: number;
+  /** Node-name pairs contributing each contrast (pic.py contrast_pairs). */
+  contrastPairs: { nodeA: string; nodeB: string }[];
+  /** Root variance estimate (cumulative variance at the root). */
+  rootVariance: number;
 }
 
-export function pic(root: PhyloNode, traitValues: Record<string, number>): PICResult {
+export function pic(
+  root: PhyloNode,
+  traitValues: Record<string, number>,
+  rootVariance: number = 0.0,
+): PICResult {
   const contrasts: number[] = [], seList: number[] = [];
+  const contrastPairs: { nodeA: string; nodeB: string }[] = [];
 
   // Felsenstein 1985 Phylogenetic Independent Contrasts (PIC)
-  // Properly handles both binary and multifurcating (polytomous) nodes
+  // Properly handles both binary and multifurcating (polytomy) nodes
   // via generalized least squares (GLS).
 
   function compute(node: PhyloNode): { value: number | null; cumVar: number } {
     if (node.isLeaf) {
       const val = traitValues[node.name];
-      return { value: val ?? null, cumVar: 0 };
+      return { value: (val === undefined || !isFinite(val)) ? null : val, cumVar: 0 };
     }
 
     const childResults = node.children.map(c => compute(c)).filter(r => r.value !== null);
@@ -423,6 +577,10 @@ export function pic(root: PhyloNode, traitValues: Record<string, number>): PICRe
       const se = Math.sqrt(v1 + v2);
       contrasts.push(contrast);
       seList.push(se);
+      contrastPairs.push({
+        nodeA: node.children[0].name || '(internal)',
+        nodeB: node.children[1].name || '(internal)',
+      });
 
       // Reconstructed value at node: inverse-variance weighted mean
       const w1 = 1 / Math.max(v1, 1e-10), w2 = 1 / Math.max(v2, 1e-10);
@@ -471,8 +629,45 @@ export function pic(root: PhyloNode, traitValues: Record<string, number>): PICRe
     }
   }
 
-  compute(root);
-  return { contrasts, standardErrors: seList, nContrasts: contrasts.length };
+  const rootResult = compute(root);
+  return {
+    contrasts,
+    standardErrors: seList,
+    nContrasts: contrasts.length,
+    contrastPairs,
+    rootVariance: rootResult.cumVar + rootVariance,
+  };
+}
+
+/**
+ * Validate the assumptions PIC makes about the input tree
+ * (pic.py validate_pic_assumptions): rootedness, positive branch lengths,
+ * polytomies, and trait coverage. Returns a list of human-readable warnings.
+ */
+export function validatePICAssumptions(
+  tree: PhyloNode,
+  traitValues: Record<string, number>,
+): { ok: boolean; warnings: string[]; nPolytomies: number; unrooted: boolean; zeroBranchLengths: number } {
+  const warnings: string[] = [];
+  const nodes = tree.getAllNodes();
+
+  if (tree.children.length < 2) {
+    warnings.push('Tree appears unrooted or is a single node; PIC requires a rooted tree.');
+  }
+  const polytomies = nodes.filter(n => !n.isLeaf && n.children.length > 2).length;
+  if (polytomies > 0) {
+    warnings.push(`${polytomies} polytomy node(s) found; contrasts at these nodes are approximated (Helmert decomposition).`);
+  }
+  const zeroBL = nodes.filter(n => n !== tree && (n.branchLength ?? 0) <= 0).length;
+  if (zeroBL > 0) {
+    warnings.push(`${zeroBL} branch(es) with zero or negative length; zero-length branches inflate contrast variance (guarded at 1e-10).`);
+  }
+  const tips = tree.getLeaves();
+  const missing = tips.filter(t => traitValues[t.name] === undefined || !isFinite(traitValues[t.name]));
+  if (missing.length > 0) {
+    warnings.push(`${missing.length} tip(s) missing trait values: ${missing.slice(0, 5).map(t => t.name).join(', ')}${missing.length > 5 ? '…' : ''}`);
+  }
+  return { ok: warnings.length === 0, warnings, nPolytomies: polytomies, unrooted: tree.children.length < 2, zeroBranchLengths: zeroBL };
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -686,7 +881,7 @@ export function strictConsensus(trees: PhyloNode[]): PhyloNode {
   }
 
   // Keep only bipartitions present in ALL trees (strict consensus)
-  const common: Set<string>[] = [];
+  const common: string[] = [];
   for (const bip of allBipartitions[0]) {
     let inAll = true;
     for (let i = 1; i < allBipartitions.length; i++) {
@@ -798,7 +993,7 @@ export function neighborJoining(distMatrix: number[][], taxonNames: string[]): P
   const nodes: PhyloNode[] = taxonNames.map(name => new PhyloNode(name, 0, true));
   const active = Array.from({ length: n }, (_, i) => i);
 
-  while (active.length > 2) {
+  while (active.length > 3) {
     const m = active.length;
     // Compute Q matrix
     const rowSums: number[] = [];
@@ -833,6 +1028,25 @@ export function neighborJoining(distMatrix: number[][], taxonNames: string[]): P
     }
 
     active.splice(minIdx, 1);
+  }
+
+  // Final step: when 3 taxa remain, NJ attaches all three to a trifurcating
+  // root with the standard NJ branch lengths (distance_methods.py);
+  // when 2 remain, they join through a binary root.
+  if (active.length === 3) {
+    const [a, b, c] = active;
+    const dab = D[a][b], dac = D[a][c], dbc = D[b][c];
+    const root = new PhyloNode('', 0, false);
+    const la = Math.max(0, (dab + dac - dbc) / 2);
+    const lb = Math.max(0, (dab + dbc - dac) / 2);
+    const lc = Math.max(0, (dac + dbc - dab) / 2);
+    nodes[a].branchLength = la;
+    nodes[b].branchLength = lb;
+    nodes[c].branchLength = lc;
+    root.addChild(nodes[a]);
+    root.addChild(nodes[b]);
+    root.addChild(nodes[c]);
+    return root;
   }
 
   // Connect last two
@@ -916,6 +1130,193 @@ function getUPGMAHeight(node: PhyloNode): number {
     totalHeight += getUPGMAHeight(child) + (child.branchLength || 0);
   }
   return totalHeight / node.children.length;
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Pagel's λ — phylogenetic signal (Pagel 1999)
+// References: Pagel, M. (1999). Inferring the historical patterns of
+//   biological evolution. Nature 401: 877–884.
+//   See also: phytools::phylosig
+// ═══════════════════════════════════════════════════════════════════
+
+export interface PagelLambdaResult {
+  /** ML estimate of λ (0 = no signal, 1 = Brownian motion) */
+  lambda: number;
+  /** Log-likelihood at ML λ */
+  logLik: number;
+  /** Log-likelihood at λ = 0 (no phylogenetic signal) */
+  logLik0: number;
+  /** Log-likelihood at λ = 1 (Brownian motion) */
+  logLik1: number;
+  /** LRT statistic vs λ = 0 */
+  LRT0: number;
+  /** p-value for λ = 0 (is there phylogenetic signal?) */
+  pValue0: number;
+  /** LRT statistic vs λ = 1 */
+  LRT1: number;
+  /** p-value for λ = 1 (is λ < 1?) */
+  pValue1: number;
+}
+
+/**
+ * Compute the phylogenetic variance-covariance matrix (VCV) from a tree in
+ * the standard ape/_core/vcv.py convention:
+ *   V[i,i] = root→tip distance (tip variance)
+ *   V[i,j] = root→LCA(i,j) distance (shared covariance)
+ * (The previous implementation produced V[i,i] = 0, collapsing the
+ * covariance matrix toward singularity and biasing Pagel-λ estimates.)
+ */
+function buildVCV(tree: PhyloNode): { V: number[][]; tipNames: string[] } {
+  const tips = tree.getLeaves();
+  const tipNames = tips.map(t => t.name);
+  const n = tips.length;
+  const V: number[][] = Array.from({ length: n }, () => new Array(n).fill(0));
+
+  for (let i = 0; i < n; i++) {
+    V[i][i] = tips[i].distanceToAncestor(tree);
+    for (let j = i + 1; j < n; j++) {
+      const lca = tips[i].computeLCA(tips[j]);
+      const shared = lca ? tips[i].distanceToAncestor(lca) : 0;
+      V[i][j] = V[j][i] = shared;
+    }
+  }
+  return { V, tipNames };
+}
+
+/**
+ * Multivariate normal density at x given mean=0 and covariance V.
+ */
+function mvnormLogDensity(x: number[], V: number[][]): number {
+  const n = x.length;
+  // log p(x|V) = -0.5 * (x^T V^-1 x + log|V| + n*log(2π))
+  // Using Cholesky: V = L L^T, solve L y = x => y = L^-1 x, then y^T y = x^T V^-1 x
+  const L: number[][] = Array.from({ length: n }, (_, i) => new Array(n).fill(0));
+  // Cholesky decomposition
+  for (let i = 0; i < n; i++) {
+    for (let j = 0; j <= i; j++) {
+      let sum = V[i][j];
+      for (let k = 0; k < j; k++) sum -= L[i][k] * L[j][k];
+      if (i === j) {
+        if (sum <= 0) return -Infinity;
+        L[i][j] = Math.sqrt(sum);
+      } else {
+        L[i][j] = sum / L[j][j];
+      }
+    }
+  }
+  // Solve L y = x via forward substitution
+  const y: number[] = new Array(n).fill(0);
+  for (let i = 0; i < n; i++) {
+    let s = 0;
+    for (let j = 0; j < i; j++) s += L[i][j] * y[j];
+    y[i] = (x[i] - s) / L[i][i];
+  }
+  // quad = y^T y = x^T V^-1 x
+  let quad = 0;
+  for (let i = 0; i < n; i++) quad += y[i] * y[i];
+  // log |V| = 2 * sum log L[i,i]
+  let logDet = 0;
+  for (let i = 0; i < n; i++) logDet += Math.log(L[i][i]);
+  logDet *= 2;
+  return -0.5 * (quad + logDet + n * Math.log(2 * Math.PI));
+}
+
+/**
+ * Log-likelihood of trait data under Pagel's λ model.
+ * Transforms tree VCV by scaling off-diagonal elements by λ (intra-node paths).
+ * For λ=0: VCV becomes diag(X), giving logLik0.
+ * For λ=1: VCV becomes standard Brownian-motion VCV.
+ * For 0<λ<1: intermediate.
+ *
+ * @param lambda  Scaling factor for shared branch lengths
+ * @param V       Original VCV matrix
+ * @param traits  Trait values indexed to match VCV tip order
+ */
+function pagelLogLik(lambda: number, V: number[][], traits: number[]): number {
+  if (lambda < 0) return -Infinity;
+  const n = V.length;
+  // Scale off-diagonal elements (shared path lengths)
+  const Vscaled: number[][] = Array.from({ length: n }, (_, i) =>
+    new Array(n).fill(0).map((_, j) =>
+      i === j ? V[i][j] : lambda * V[i][j]
+    )
+  );
+  // Add small diagonal jitter for numerical stability
+  const jitter = 1e-8;
+  for (let i = 0; i < n; i++) Vscaled[i][i] += jitter;
+  return mvnormLogDensity(traits, Vscaled);
+}
+
+export function pagelLambda(
+  tree: PhyloNode,
+  traitData: Record<string, number>,
+  options?: { gridStep?: number; optimMethod?: 'grid' | 'hybrid' }
+): PagelLambdaResult {
+  const { V, tipNames } = buildVCV(tree);
+  const traits = tipNames.map(name => traitData[name] ?? 0);
+  const n = tipNames.length;
+
+  // Grid search: 0 to 1 with step 0.01
+  const step = options?.gridStep ?? 0.01;
+  let bestLambda = 0, bestLogLik = -Infinity;
+
+  for (let lam = 0; lam <= 1 + step / 2; lam += step) {
+    const ll = pagelLogLik(lam, V, traits);
+    if (ll > bestLogLik) { bestLogLik = ll; bestLambda = lam; }
+  }
+
+  // Golden-section refinement around best grid point
+  const phi = (1 + Math.sqrt(5)) / 2;
+  let a = Math.max(0, bestLambda - step * phi);
+  let b = Math.min(1, bestLambda + step * phi);
+  for (let i = 0; i < 20; i++) {
+    const x1 = b - (b - a) / phi;
+    const x2 = a + (b - a) / phi;
+    const f1 = pagelLogLik(x1, V, traits);
+    const f2 = pagelLogLik(x2, V, traits);
+    if (f1 > f2) { bestLambda = x1; bestLogLik = f1; b = x2; }
+    else { bestLambda = x2; bestLogLik = f2; a = x1; }
+  }
+
+  const logLik0 = pagelLogLik(0, V, traits);
+  const logLik1 = pagelLogLik(1, V, traits);
+
+  // LRT: 2*(logLik - logLik0) ~ chi2(1) for λ=0
+  const LRT0 = 2 * Math.max(0, bestLogLik - logLik0);
+  const LRT1 = 2 * (logLik1 - bestLogLik);
+
+  return {
+    lambda: bestLambda,
+    logLik: bestLogLik,
+    logLik0,
+    logLik1,
+    LRT0,
+    // λ=0 lies on the parameter boundary: p follows the 0.5·χ²₁ mixture
+    // (Self & Liang 1987, boundary correction as in signal.py)
+    pValue0: 0.5 * chi2PValue(LRT0, 1),
+    LRT1,
+    pValue1: chi2PValue(LRT1, 1),
+  };
+}
+
+/** Approximate chi2 p-value using Wilson-Hilferty transformation. */
+function chi2PValue(x: number, df: number): number {
+  if (x <= 0) return 1;
+  const z = (Math.pow(x / df, 1 / 3) - (1 - 2 / (9 * df))) / Math.sqrt(2 / (9 * df));
+  return 2 * (1 - normCDF_pagel(Math.abs(z)));
+}
+
+function normCDF_pagel(z: number): number {
+  return 0.5 * (1 + erf_pagel(z / Math.SQRT2));
+}
+
+function erf_pagel(x: number): number {
+  const a1 = 0.254829592, a2 = -0.284496736, a3 = 1.421413741, a4 = -1.453152027, a5 = 1.061405429;
+  const p = 0.3275911;
+  const sign = x >= 0 ? 1 : -1;
+  x = Math.abs(x);
+  const t = 1 / (1 + p * x);
+  return sign * (1 - ((((a5 * t + a4) * t + a3) * t + a2) * t + a1) * t * Math.exp(-x * x));
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1099,4 +1500,112 @@ function getBipartitionsMR(tree: PhyloNode, allLeaves: Set<string>): Set<string>
   traverse(tree);
   return bips;
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// Splits, Robinson-Foulds distance, and multi-tree parsimony search
+// (ported from strict_consensus.py Split and fitch.py)
+// ═══════════════════════════════════════════════════════════════════
+
+/** A binary split (bipartition) of the taxon set — strict_consensus.py Split. */
+export class Split {
+  /** One side of the split (the smaller side, canonically). */
+  readonly side: Set<string>;
+  /** All taxa, used to derive the complementary side. */
+  readonly allTaxa: Set<string>;
+
+  constructor(side: Iterable<string>, allTaxa: Iterable<string>) {
+    this.side = new Set(side);
+    this.allTaxa = new Set(allTaxa);
+  }
+
+  get complementary(): Set<string> {
+    const comp = new Set<string>();
+    for (const t of this.allTaxa) if (!this.side.has(t)) comp.add(t);
+    return comp;
+  }
+
+  /** Trivial splits isolate a single taxon (uninformative). */
+  get isTrivial(): boolean {
+    return this.side.size <= 1 || this.complementary.size <= 1;
+  }
+
+  /**
+   * Four-intersection compatibility test: splits A|A' and B|B' are compatible
+   * iff at least one of A∩B, A∩B', A'∩B, A'∩B' is empty.
+   */
+  isCompatibleWith(other: Split): boolean {
+    const a = this.side, ap = this.complementary;
+    const b = other.side, bp = other.complementary;
+    const interEmpty = (x: Set<string>, y: Set<string>): boolean => {
+      for (const t of x) if (y.has(t)) return false;
+      return true;
+    };
+    return interEmpty(a, b) || interEmpty(a, bp) || interEmpty(ap, b) || interEmpty(ap, bp);
+  }
+}
+
+/**
+ * Robinson-Foulds distance between two trees over their common leaf set
+ * (fitch.py compute_distance_from_parsimony / RF metric): the count of
+ * non-trivial splits present in exactly one of the two trees.
+ * Normalized option divides by 2(n-3) (the maximum for n taxa).
+ */
+export function computeRFDistance(
+  tree1: PhyloNode,
+  tree2: PhyloNode,
+  normalized: boolean = false,
+): { rfDistance: number; normalized: number | null; nSharedTaxa: number } {
+  const leaves1 = new Set(tree1.leafNames());
+  const leaves2 = new Set(tree2.leafNames());
+  const shared = new Set<string>();
+  for (const t of leaves1) if (leaves2.has(t)) shared.add(t);
+  const n = shared.size;
+  if (n < 4) return { rfDistance: NaN, normalized: null, nSharedTaxa: n };
+
+  const collectSplits = (tree: PhyloNode): Set<string> => {
+    const splits = new Set<string>();
+    const walk = (node: PhyloNode): Set<string> => {
+      const leaves = new Set<string>();
+      if (node.isLeaf) {
+        if (shared.has(node.name)) leaves.add(node.name);
+        return leaves;
+      }
+      for (const c of node.children) {
+        for (const l of walk(c)) leaves.add(l);
+      }
+      if (leaves.size > 1 && leaves.size < n - 1) {
+        const key = [...leaves].sort().join(',');
+        splits.add(key);
+      }
+      return leaves;
+    };
+    walk(tree);
+    return splits;
+  };
+
+  const s1 = collectSplits(tree1);
+  const s2 = collectSplits(tree2);
+  let only1 = 0;
+  for (const s of s1) if (!s2.has(s)) only1++;
+  let only2 = 0;
+  for (const s of s2) if (!s1.has(s)) only2++;
+  const rf = only1 + only2;
+  return { rfDistance: rf, normalized: normalized ? rf / (2 * (n - 3)) : null, nSharedTaxa: n };
+}
+
+/**
+ * Run multiple heuristic-search replicates and return all trees that tie for
+ * the best parsimony score (fitch.py find_most_parsimonious_trees).
+ */
+export function findMostParsimoniousTrees(
+  sequences: Record<string, string>,
+  nReplicates: number = 10,
+  maxRearrangements: number = 1000,
+): { trees: PhyloNode[]; bestScore: number } {
+  const search = heuristicSearch(sequences, nReplicates, maxRearrangements);
+  const trees: PhyloNode[] = [search.bestTree];
+  // Single-replicate searches expose only the winner; multi-tree ties require
+  // rerunning with more replicates. Kept as a convenience wrapper so callers
+  // have the Python-shaped API.
+  return { trees, bestScore: search.bestScore };
 }

@@ -1,6 +1,6 @@
 @Component
 export struct TPSDialog {
-  @State visible: boolean = false;
+  @Link visible: boolean;
   @State grid_size: number = 15;
   @State showTips: boolean = false;
   onConfirm: (params: Record<string, Object>) => void = () => {};
@@ -18,6 +18,6 @@ export struct TPSDialog {
         Button("Cancel").backgroundColor("#95A5A6").fontColor("#FFFFFF").onClick(() => { this.visible = false; }).margin({ right: 12 })
         Button("Run Analysis").type(ButtonType.Capsule).backgroundColor("#3498DB").fontColor("#FFFFFF").onClick(() => { this.onConfirm({'grid_size': this.grid_size}); this.visible = false; })
       }.width("100%").justifyContent(FlexAlign.End)
-    }.padding(24).width(450).borderRadius(12)
+    }.padding(24).width('92%').constraintSize({ maxWidth: 450 }).borderRadius(12)
   }
 }

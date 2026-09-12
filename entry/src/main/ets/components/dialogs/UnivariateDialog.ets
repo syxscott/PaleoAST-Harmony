@@ -1,6 +1,6 @@
 @Component
 export struct UnivariateDialog {
-  @State visible: boolean = false;
+  @Link visible: boolean;
   @State test_typeIdx: number = 0;
   test_typeOpts: string[] = ["Summary", "Normality", "t-test", "ANOVA", "Kruskal-Wallis"];
   @State showTips: boolean = false;
@@ -20,6 +20,6 @@ export struct UnivariateDialog {
         Button("Cancel").backgroundColor("#95A5A6").fontColor("#FFFFFF").onClick(() => { this.visible = false; }).margin({ right: 12 })
         Button("Run Analysis").type(ButtonType.Capsule).backgroundColor("#3498DB").fontColor("#FFFFFF").onClick(() => { this.onConfirm({'test_type': this.test_typeOpts[this.test_typeIdx]}); this.visible = false; })
       }.width("100%").justifyContent(FlexAlign.End)
-    }.padding(24).width(450).borderRadius(12)
+    }.padding(24).width('92%').constraintSize({ maxWidth: 450 }).borderRadius(12)
   }
 }

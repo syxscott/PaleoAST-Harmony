@@ -4,7 +4,7 @@
  */
 @Component
 export struct PCoADialog {
-  @Prop @Watch('onVisibleChange') visible: boolean = false;
+  @Link visible: boolean = false;
   @State n_components: number = 10;
   @State metricIdx: number = 0;
   @State errorMsg: string = '';
@@ -18,14 +18,6 @@ export struct PCoADialog {
     'Cosine: angular distance, good for compositional data',
   ];
   onConfirm: (params: Record<string, Object>) => void = () => {};
-  onCancel: () => void = () => {}; // Callback to notify parent component
-
-  onVisibleChange() {
-    if (!this.visible) {
-      // Dialog is closing - notify parent
-      this.onCancel();
-    }
-  }
 
   build() {
     Column() {
@@ -91,6 +83,6 @@ export struct PCoADialog {
             this.visible = false;
           })
       }.width('100%').justifyContent(FlexAlign.End)
-    }.padding(24).width(480).borderRadius(12)
+    }.padding(24).width('92%').constraintSize({ maxWidth: 480 }).borderRadius(12)
   }
 }

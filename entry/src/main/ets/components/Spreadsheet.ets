@@ -6,26 +6,25 @@ import { Matrix } from "../../core/math/Matrix";
  * Scientific Spreadsheet Component — replaces views/ui_spreadsheet.py
  * Full-featured data table with:
  * - LazyForEach + IDataSource for virtualized rendering (no DOM explosion)
- * - Cell editing with @State updateFlag for reactive UI refresh
+ * - V1 state management only (@Component + @State + @ObjectLink; the previous
+ *   @ObservedV2/@Trace/@Local mix was invalid inside a struct)
  * - Row/column selection
  * - Group assignment (colored row labels)
  * - Sorting by column
  * - Filtering
  * - NaN/missing value display
- * - Context menu for group operations
+ * - Double-click cell editing
  */
 @Component
 export struct Spreadsheet {
-  @ObjectLink @Trace dataMatrix: DataMatrix | null = null;
+  @ObjectLink dataMatrix: DataMatrix;
   @State selectedRow: number = -1;
   @State selectedCol: number = -1;
   @State selectedRows: Set<number> = new Set();
-  @State sortColumn: number = -1;
-  @State sortAscending: boolean = true;
-  @State filterText: string = '';
-  @State editingCell: string = ''; // "row,col"
+  @State @Watch('onRowsCacheDirty') sortColumn: number = -1;
+  @State @Watch('onRowsCacheDirty') sortAscending: boolean = true;
+  @State @Watch('onRowsCacheDirty') filterText: string = '';
   @State editValue: string = '';
-  @State cellUpdateFlags: Map<string, number> = new Map(); // Per-cell update tracking
   @State groupColors: Map<string, string> = new Map([
     ['Group_A', '#3498DB'], ['Group_B', '#E74C3C'], ['Group_C', '#27AE60'],
     ['Group_D', '#F39C12'], ['Ungrouped', '#95A5A6'],
@@ -33,15 +32,37 @@ export struct Spreadsheet {
   @State rowGroups: string[] = []; // group label per row
   @State darkMode: boolean = false;
   @State showGroups: boolean = true;
+  @State editingCell: string | null = null;
+  @State filteredRowsCache: number[] = []; // memoized filtered/sorted rows
+
+  // Pre-computed column indices array (moved outside build)
+  private columnIndices: number[] = [];
 
   // Callbacks - use these to notify parent of changes instead of direct prop mutation
   onDataChanged: (data: Matrix) => void = () => {};
   onSelectionChanged: (rows: number[], cols: number[]) => void = () => {};
   onGroupChanged: (groups: string[]) => void = () => {};
 
+  // LazyForEach data source — recomputed outside the render path
+  private dataSource: SpreadsheetDataSource = new SpreadsheetDataSource();
+
   aboutToAppear(): void {
     if (this.dataMatrix) {
       this.rowGroups = Array.from({ length: this.dataMatrix.nSamples }, () => 'Ungrouped');
+    }
+    this.initColumnIndices();
+    this.recomputeRows();
+  }
+
+  // @Watch callback: filter/sort inputs changed → rebuild row cache (not in build)
+  onRowsCacheDirty(): void {
+    this.recomputeRows();
+  }
+
+  // Initialize column indices once
+  private initColumnIndices(): void {
+    if (this.dataMatrix) {
+      this.columnIndices = Array.from({ length: this.dataMatrix.nVariables }, (_, i) => i);
     }
   }
 
@@ -99,7 +120,7 @@ export struct Spreadsheet {
 
       // Column headers
       if (this.dataMatrix != null) {
-        ForEach(this.dataMatrix!.colLabels, (label: string, colIdx: number) => {
+        ForEach(this.dataMatrix.colLabels, (label: string, colIdx: number) => {
           Text(label).width(80).fontSize(10).fontWeight(FontWeight.Bold)
             .textAlign(TextAlign.Center)
             .fontColor(this.sortColumn === colIdx ? '#3498DB' : (this.darkMode ? '#ccc' : '#2C3E50'))
@@ -118,9 +139,9 @@ export struct Spreadsheet {
   @Builder DataRows() {
     if (this.dataMatrix != null) {
       // True LazyForEach: only renders visible rows, prevents DOM explosion.
-      // SpreadsheetDataSource implements IDataSource for on-demand rendering.
-      // updateFlag forces UI refresh when cell data changes (ArkUI @State shallow watch workaround).
-      LazyForEach(this.getRowDataSource(), (rowIdx: number) => {
+      // Row indices come from the pre-computed filteredRowsCache (kept in sync
+      // by @Watch callbacks — the render path never writes state).
+      LazyForEach(this.dataSource, (rowIdx: number) => {
         Row() {
           // Row number
           Text(String(rowIdx + 1)).width(40).fontSize(10).textAlign(TextAlign.Center)
@@ -135,28 +156,31 @@ export struct Spreadsheet {
               .borderRadius(4).padding(2)
           }
 
-          // Data cells
-          ForEach(Array.from({ length: this.dataMatrix!.nVariables }), (_: Object, colIdx: number) => {
-            Text(this.getCellDisplay(rowIdx, colIdx))
-              .width(80).fontSize(10).textAlign(TextAlign.Right)
-              .fontColor(this.getCellFontColor(rowIdx, colIdx))
-              .backgroundColor(this.getCellBg(rowIdx, colIdx))
-              .onClick(() => { this.selectedRow = rowIdx; this.selectedCol = colIdx; })
-              .onDoubleClick(() => { this.startEditing(rowIdx, colIdx); })
+          // Data cells — use pre-computed columnIndices; TextInput while editing
+          ForEach(this.columnIndices, (_: Object, colIdx: number) => {
+            if (this.editingCell === `${rowIdx},${colIdx}`) {
+              TextInput({ text: this.editValue })
+                .width(80).height(20).fontSize(10)
+                .onChange((v: string) => { this.editValue = v; })
+                .onSubmit(() => { this.commitEdit(); })
+            } else {
+              Text(this.getCellDisplay(rowIdx, colIdx))
+                .width(80).fontSize(10).textAlign(TextAlign.Right)
+                .fontColor(this.getCellFontColor(rowIdx, colIdx))
+                .backgroundColor(this.getCellBg(rowIdx, colIdx))
+                .onClick(() => {
+                  if (this.editingCell !== null) { this.cancelEdit(); }
+                  this.selectedRow = rowIdx;
+                  this.selectedCol = colIdx;
+                })
+                .onDoubleClick(() => { this.startEditing(rowIdx, colIdx); })
+            }
           })
         }
         .width('100%').height(22)
         .backgroundColor(this.selectedRow === rowIdx ? '#EBF5FB' : (rowIdx % 2 === 0 ? 'transparent' : (this.darkMode ? '#16213e08' : '#F8F9FA08')))
-      }, (rowIdx: number) => rowIdx.toString())
+      }, (rowIdx: number) => rowIdx.toString()) // stable key per row
     }
-  }
-
-  private dataSource: SpreadsheetDataSource = new SpreadsheetDataSource();
-
-  private getRowDataSource(): SpreadsheetDataSource {
-    const rows = this.getFilteredRows();
-    this.dataSource.setRowIndices(rows);
-    return this.dataSource;
   }
 
   @Builder StatusBar() {
@@ -166,7 +190,7 @@ export struct Spreadsheet {
         Text(`Row ${this.selectedRow + 1}, Col ${this.selectedCol + 1}: ${this.formatCell(val)}`)
           .fontSize(11).fontColor('#7F8C8D')
       } else if (this.dataMatrix != null) {
-        Text(`${this.dataMatrix!.nSamples} rows x ${this.dataMatrix!.nVariables} columns`)
+        Text(`${this.dataMatrix.nSamples} rows x ${this.dataMatrix.nVariables} columns`)
           .fontSize(11).fontColor('#7F8C8D')
       }
       Blank()
@@ -182,7 +206,6 @@ export struct Spreadsheet {
   // ─── Cell Display ───────────────────────────────────────────────
 
   private getCellDisplay(row: number, col: number): string {
-    if (this.editingCell === `${row},${col}`) return this.editValue;
     const val = this.dataMatrix?.data.get(row, col) ?? NaN;
     return this.formatCell(val);
   }
@@ -209,59 +232,14 @@ export struct Spreadsheet {
     return value.toFixed(4);
   }
 
-  // ─── Cell Editing ───────────────────────────────────────────────
+  // ─── Filtering / Sorting cache (kept out of the render path) ────
 
-  private startEditing(row: number, col: number): void {
-    if (!this.dataMatrix) return;
-    const val = this.dataMatrix.data.get(row, col);
-    this.editValue = isNaN(val) ? '' : String(val);
-    this.editingCell = `${row},${col}`;
-  }
-
-  private commitEdit(): void {
-    const parts = this.editingCell.split(',');
-    if (parts.length !== 2) return;
-    const row = parseInt(parts[0]), col = parseInt(parts[1]);
-    if (!this.dataMatrix) return;
-
-    const newVal = this.editValue.trim().toLowerCase() === 'na' ? NaN : parseFloat(this.editValue);
-    if (!isNaN(newVal) || this.editValue.trim().toLowerCase() === 'na') {
-      const finalVal = isNaN(newVal) ? NaN : newVal;
-      this.dataMatrix.data.set(row, col, finalVal);
-      // Update per-cell flag to trigger minimal re-render
-      this.cellUpdateFlags.set(`${row},${col}`, (this.cellUpdateFlags.get(`${row},${col}`) ?? 0) + 1);
-      // Notify parent via callback since @ObjectLink doesn't auto-sync edits back
-      this.onDataChanged(this.dataMatrix.data);
+  private recomputeRows(): void {
+    if (!this.dataMatrix) {
+      this.filteredRowsCache = [];
+      this.dataSource.setRowIndices(this.filteredRowsCache);
+      return;
     }
-    this.editingCell = '';
-    this.editValue = '';
-  }
-
-  private cancelEdit(): void {
-    this.editingCell = '';
-    this.editValue = '';
-  }
-
-  // ─── Group Management ───────────────────────────────────────────
-
-  private assignGroup(): void {
-    if (this.selectedRow < 0) return;
-    const groups = Object.keys(this.groupColors);
-    const currentGroup = this.rowGroups[this.selectedRow] ?? 'Ungrouped';
-    const nextIdx = (groups.indexOf(currentGroup) + 1) % groups.length;
-    this.rowGroups[this.selectedRow] = groups[nextIdx];
-    this.onGroupChanged(this.rowGroups);
-  }
-
-  private clearGroups(): void {
-    this.rowGroups = Array.from({ length: this.dataMatrix?.nSamples ?? 0 }, () => 'Ungrouped');
-    this.onGroupChanged(this.rowGroups);
-  }
-
-  // ─── Filtering ──────────────────────────────────────────────────
-
-  private getFilteredRows(): number[] {
-    if (!this.dataMatrix) return [];
     let rows = Array.from({ length: this.dataMatrix.nSamples }, (_, i) => i);
 
     // Filter
@@ -283,16 +261,81 @@ export struct Spreadsheet {
       });
     }
 
-    return rows;
+    this.filteredRowsCache = rows;
+    this.dataSource.setRowIndices(this.filteredRowsCache);
+  }
+
+  // ─── Cell Editing ───────────────────────────────────────────────
+
+  private startEditing(row: number, col: number): void {
+    if (!this.dataMatrix) return;
+    const val = this.dataMatrix.data.get(row, col);
+    this.editValue = isNaN(val) ? '' : String(val);
+    this.editingCell = `${row},${col}`;
+  }
+
+  private commitEdit(): void {
+    if (this.editingCell === null) return;
+    const parts = this.editingCell.split(',');
+    if (parts.length !== 2) return;
+    const row = parseInt(parts[0]), col = parseInt(parts[1]);
+    if (!this.dataMatrix) return;
+
+    const newVal = this.editValue.trim().toLowerCase() === 'na' ? NaN : parseFloat(this.editValue);
+    if (!isNaN(newVal) || this.editValue.trim().toLowerCase() === 'na') {
+      const finalVal = isNaN(newVal) ? NaN : newVal;
+      this.dataMatrix.data.set(row, col, finalVal);
+      // Matrix itself is not observable — refresh the edited row explicitly
+      this.dataSource.notifyRowChanged(row);
+      // Notify parent via callback since @ObjectLink doesn't auto-sync edits back
+      this.onDataChanged(this.dataMatrix.data);
+    }
+    this.editingCell = null;
+    this.editValue = '';
+  }
+
+  private cancelEdit(): void {
+    this.editingCell = null;
+    this.editValue = '';
+  }
+
+  // ─── Group Management ───────────────────────────────────────────
+
+  private assignGroup(): void {
+    if (this.selectedRow < 0) return;
+    // groupColors is a Map — Object.keys() on it is always []; use keys()
+    const groups = Array.from(this.groupColors.keys());
+    if (groups.length === 0) return;
+    const currentGroup = this.rowGroups[this.selectedRow] ?? 'Ungrouped';
+    const idx = groups.indexOf(currentGroup);
+    // Rotate to the next group (idx === -1 → start with the first group)
+    this.rowGroups[this.selectedRow] = groups[(idx + 1) % groups.length];
+    this.onGroupChanged(this.rowGroups);
+  }
+
+  private clearGroups(): void {
+    this.rowGroups = Array.from({ length: this.dataMatrix?.nSamples ?? 0 }, () => 'Ungrouped');
+    this.onGroupChanged(this.rowGroups);
   }
 
   // ─── Public API ─────────────────────────────────────────────────
 
   loadData(data: number[][], rowLabels: string[], colLabels: string[]): void {
-    this.dataMatrix = new DataMatrix(Matrix.from2D(data), rowLabels, colLabels);
+    if (!this.dataMatrix) return;
+    // @ObjectLink variables cannot be reassigned — copy values in place
+    // (dimensions must match the matrix passed at construction).
+    const rows = Math.min(data.length, this.dataMatrix.nSamples);
+    const cols = Math.min(rows > 0 ? data[0].length : 0, this.dataMatrix.nVariables);
+    for (let i = 0; i < rows; i++) {
+      for (let j = 0; j < cols; j++) {
+        this.dataMatrix.data.set(i, j, data[i][j]);
+      }
+    }
     this.rowGroups = Array.from({ length: this.dataMatrix.nSamples }, () => 'Ungrouped');
     this.selectedRows = new Set<number>();
     this.selectedRow = -1;
+    this.initColumnIndices();
+    this.recomputeRows();
   }
 
   getSelectedData(): number[][] {
@@ -333,12 +376,12 @@ export struct Spreadsheet {
     const rows = this.getSelectedRows();
     if (rows.length === 0 || !this.dataMatrix) return '';
     const lines: string[] = [];
-    lines.push(this.dataMatrix.colLabels.join('\\t'));
+    lines.push(this.dataMatrix.colLabels.join('\t'));
     for (const r of rows) {
       const vals = this.dataMatrix.data.row(r).map(v => isNaN(v) ? 'NA' : v.toString());
-      lines.push([this.dataMatrix.rowLabels[r], ...vals].join('\\t'));
+      lines.push([this.dataMatrix.rowLabels[r], ...vals].join('\t'));
     }
-    return lines.join('\\n');
+    return lines.join('\n');
   }
 
   // ─── Statistics for Selection ───────────────────────────────────

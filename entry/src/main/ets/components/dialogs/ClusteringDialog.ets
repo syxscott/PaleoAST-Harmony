@@ -4,7 +4,7 @@
  */
 @Component
 export struct ClusteringDialog {
-  @State visible: boolean = false;
+  @Link visible: boolean = false;
   @State n_clusters: number = 3;
   @State methodIdx: number = 0;
   @State metricIdx: number = 0;
@@ -47,6 +47,6 @@ export struct ClusteringDialog {
         Button('Cancel').backgroundColor('#95A5A6').fontColor('#FFFFFF').onClick(() => { this.visible = false; }).margin({ right: 12 })
         Button('Run Analysis').type(ButtonType.Capsule).backgroundColor('#3498DB').fontColor('#FFFFFF').enabled(this.errorMsg === '').onClick(() => { this.onConfirm({ n_clusters: this.n_clusters, method: this.methodOpts[this.methodIdx], metric: this.metricOpts[this.metricIdx] }); this.visible = false; })
       }.width('100%').justifyContent(FlexAlign.End)
-    }.padding(24).width(480).borderRadius(12)
+    }.padding(24).width('92%').constraintSize({ maxWidth: 480 }).borderRadius(12)
   }
 }

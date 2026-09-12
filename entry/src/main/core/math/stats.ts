@@ -1,4 +1,6 @@
 import { Matrix } from './Matrix';
+import { normCDF } from './special';
+import { tCDF } from './special';
 
 /**
  * Basic statistics functions replacing NumPy/SciPy.stats core.
@@ -119,20 +121,13 @@ export function dnorm(x: number, mu: number = 0, sigma: number = 1): number {
 }
 
 /**
- * Standard normal CDF using Abramowitz & Stegun 7.1.26 approximation
- * (max error ≈ 1.5e-7).
+ * Standard normal CDF.
+ * @deprecated Use normCDF from special.ts directly for standard normal,
+ *            or use this with mu/sigma for shifted/scaled normal.
  */
 export function pnorm(x: number, mu: number = 0, sigma: number = 1): number {
   if (sigma <= 0) throw new Error('pnorm: sigma must be positive');
-  // Sign symmetric: compute for |x| then handle sign
-  const z = (x - mu) / sigma;
-  const sign = z < 0 ? -1 : 1;
-  const ax = Math.abs(z) / Math.sqrt(2);
-  const t = 1 / (1 + 0.3275911 * ax);
-  const a1 = 0.254829592, a2 = -0.284496736, a3 = 1.421413741,
-        a4 = -1.453152027, a5 = 1.061405429;
-  const y = 1 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * Math.exp(-ax * ax);
-  return 0.5 * (1 + sign * y);
+  return normCDF((x - mu) / sigma);
 }
 
 /**
@@ -218,7 +213,7 @@ export function gammainc(s: number, x: number): number {
     }
     return sum * Math.exp(-x + s * Math.log(x) - lgamma(s));
   }
-  // Continued fraction (Lentz's method)
+  // Continued fraction (Lentz's method) — computes Q(s, x); P = 1 - Q
   let b = x + 1 - s, c = 1e300, d = 1 / b, h = d;
   for (let i = 1; i < 200; i++) {
     const an = -i * (i - s);
@@ -230,7 +225,8 @@ export function gammainc(s: number, x: number): number {
     h *= delta;
     if (Math.abs(delta - 1) < 1e-15) break;
   }
-  return Math.exp(-x + s * Math.log(x) - lgamma(s)) * h;
+  const q = Math.exp(-x + s * Math.log(x) - lgamma(s)) * h;
+  return 1 - q;
 }
 
 /** Quantile of chi-square (inverse CDF) — root-finding on pchisq. */
@@ -286,12 +282,12 @@ function betaincRegularized(a: number, b: number, x: number): number {
   return Math.min(1, Math.max(0, front * sum));
 }
 
-/** t-distribution CDF P(T ≤ t | df). */
+/**
+ * t-distribution CDF P(T ≤ t | df).
+ * @deprecated Use tCDF from special.ts
+ */
 export function pt(t: number, df: number): number {
-  const x = df / (df + t * t);
-  const ib = betaincRegularized(df / 2, 0.5, x);
-  if (t >= 0) return 1 - 0.5 * ib;
-  return 0.5 * ib;
+  return tCDF(t, df);
 }
 
 /** t-distribution quantile. */

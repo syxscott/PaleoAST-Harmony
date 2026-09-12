@@ -1,6 +1,6 @@
 @Component
 export struct ExportDialog {
-  @State visible: boolean = false;
+  @Link visible: boolean = false;
   @State formatIdx: number = 0;
   formatOpts: string[] = ['CSV', 'TSV'];
   @State includeLabels: boolean = true;
@@ -17,7 +17,7 @@ export struct ExportDialog {
         Button('Cancel').backgroundColor('#95A5A6').fontColor('#FFFFFF').onClick(() => { this.visible = false; }).margin({ right: 12 })
         Button('Export').type(ButtonType.Capsule).backgroundColor('#27AE60').fontColor('#FFFFFF').onClick(() => { this.doRun(); this.visible = false; })
       }.width('100%').justifyContent(FlexAlign.End)
-    }.padding(24).width(420).borderRadius(12)
+    }.padding(24).width('92%').constraintSize({ maxWidth: 420 }).borderRadius(12)
   }
   doRun(): void { this.onConfirm({ format: this.formatOpts[this.formatIdx], includeLabels: this.includeLabels }); }
 }
