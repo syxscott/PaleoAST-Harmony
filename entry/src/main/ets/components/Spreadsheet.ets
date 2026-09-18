@@ -93,21 +93,69 @@ export struct Spreadsheet {
       // ─── Toolbar ───
       this.Toolbar()
 
+      // ─── 冻结表头（openharmony-sheet 象限模型：表头固定，正文独立滚动） ───
+      this.HeaderRow()
+
       // ─── Data Grid ───
       Scroll() {
         Column() {
-          // Header row
-          this.HeaderRow()
-          // Data rows
+          // Data rows（长按单元格 → 上下文菜单）
           this.DataRows()
         }
-      }.layoutWeight(1).width('100%')
+      }
+      .layoutWeight(1)
+      .width('100%')
+      .bindPopup(this.showCellMenu, { builder: this.cellMenuPopup, placement: Placement.Bottom })
 
       // ─── Status Bar ───
       this.StatusBar()
     }.width('100%').height('100%')
     .backgroundColor(this.darkMode ? '#1a1a2e' : '#FFFFFF')
   }
+
+  // ─── 长按单元格上下文菜单（openharmony-sheet click-cell 模式） ─────────
+  @State showCellMenu: boolean = false;
+
+  @Builder cellMenuPopup() {
+    Column() {
+      Text(`Cell ${this.selectedRow >= 0 ? this.selectedRow + 1 : '-'}, ${this.selectedCol >= 0 ? this.selectedCol + 1 : '-'}`)
+        .fontSize(10).fontColor('#7F8C8D').margin({ bottom: 6 })
+      Button('Copy value').fontSize(11).height(26).width('100%').backgroundColor('transparent').fontColor('#2C3E50')
+        .onClick(() => {
+          if (this.dataMatrix && this.selectedRow >= 0 && this.selectedCol >= 0) {
+            const v = this.dataMatrix.data.get(this.selectedRow, this.selectedCol);
+            this.editValue = isNaN(v) ? 'NA' : String(v);
+            this.copyCellToClipboard(this.editValue);
+          }
+          this.showCellMenu = false;
+        })
+      Button('Assign next group').fontSize(11).height(26).width('100%').backgroundColor('transparent').fontColor('#2C3E50')
+        .onClick(() => {
+          if (this.selectedRow >= 0) { this.assignGroup(); }
+          this.showCellMenu = false;
+        })
+      Button('Mark as NA').fontSize(11).height(26).width('100%').backgroundColor('transparent').fontColor('#E74C3C')
+        .onClick(() => {
+          if (this.dataMatrix && this.selectedRow >= 0 && this.selectedCol >= 0) {
+            const old = this.dataMatrix.data.get(this.selectedRow, this.selectedCol);
+            StateManager.getInstance().pushUndo(this.selectedRow, this.selectedCol, old, NaN);
+            StateManager.getInstance().markModified();
+            this.dataMatrix.data.set(this.selectedRow, this.selectedCol, NaN);
+            this.dataSource.notifyRowChanged(this.selectedRow);
+          }
+          this.showCellMenu = false;
+        })
+    }
+    .padding(10)
+    .borderRadius(8)
+    .backgroundColor(this.darkMode ? '#2a2a4a' : '#FFFFFF')
+  }
+
+  private copyCellToClipboard(text: string): void {
+    // 剪贴板 API 在页面层接入；表格内先落到状态栏可见的暂存值
+    this.statusCellText = text;
+  }
+  @State statusCellText: string = '';
 
   @Builder Toolbar() {
     Row() {
@@ -196,6 +244,8 @@ export struct Spreadsheet {
                   this.selectedCol = colIdx;
                 })
                 .onDoubleClick(() => { this.startEditing(rowIdx, colIdx); })
+                .gesture(LongPressGesture({ repeatable: false })
+                  .onAction(() => { this.selectedRow = rowIdx; this.selectedCol = colIdx; this.showCellMenu = true; }))
             }
           })
         }
@@ -207,7 +257,10 @@ export struct Spreadsheet {
 
   @Builder StatusBar() {
     Row() {
-      if (this.selectedRow >= 0 && this.selectedCol >= 0) {
+      if (this.statusCellText.length > 0) {
+        Text('Copied: ' + this.statusCellText)
+          .fontSize(11).fontColor('#3498DB')
+      } else if (this.selectedRow >= 0 && this.selectedCol >= 0) {
         const val = this.dataMatrix?.data.get(this.selectedRow, this.selectedCol) ?? NaN;
         Text(`Row ${this.selectedRow + 1}, Col ${this.selectedCol + 1}: ${this.formatCell(val)}`)
           .fontSize(11).fontColor('#7F8C8D')

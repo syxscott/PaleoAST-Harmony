@@ -76,3 +76,32 @@ function colMeanFn(data: number[][], col: number): number {
   for (let i = 0; i < data.length; i++) if (!isNaN(data[i][col])) { sum += data[i][col]; cnt++; }
   return cnt > 0 ? sum / cnt : NaN;
 }
+
+// ─── Parity exports (imputation.py ImputationResult / array helpers) ────────
+
+/** Standard imputation outcome (imputation.py ImputationResult). */
+export interface ImputationResult {
+  method: 'mean' | 'median' | 'knn' | 'remove_rows' | 'remove_columns';
+  imputed: number[][];
+  nImputed: number;
+}
+
+/** Remove rows containing any NaN from a raw 2-D array. */
+export function removeRowsWithNaN(data: number[][]): number[][] {
+  return data.filter(row => !row.some(v => isNaN(v)));
+}
+
+/** Remove columns containing any NaN from a raw 2-D array. */
+export function removeColumnsWithNaN(data: number[][]): number[][] {
+  if (data.length === 0) return data;
+  const keep: number[] = [];
+  const nCols = data[0].length;
+  for (let j = 0; j < nCols; j++) {
+    let hasNaN = false;
+    for (let i = 0; i < data.length; i++) {
+      if (isNaN(data[i][j])) { hasNaN = true; break; }
+    }
+    if (!hasNaN) keep.push(j);
+  }
+  return data.map(row => keep.map(j => row[j]));
+}

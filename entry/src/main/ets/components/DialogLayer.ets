@@ -1,228 +1,210 @@
 /**
- * DialogLayer — Dialog overlay container.
- * Replaces inline @Builder DialogLayer in Index.ets.
- * Mounts every analysis dialog in the project; each is conditionally rendered
- * when its boolean @Link is true. Every dialog binds visible via @Link so
- * Cancel/Run inside the dialog closes it through the parent state.
+ * DialogLayer — tag-based dialog host (ohos_smart_dialog pattern).
+ *
+ * A single AppStorage slot (`activeDialog`) names the open dialog; DialogLayer
+ * renders it by name and feeds it a shared `dialogVisible` link so Cancel/Run
+ * inside the dialog closes it. Params travel via DialogManager.getParams().
+ *
+ * Adding a new dialog = one import + one if-branch here. Nothing else changes.
  */
 @Component
 export struct DialogLayer {
-  @Link showImportDialog: boolean;
-  @Link showExportDialog: boolean;
-  @Link showPCADialog: boolean;
-  @Link showPCoADialog: boolean;
-  @Link showNMDSDialog: boolean;
-  @Link showClusteringDialog: boolean;
-  @Link showConissDialog: boolean;
-  @Link showNullModelDialog: boolean;
-  @Link showExtinctionDialog: boolean;
-  @Link showEFADialog: boolean;
-  // Extended wiring (2026-09 parity pass)
-  @Link showUnivariateDialog: boolean;
-  @Link showDiversityDialog: boolean;
-  @Link showRarefactionDialog: boolean;
-  @Link showSimperDialog: boolean;
-  @Link showLDADialog: boolean;
-  @Link showAnosimDialog: boolean;
-  @Link showPermanovaDialog: boolean;
-  @Link showCCADialog: boolean;
-  @Link showGPADialog: boolean;
-  @Link showAllometryDialog: boolean;
-  @Link showEvoRateDialog: boolean;
-  @Link showSpectralDialog: boolean;
-  @Link showMarkovDialog: boolean;
-  @Link showDirectionalDialog: boolean;
-  @Link showIsotopeDialog: boolean;
-  @Link showStratCorrDialog: boolean;
-  @Link showBiostratDialog: boolean;
-  @Link showPaleoEnvDialog: boolean;
-  @Link showWaveletDialog: boolean;
-  @Link showPICDialog: boolean;
-  @Link showPhyloSignalDialog: boolean;
-  @Link showPhyloAnovaDialog: boolean;
-  @Link showBetaDivDialog: boolean;
-  @Link showTPSDialog: boolean;
+  @StorageLink('activeDialog') @Watch('onActiveChanged') activeDialog: string = '';
+  @State @Watch('onVisibleChanged') dialogVisible: boolean = false;
 
   onImportConfirm: (params: Record<string, Object>) => void = () => {};
   onExportConfirm: (params: Record<string, Object>) => void = () => {};
   onAnalysisConfirm: (name: string, params: Record<string, Object>) => void = () => {};
-  onPCACancel: () => void = () => {};
 
   private transition(): TransitionEffect {
     return TransitionEffect.scale({ x: 0.9, y: 0.9 }).combine(TransitionEffect.OPACITY);
   }
 
+  onActiveChanged(): void {
+    this.dialogVisible = this.activeDialog.length > 0;
+  }
+
+  /** Dialog set visible=false (Cancel/Run) → clear the registry slot. */
+  onVisibleChanged(): void {
+    if (!this.dialogVisible && this.activeDialog.length > 0) {
+      DialogManager.dismiss();
+    }
+  }
+
+  private analysis(name: string): (params: Record<string, Object>) => void {
+    return (params: Record<string, Object>) => { this.onAnalysisConfirm(name, params); };
+  }
+
   build() {
     Stack() {
-      if (this.showImportDialog) {
-        ImportDialog({ visible: $showImportDialog })
+      if (this.dialogVisible && this.activeDialog === 'Import') {
+        ImportDialog({ visible: $dialogVisible })
           .onConfirm((params: Record<string, Object>) => { this.onImportConfirm(params); })
           .transition(this.transition());
       }
-      if (this.showExportDialog) {
-        ExportDialog({ visible: $showExportDialog })
+      if (this.dialogVisible && this.activeDialog === 'Export') {
+        ExportDialog({ visible: $dialogVisible })
           .onConfirm((params: Record<string, Object>) => { this.onExportConfirm(params); })
           .transition(this.transition());
       }
-      if (this.showPCADialog) {
-        PCADialog({ visible: $showPCADialog })
-          .onConfirm((params: Record<string, Object>) => { this.onAnalysisConfirm('PCA', params); })
-          .onCancel(() => { this.onPCACancel(); })
+      if (this.dialogVisible && this.activeDialog === 'PCA') {
+        PCADialog({ visible: $dialogVisible })
+          .onConfirm(this.analysis('PCA'))
           .transition(this.transition());
       }
-      if (this.showPCoADialog) {
-        PCoADialog({ visible: $showPCoADialog })
-          .onConfirm((params: Record<string, Object>) => { this.onAnalysisConfirm('PCoA', params); })
+      if (this.dialogVisible && this.activeDialog === 'PCoA') {
+        PCoADialog({ visible: $dialogVisible })
+          .onConfirm(this.analysis('PCoA'))
           .transition(this.transition());
       }
-      if (this.showNMDSDialog) {
-        NMDSDialog({ visible: $showNMDSDialog })
-          .onConfirm((params: Record<string, Object>) => { this.onAnalysisConfirm('NMDS', params); })
+      if (this.dialogVisible && this.activeDialog === 'NMDS') {
+        NMDSDialog({ visible: $dialogVisible })
+          .onConfirm(this.analysis('NMDS'))
           .transition(this.transition());
       }
-      if (this.showClusteringDialog) {
-        ClusteringDialog({ visible: $showClusteringDialog })
-          .onConfirm((params: Record<string, Object>) => { this.onAnalysisConfirm('Clustering', params); })
+      if (this.dialogVisible && this.activeDialog === 'Clustering') {
+        ClusteringDialog({ visible: $dialogVisible })
+          .onConfirm(this.analysis('Clustering'))
           .transition(this.transition());
       }
-      if (this.showConissDialog) {
-        ConissDialog({ visible: $showConissDialog })
-          .onConfirm((params: Record<string, Object>) => { this.onAnalysisConfirm('CONISS', params); })
+      if (this.dialogVisible && this.activeDialog === 'CONISS') {
+        ConissDialog({ visible: $dialogVisible })
+          .onConfirm(this.analysis('CONISS'))
           .transition(this.transition());
       }
-      if (this.showNullModelDialog) {
-        NullModelDialog({ visible: $showNullModelDialog })
-          .onConfirm((params: Record<string, Object>) => { this.onAnalysisConfirm('NullModel', params); })
+      if (this.dialogVisible && this.activeDialog === 'NullModel') {
+        NullModelDialog({ visible: $dialogVisible })
+          .onConfirm(this.analysis('NullModel'))
           .transition(this.transition());
       }
-      if (this.showExtinctionDialog) {
-        ExtinctionDialog({ visible: $showExtinctionDialog })
-          .onConfirm((params: Record<string, Object>) => { this.onAnalysisConfirm('Extinction', params); })
+      if (this.dialogVisible && this.activeDialog === 'Extinction') {
+        ExtinctionDialog({ visible: $dialogVisible })
+          .onConfirm(this.analysis('Extinction'))
           .transition(this.transition());
       }
-      if (this.showEFADialog) {
-        EFADialog({ visible: $showEFADialog })
-          .onConfirm((params: Record<string, Object>) => { this.onAnalysisConfirm('EFA', params); })
+      if (this.dialogVisible && this.activeDialog === 'EFA') {
+        EFADialog({ visible: $dialogVisible })
+          .onConfirm(this.analysis('EFA'))
           .transition(this.transition());
       }
-      if (this.showUnivariateDialog) {
-        UnivariateDialog({ visible: $showUnivariateDialog })
-          .onConfirm((params: Record<string, Object>) => { this.onAnalysisConfirm('Summary', params); })
+      if (this.dialogVisible && this.activeDialog === 'Univariate') {
+        UnivariateDialog({ visible: $dialogVisible })
+          .onConfirm(this.analysis('Summary'))
           .transition(this.transition());
       }
-      if (this.showDiversityDialog) {
-        DiversityDialog({ visible: $showDiversityDialog })
-          .onConfirm((params: Record<string, Object>) => { this.onAnalysisConfirm('Diversity Indices', params); })
+      if (this.dialogVisible && this.activeDialog === 'Diversity Indices') {
+        DiversityDialog({ visible: $dialogVisible })
+          .onConfirm(this.analysis('Diversity Indices'))
           .transition(this.transition());
       }
-      if (this.showRarefactionDialog) {
-        RarefactionDialog({ visible: $showRarefactionDialog })
-          .onConfirm((params: Record<string, Object>) => { this.onAnalysisConfirm('Rarefaction', params); })
+      if (this.dialogVisible && this.activeDialog === 'Rarefaction') {
+        RarefactionDialog({ visible: $dialogVisible })
+          .onConfirm(this.analysis('Rarefaction'))
           .transition(this.transition());
       }
-      if (this.showSimperDialog) {
-        SimperDialog({ visible: $showSimperDialog })
-          .onConfirm((params: Record<string, Object>) => { this.onAnalysisConfirm('SIMPER', params); })
+      if (this.dialogVisible && this.activeDialog === 'SIMPER') {
+        SimperDialog({ visible: $dialogVisible })
+          .onConfirm(this.analysis('SIMPER'))
           .transition(this.transition());
       }
-      if (this.showLDADialog) {
-        LDADialog({ visible: $showLDADialog })
-          .onConfirm((params: Record<string, Object>) => { this.onAnalysisConfirm('LDA', params); })
+      if (this.dialogVisible && this.activeDialog === 'LDA') {
+        LDADialog({ visible: $dialogVisible })
+          .onConfirm(this.analysis('LDA'))
           .transition(this.transition());
       }
-      if (this.showAnosimDialog) {
-        AnosimDialog({ visible: $showAnosimDialog })
-          .onConfirm((params: Record<string, Object>) => { this.onAnalysisConfirm('ANOSIM', params); })
+      if (this.dialogVisible && this.activeDialog === 'ANOSIM') {
+        AnosimDialog({ visible: $dialogVisible })
+          .onConfirm(this.analysis('ANOSIM'))
           .transition(this.transition());
       }
-      if (this.showPermanovaDialog) {
-        PermanovaDialog({ visible: $showPermanovaDialog })
-          .onConfirm((params: Record<string, Object>) => { this.onAnalysisConfirm('PERMANOVA', params); })
+      if (this.dialogVisible && this.activeDialog === 'PERMANOVA') {
+        PermanovaDialog({ visible: $dialogVisible })
+          .onConfirm(this.analysis('PERMANOVA'))
           .transition(this.transition());
       }
-      if (this.showCCADialog) {
-        CCADialog({ visible: $showCCADialog })
-          .onConfirm((params: Record<string, Object>) => { this.onAnalysisConfirm('CCA', params); })
+      if (this.dialogVisible && this.activeDialog === 'CCA') {
+        CCADialog({ visible: $dialogVisible })
+          .onConfirm(this.analysis('CCA'))
           .transition(this.transition());
       }
-      if (this.showGPADialog) {
-        GPADialog({ visible: $showGPADialog })
-          .onConfirm((params: Record<string, Object>) => { this.onAnalysisConfirm('GPA', params); })
+      if (this.dialogVisible && this.activeDialog === 'GPA') {
+        GPADialog({ visible: $dialogVisible })
+          .onConfirm(this.analysis('GPA'))
           .transition(this.transition());
       }
-      if (this.showAllometryDialog) {
-        AllometryDialog({ visible: $showAllometryDialog })
-          .onConfirm((params: Record<string, Object>) => { this.onAnalysisConfirm('Allometry', params); })
+      if (this.dialogVisible && this.activeDialog === 'Allometry') {
+        AllometryDialog({ visible: $dialogVisible })
+          .onConfirm(this.analysis('Allometry'))
           .transition(this.transition());
       }
-      if (this.showEvoRateDialog) {
-        EvoRateDialog({ visible: $showEvoRateDialog })
-          .onConfirm((params: Record<string, Object>) => { this.onAnalysisConfirm('Evolution Rate', params); })
+      if (this.dialogVisible && this.activeDialog === 'Evolution Rate') {
+        EvoRateDialog({ visible: $dialogVisible })
+          .onConfirm(this.analysis('Evolution Rate'))
           .transition(this.transition());
       }
-      if (this.showSpectralDialog) {
-        SpectralDialog({ visible: $showSpectralDialog })
-          .onConfirm((params: Record<string, Object>) => { this.onAnalysisConfirm('Spectral', params); })
+      if (this.dialogVisible && this.activeDialog === 'Spectral') {
+        SpectralDialog({ visible: $dialogVisible })
+          .onConfirm(this.analysis('Spectral'))
           .transition(this.transition());
       }
-      if (this.showMarkovDialog) {
-        MarkovDialog({ visible: $showMarkovDialog })
-          .onConfirm((params: Record<string, Object>) => { this.onAnalysisConfirm('Markov', params); })
+      if (this.dialogVisible && this.activeDialog === 'Markov') {
+        MarkovDialog({ visible: $dialogVisible })
+          .onConfirm(this.analysis('Markov'))
           .transition(this.transition());
       }
-      if (this.showDirectionalDialog) {
-        DirectionalDialog({ visible: $showDirectionalDialog })
-          .onConfirm((params: Record<string, Object>) => { this.onAnalysisConfirm('Directional', params); })
+      if (this.dialogVisible && this.activeDialog === 'Directional') {
+        DirectionalDialog({ visible: $dialogVisible })
+          .onConfirm(this.analysis('Directional'))
           .transition(this.transition());
       }
-      if (this.showIsotopeDialog) {
-        IsotopeDialog({ visible: $showIsotopeDialog })
-          .onConfirm((params: Record<string, Object>) => { this.onAnalysisConfirm('Isotope', params); })
+      if (this.dialogVisible && this.activeDialog === 'Isotope') {
+        IsotopeDialog({ visible: $dialogVisible })
+          .onConfirm(this.analysis('Isotope'))
           .transition(this.transition());
       }
-      if (this.showStratCorrDialog) {
-        StratCorrDialog({ visible: $showStratCorrDialog })
-          .onConfirm((params: Record<string, Object>) => { this.onAnalysisConfirm('Stratigraphic Correlation', params); })
+      if (this.dialogVisible && this.activeDialog === 'Stratigraphic Correlation') {
+        StratCorrDialog({ visible: $dialogVisible })
+          .onConfirm(this.analysis('Stratigraphic Correlation'))
           .transition(this.transition());
       }
-      if (this.showBiostratDialog) {
-        BiostratDialog({ visible: $showBiostratDialog })
-          .onConfirm((params: Record<string, Object>) => { this.onAnalysisConfirm('Biostratigraphy', params); })
+      if (this.dialogVisible && this.activeDialog === 'Biostratigraphy') {
+        BiostratDialog({ visible: $dialogVisible })
+          .onConfirm(this.analysis('Biostratigraphy'))
           .transition(this.transition());
       }
-      if (this.showPaleoEnvDialog) {
-        PaleoEnvDialog({ visible: $showPaleoEnvDialog })
-          .onConfirm((params: Record<string, Object>) => { this.onAnalysisConfirm('Paleo-Environment', params); })
+      if (this.dialogVisible && this.activeDialog === 'Paleo-Environment') {
+        PaleoEnvDialog({ visible: $dialogVisible })
+          .onConfirm(this.analysis('Paleo-Environment'))
           .transition(this.transition());
       }
-      if (this.showWaveletDialog) {
-        WaveletDialog({ visible: $showWaveletDialog })
-          .onConfirm((params: Record<string, Object>) => { this.onAnalysisConfirm('Wavelet', params); })
+      if (this.dialogVisible && this.activeDialog === 'Wavelet') {
+        WaveletDialog({ visible: $dialogVisible })
+          .onConfirm(this.analysis('Wavelet'))
           .transition(this.transition());
       }
-      if (this.showPICDialog) {
-        PICDialog({ visible: $showPICDialog })
-          .onConfirm((params: Record<string, Object>) => { this.onAnalysisConfirm('PIC', params); })
+      if (this.dialogVisible && this.activeDialog === 'PIC') {
+        PICDialog({ visible: $dialogVisible })
+          .onConfirm(this.analysis('PIC'))
           .transition(this.transition());
       }
-      if (this.showPhyloSignalDialog) {
-        PhyloSignalDialog({ visible: $showPhyloSignalDialog })
-          .onConfirm((params: Record<string, Object>) => { this.onAnalysisConfirm('Phylo Signal', params); })
+      if (this.dialogVisible && this.activeDialog === 'Phylo Signal') {
+        PhyloSignalDialog({ visible: $dialogVisible })
+          .onConfirm(this.analysis('Phylo Signal'))
           .transition(this.transition());
       }
-      if (this.showPhyloAnovaDialog) {
-        PhyloAnovaDialog({ visible: $showPhyloAnovaDialog })
-          .onConfirm((params: Record<string, Object>) => { this.onAnalysisConfirm('Phylo ANOVA', params); })
+      if (this.dialogVisible && this.activeDialog === 'Phylo ANOVA') {
+        PhyloAnovaDialog({ visible: $dialogVisible })
+          .onConfirm(this.analysis('Phylo ANOVA'))
           .transition(this.transition());
       }
-      if (this.showBetaDivDialog) {
-        BetaDivDialog({ visible: $showBetaDivDialog })
-          .onConfirm((params: Record<string, Object>) => { this.onAnalysisConfirm('Beta Diversity', params); })
+      if (this.dialogVisible && this.activeDialog === 'Beta Diversity') {
+        BetaDivDialog({ visible: $dialogVisible })
+          .onConfirm(this.analysis('Beta Diversity'))
           .transition(this.transition());
       }
-      if (this.showTPSDialog) {
-        TPSDialog({ visible: $showTPSDialog })
-          .onConfirm((params: Record<string, Object>) => { this.onAnalysisConfirm('TPS Grid', params); })
+      if (this.dialogVisible && this.activeDialog === 'TPS Grid') {
+        TPSDialog({ visible: $dialogVisible })
+          .onConfirm(this.analysis('TPS Grid'))
           .transition(this.transition());
       }
     }
@@ -266,3 +248,4 @@ import { PhyloSignalDialog } from './dialogs/PhyloSignalDialog';
 import { PhyloAnovaDialog } from './dialogs/PhyloAnovaDialog';
 import { BetaDivDialog } from './dialogs/BetaDivDialog';
 import { TPSDialog } from './dialogs/TPSDialog';
+import { DialogManager } from './DialogManager';

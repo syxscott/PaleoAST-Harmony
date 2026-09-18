@@ -1,3 +1,4 @@
+import { DialogManager } from './DialogManager';
 /**
  * WelcomeView — Welcome screen when no data is loaded
  * Replaces inline @Builder WelcomeView in Index.ets
@@ -5,7 +6,6 @@
 @Component
 export struct WelcomeView {
   @Link darkMode: boolean;
-  @Link showImportDialog: boolean;
 
   build() {
     Column() {
@@ -33,7 +33,7 @@ export struct WelcomeView {
             .fontColor('#FFFFFF')
             .height(36)
             .fontSize(13)
-            .onClick(() => { this.showImportDialog = true; });
+            .onClick(() => { DialogManager.open('Import'); });
         }
       }
       .backgroundColor(this.darkMode ? '#1a1a2e' : '#FFFFFF')

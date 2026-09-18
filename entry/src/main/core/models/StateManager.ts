@@ -341,3 +341,20 @@ export class StateManager {
 export function getStateManager(): StateManager {
   return StateManager.getInstance();
 }
+
+// ─── Lock contexts (state_manager.py ReadLockContext/WriteLockContext) ──────
+// JS runs single-threaded; these provide API parity for Python call sites
+// that used reader/writer locks. They execute the body immediately.
+
+export class ReadLockContext {
+  constructor(private _sm: StateManager) {}
+  read<T>(body: () => T): T { return body(); }
+}
+
+export class WriteLockContext {
+  constructor(private _sm: StateManager) {}
+  write<T>(body: () => T): T {
+    this._sm.markModified();
+    return body();
+  }
+}

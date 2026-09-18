@@ -389,3 +389,29 @@ function _addSilent(from: State, to: State): void {
 function _addSymbol(from: State, sym: string, to: State): void {
   from.transitions.set(sym, [...(from.transitions.get(sym) ?? []), to]);
 }
+
+// ─── Misc parity exports (automaton.py AutomatonType, lexer.py factory) ─────
+
+/** Kind tag for automaton instances (automaton.py AutomatonType). */
+export enum AutomatonType {
+  DFA = 'dfa',
+  NFA = 'nfa',
+}
+
+/**
+ * Convenience factory mirroring create_basic_lexer: builds a LexerTokenizer
+ * with the common scientific-data token set (numbers, identifiers, strings,
+ * whitespace, delimiters).
+ */
+export function createBasicLexer(): Tokenizer_LexerTokenizer {
+  const t = new Tokenizer_LexerTokenizer();
+  t.addRule('[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?', TokenType.NUMBER);
+  t.addRule('[A-Za-z_][A-Za-z0-9_]*', TokenType.STRING);
+  t.addRule('"[^"]*"', TokenType.STRING);
+  t.addRule('[,;:|]', TokenType.PUNCTUATION);
+  t.addRule('\(', TokenType.PUNCTUATION);
+  t.addRule('\)', TokenType.PUNCTUATION);
+  t.addRule('\s+', TokenType.STRING, true); // skip whitespace
+  return t;
+}
+import { LexerTokenizer as Tokenizer_LexerTokenizer, TokenType } from './Tokenizer';

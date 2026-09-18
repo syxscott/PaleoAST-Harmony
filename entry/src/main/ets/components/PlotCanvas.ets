@@ -227,6 +227,25 @@ export struct PlotCanvas {
   setLabels(x: string, y: string): void { this.xlabel = x; this.ylabel = y; this.redraw(); }
   setDarkMode(d: boolean): void { this.darkMode = d; this.redraw(); }
 
+  /**
+   * Options-object API（mcCharts 模式）：一次调用应用类型/标题/轴/主题/数据。
+   * 只传覆盖项，未提供的字段沿用默认值。
+   */
+  applyOptions(overrides: PlotOptions): void {
+    const o = mergePlotOptions(overrides);
+    this.plotType = o.plotType ?? this.plotType;
+    this.title = o.title ?? this.title;
+    this.xlabel = o.xlabel ?? this.xlabel;
+    this.ylabel = o.ylabel ?? this.ylabel;
+    this.darkMode = o.darkMode ?? this.darkMode;
+    if (o.dataX && o.dataY && o.dataX.length > 0 && o.dataX.length === o.dataY.length) {
+      if (this.plotType === 'line') this.setLineData(o.dataX, o.dataY, o.color ?? '#3498DB');
+      else this.setScatterData(o.dataX, o.dataY);
+    } else {
+      this.redraw();
+    }
+  }
+
   // ─── Coordinate Mapping ────────────────────────────────────────
 
   private updateRanges(): void {
@@ -938,4 +957,35 @@ interface PlotData {
   colLabels?: string[];
   color?: string;
   boxGroups?: BoxGroupData[];
+}
+
+// ─── Options-object API（mcCharts 模式：接口 + 默认值 + 覆盖合并） ──────────
+
+export interface PlotOptions {
+  plotType?: string;
+  title?: string;
+  xlabel?: string;
+  ylabel?: string;
+  darkMode?: boolean;
+  /** 传入数据（等价于 setScatterData/setLineData 的声明式形式）。 */
+  dataX?: number[];
+  dataY?: number[];
+  color?: string;
+}
+
+/** PlotCanvas 的默认配置（mcCharts defaultOption 模式）。 */
+export const DEFAULT_PLOT_OPTIONS: PlotOptions = {
+  plotType: 'scatter',
+  title: '',
+  xlabel: '',
+  ylabel: '',
+  darkMode: false,
+  dataX: [],
+  dataY: [],
+  color: '#3498DB',
+};
+
+/** 合并默认值与覆盖项（浅合并，数组整体替换）。 */
+export function mergePlotOptions(overrides: PlotOptions): PlotOptions {
+  return { ...DEFAULT_PLOT_OPTIONS, ...overrides };
 }

@@ -5,6 +5,7 @@ import { parseCSV } from '../../core/parsers/CSVParser';
 import { PhyloNode } from '../../core/analysis/phylogenetics/index';
 import { EventBus } from '../../core/utils/EventBus';
 import { FilePickerHelper } from '../../core/io/FilePickerHelper';
+import { DialogManager } from '../components/DialogManager';
 import { NavigationTree } from '../components/NavigationTree';
 import { Spreadsheet } from '../components/Spreadsheet';
 import { PlotCanvas } from '../components/PlotCanvas';
@@ -30,40 +31,6 @@ struct Index {
   @State workspaceWidgets: string[] = [];
   @State currentWidget: number = 0;
   @State showConsole: boolean = false;
-  @State showImportDialog: boolean = false;
-  @State showExportDialog: boolean = false;
-  @State showPCADialog: boolean = false;
-  @State showPCoADialog: boolean = false;
-  @State showNMDSDialog: boolean = false;
-  @State showClusteringDialog: boolean = false;
-  @State showConissDialog: boolean = false;
-  @State showNullModelDialog: boolean = false;
-  @State showExtinctionDialog: boolean = false;
-  @State showEFADialog: boolean = false;
-  @State showUnivariateDialog: boolean = false;
-  @State showDiversityDialog: boolean = false;
-  @State showRarefactionDialog: boolean = false;
-  @State showSimperDialog: boolean = false;
-  @State showLDADialog: boolean = false;
-  @State showAnosimDialog: boolean = false;
-  @State showPermanovaDialog: boolean = false;
-  @State showCCADialog: boolean = false;
-  @State showGPADialog: boolean = false;
-  @State showAllometryDialog: boolean = false;
-  @State showEvoRateDialog: boolean = false;
-  @State showSpectralDialog: boolean = false;
-  @State showMarkovDialog: boolean = false;
-  @State showDirectionalDialog: boolean = false;
-  @State showIsotopeDialog: boolean = false;
-  @State showStratCorrDialog: boolean = false;
-  @State showBiostratDialog: boolean = false;
-  @State showPaleoEnvDialog: boolean = false;
-  @State showWaveletDialog: boolean = false;
-  @State showPICDialog: boolean = false;
-  @State showPhyloSignalDialog: boolean = false;
-  @State showPhyloAnovaDialog: boolean = false;
-  @State showBetaDivDialog: boolean = false;
-  @State showTPSDialog: boolean = false;
   @State canUndo: boolean = false;
   @State canRedo: boolean = false;
   @State plotDataX: number[] = [];
@@ -72,6 +39,7 @@ struct Index {
   @State plotType: string = 'scatter';
   @State isLoading: boolean = false;
   @State progress: number = 0;
+  @State loadError: string = ''; // 页面四态之一：error（HarmoneyOpenEye 模式）
 
   // 鸿蒙特有：AppStorage 持久化暗色模式
   @StorageLink('darkMode') darkMode: boolean = false;
@@ -125,10 +93,18 @@ struct Index {
               statusText: $statusText,
               progress: $progress
             })
+          } else if (this.loadError.length > 0) {
+            // 错误态：可重试（HarmoneyOpenEye 四态容器模式）
+            Column() {
+              Text('⚠️').fontSize(40).margin({ bottom: 8 })
+              Text('Failed to load data').fontSize(16).fontWeight(FontWeight.Medium).fontColor('#E74C3C').margin({ bottom: 4 })
+              Text(this.loadError).fontSize(11).fontColor('#7F8C8D').margin({ bottom: 16 }).textAlign(TextAlign.Center).width('80%')
+              Button('Retry Import').backgroundColor('#3498DB').fontColor('#FFFFFF')
+                .onClick(() => { this.loadError = ''; DialogManager.open('Import'); })
+            }.width('100%').height('100%').justifyContent(FlexAlign.Center)
           } else if (!this.hasData) {
             WelcomeView({
-              darkMode: $darkMode,
-              showImportDialog: $showImportDialog
+              darkMode: $darkMode
             })
           } else {
             WorkspaceView({
@@ -170,46 +146,11 @@ struct Index {
         darkMode: $darkMode
       })
 
-      // ─── 对话框层 ───
+      // ─── 对话框层（Tag 注册表模式：按名字开关，无逐对话框布尔量） ───
       DialogLayer({
-        showImportDialog: $showImportDialog,
-        showExportDialog: $showExportDialog,
-        showPCADialog: $showPCADialog,
-        showPCoADialog: $showPCoADialog,
-        showNMDSDialog: $showNMDSDialog,
-        showClusteringDialog: $showClusteringDialog,
-        showConissDialog: $showConissDialog,
-        showNullModelDialog: $showNullModelDialog,
-        showExtinctionDialog: $showExtinctionDialog,
-        showEFADialog: $showEFADialog,
-        showUnivariateDialog: $showUnivariateDialog,
-        showDiversityDialog: $showDiversityDialog,
-        showRarefactionDialog: $showRarefactionDialog,
-        showSimperDialog: $showSimperDialog,
-        showLDADialog: $showLDADialog,
-        showAnosimDialog: $showAnosimDialog,
-        showPermanovaDialog: $showPermanovaDialog,
-        showCCADialog: $showCCADialog,
-        showGPADialog: $showGPADialog,
-        showAllometryDialog: $showAllometryDialog,
-        showEvoRateDialog: $showEvoRateDialog,
-        showSpectralDialog: $showSpectralDialog,
-        showMarkovDialog: $showMarkovDialog,
-        showDirectionalDialog: $showDirectionalDialog,
-        showIsotopeDialog: $showIsotopeDialog,
-        showStratCorrDialog: $showStratCorrDialog,
-        showBiostratDialog: $showBiostratDialog,
-        showPaleoEnvDialog: $showPaleoEnvDialog,
-        showWaveletDialog: $showWaveletDialog,
-        showPICDialog: $showPICDialog,
-        showPhyloSignalDialog: $showPhyloSignalDialog,
-        showPhyloAnovaDialog: $showPhyloAnovaDialog,
-        showBetaDivDialog: $showBetaDivDialog,
-        showTPSDialog: $showTPSDialog,
         onImportConfirm: (params: Record<string, Object>) => { this.loadFile(params); },
         onExportConfirm: (params: Record<string, Object>) => { this.exportFile(params); },
-        onAnalysisConfirm: (name: string, params: Record<string, Object>) => { this.runAnalysisWithParams(name, params); },
-        onPCACancel: () => { this.showPCADialog = false; }
+        onAnalysisConfirm: (name: string, params: Record<string, Object>) => { this.runAnalysisWithParams(name, params); }
       })
 
       // ─── 浮动工具栏 ───
@@ -230,6 +171,15 @@ struct Index {
           }
         })
     )
+  }
+
+  /**
+   * @Entry 页面返回键生命周期（API 7+）：优先关对话框/控制台，返回 true 表示已消费。
+   */
+  onBackPress(): boolean {
+    if (DialogManager.isOpen()) { DialogManager.dismiss(); return true; }
+    if (this.showConsole) { this.showConsole = false; return true; }
+    return false;
   }
 
   // ─── 业务逻辑方法 ──────────────────────────────────────────────
@@ -255,6 +205,7 @@ struct Index {
 
   private loadFile(params: Record<string, Object>): void {
     this.isLoading = true;
+    this.loadError = '';
     this.statusText = 'Loading...';
     const filePath = params['filePath'] as string ?? '';
     const delimiter = params['delimiter'] as string ?? ',';
@@ -286,6 +237,7 @@ struct Index {
       // 通知已挂载的 WorkspaceView/Spreadsheet 换用新 DataMatrix
       EventBus.getInstance().emit('data_changed');
     } catch (e) {
+      this.loadError = String(e).substring(0, 160);
       this.statusText = 'Error: ' + String(e).substring(0, 100);
     }
     this.isLoading = false;
@@ -293,6 +245,15 @@ struct Index {
 
   private exportFile(params: Record<string, Object>): void {
     const format = params['format'] as string ?? 'CSV';
+    if (format === 'Script') {
+      // 可复现分析脚本导出（paleopal UI↔脚本平价）
+      FilePickerHelper.saveFile(this.buildAnalysisScript(), 'paleoast_analysis_script.json')
+        .then((uri: string | null) => {
+          this.statusText = uri ? 'Script saved to ' + uri : 'Script export cancelled';
+        })
+        .catch((e: Error) => { this.statusText = 'Script export error: ' + String(e).substring(0, 80); });
+      return;
+    }
     try {
       const content = this.dataCtrl.exportCSV(format === 'TSV' ? '\t' : ',');
       const ext = format === 'TSV' ? 'tsv' : 'csv';
@@ -550,9 +511,44 @@ struct Index {
     }
   }
 
+  // ─── 可复现分析脚本（paleopal 模式：GUI 操作 ↔ 脚本双输出） ───
+  private analysisHistory: { analysis: string; params: Record<string, Object>; at: string }[] = [];
+
+  private recordAnalysis(name: string, params: Record<string, Object>): void {
+    this.analysisHistory.push({
+      analysis: name,
+      params,
+      at: new Date().toISOString(),
+    });
+    if (this.analysisHistory.length > 200) this.analysisHistory.shift();
+  }
+
+  /**
+   * 生成可复现分析脚本：按会话顺序列出每一步的分析名与参数，
+   * 可在 PC 上审阅或回放（paleopal 的 UI↔脚本平价思想）。
+   */
+  private buildAnalysisScript(): string {
+    const dm = this.stateMgr?.dataMatrix;
+    const header = [
+      '// PaleoAST-Harmony reproducible analysis script',
+      '// Generated: ' + new Date().toISOString(),
+      dm ? '// Data: ' + dm.nSamples + ' x ' + dm.nVariables + (dm.currentFile ? ' (' + dm.currentFile + ')' : '') : '// Data: not loaded',
+      '// Steps: ' + this.analysisHistory.length,
+      '',
+    ];
+    const steps = this.analysisHistory.map((h, i) =>
+      JSON.stringify({ step: i + 1, analysis: h.analysis, params: h.params }, null, 2)
+    );
+    return header.join('
+') + '
+' + (steps.length > 0 ? steps.join(',
+') : '[]');
+  }
+
   private async runAnalysisWithParams(name: string, params: Record<string, Object>): Promise<void> {
     this.isLoading = true;
     this.statusText = 'Running: ' + name + '...';
+    this.recordAnalysis(name, params);
     try {
       if (!this.stateMgr?.dataMatrix) { throw new Error('No data loaded'); }
       let result: any;
@@ -646,41 +642,44 @@ struct Index {
     }
 
     switch (name) {
-      case 'PCA': this.showPCADialog = true; return;
-      case 'PCoA': this.showPCoADialog = true; return;
-      case 'NMDS': this.showNMDSDialog = true; return;
-      case 'Hierarchical Clustering': this.showClusteringDialog = true; return;
-      case 'CONISS': this.showConissDialog = true; return;
-      case 'Null Models': this.showNullModelDialog = true; return;
-      case 'Extinction CI': this.showExtinctionDialog = true; return;
-      case 'EFA': this.showEFADialog = true; return;
+      case 'PCA': DialogManager.open('PCA'); return;
+      case 'PCoA': DialogManager.open('PCoA'); return;
+      case 'NMDS': DialogManager.open('NMDS'); return;
+      case 'Hierarchical Clustering': DialogManager.open('Clustering'); return;
+      case 'CONISS': DialogManager.open('CONISS'); return;
+      case 'Null Models': DialogManager.open('NullModel'); return;
+      case 'Extinction CI': DialogManager.open('Extinction'); return;
+      case 'EFA': DialogManager.open('EFA'); return;
       // Extended wiring: every remaining analysis opens its dialog
-      case 'Univariate': this.showUnivariateDialog = true; return;
-      case 'Diversity Indices': this.showDiversityDialog = true; return;
-      case 'Rarefaction': this.showRarefactionDialog = true; return;
-      case 'SIMPER': this.showSimperDialog = true; return;
-      case 'LDA': this.showLDADialog = true; return;
-      case 'ANOSIM': this.showAnosimDialog = true; return;
-      case 'PERMANOVA': this.showPermanovaDialog = true; return;
-      case 'CCA': this.showCCADialog = true; return;
-      case 'GPA': this.showGPADialog = true; return;
-      case 'Allometry': this.showAllometryDialog = true; return;
-      case 'Evolution Rate': this.showEvoRateDialog = true; return;
-      case 'Spectral': this.showSpectralDialog = true; return;
-      case 'Markov': this.showMarkovDialog = true; return;
-      case 'Directional': this.showDirectionalDialog = true; return;
-      case 'Isotope': this.showIsotopeDialog = true; return;
-      case 'Stratigraphic Correlation': this.showStratCorrDialog = true; return;
-      case 'Biostratigraphy': this.showBiostratDialog = true; return;
-      case 'Paleo-Environment': this.showPaleoEnvDialog = true; return;
-      case 'Wavelet': this.showWaveletDialog = true; return;
-      case 'PIC': this.showPICDialog = true; return;
-      case 'Phylo Signal': this.showPhyloSignalDialog = true; return;
-      case 'Phylo ANOVA': this.showPhyloAnovaDialog = true; return;
-      case 'Beta Diversity': this.showBetaDivDialog = true; return;
-      case 'TPS Grid': this.showTPSDialog = true; return;
+      case 'Univariate': DialogManager.open('Univariate'); return;
+      case 'Diversity Indices': DialogManager.open('Diversity Indices'); return;
+      case 'Rarefaction': DialogManager.open('Rarefaction'); return;
+      case 'SIMPER': DialogManager.open('SIMPER'); return;
+      case 'LDA': DialogManager.open('LDA'); return;
+      case 'ANOSIM': DialogManager.open('ANOSIM'); return;
+      case 'PERMANOVA': DialogManager.open('PERMANOVA'); return;
+      case 'CCA': DialogManager.open('CCA'); return;
+      case 'GPA': DialogManager.open('GPA'); return;
+      case 'Allometry': DialogManager.open('Allometry'); return;
+      case 'Evolution Rate': DialogManager.open('Evolution Rate'); return;
+      case 'Spectral': DialogManager.open('Spectral'); return;
+      case 'Markov': DialogManager.open('Markov'); return;
+      case 'Directional': DialogManager.open('Directional'); return;
+      case 'Isotope': DialogManager.open('Isotope'); return;
+      case 'Stratigraphic Correlation': DialogManager.open('Stratigraphic Correlation'); return;
+      case 'Biostratigraphy': DialogManager.open('Biostratigraphy'); return;
+      case 'Paleo-Environment': DialogManager.open('Paleo-Environment'); return;
+      case 'Wavelet': DialogManager.open('Wavelet'); return;
+      case 'PIC': DialogManager.open('PIC'); return;
+      case 'Phylo Signal': DialogManager.open('Phylo Signal'); return;
+      case 'Phylo ANOVA': DialogManager.open('Phylo ANOVA'); return;
+      case 'Beta Diversity': DialogManager.open('Beta Diversity'); return;
+      case 'TPS Grid': DialogManager.open('TPS Grid'); return;
       case 'Eigenshape': this.statusText = 'Eigenshape: use EFA dialog first to generate coefficients'; return;
     }
+
+    // 记录分析历史（可复现脚本用；对话框分析在 runAnalysisWithParams 里记录）
+    this.recordAnalysis(name, {});
 
     this.statusText = 'Running: ' + name + '...';
     this.isLoading = true;
@@ -738,9 +737,9 @@ struct Index {
         case 'Majority Rule': this.statusText = 'Majority Rule: needs ≥ 2 trees'; break;
         case 'Heuristic Search': this.statusText = 'Heuristic Search: needs sequences'; break;
         case 'Tree Comparator': this.statusText = 'Tree Comparator: needs ≥ 2 parsed trees'; break;
-        case 'Null Model': this.showNullModelDialog = true; return;
-        case 'Import': this.showImportDialog = true; return;
-        case 'Export': this.showExportDialog = true; return;
+        case 'Null Model': DialogManager.open('NullModel'); return;
+        case 'Import': DialogManager.open('Import'); return;
+        case 'Export': DialogManager.open('Export'); return;
       }
 
       this.statusText = name + ' completed';
@@ -755,10 +754,10 @@ struct Index {
     switch (action) {
       case 'undo': this.doUndo(); break;
       case 'redo': this.doRedo(); break;
-      case 'pca': this.showPCADialog = true; break;
-      case 'nmds': this.showNMDSDialog = true; break;
+      case 'pca': DialogManager.open('PCA'); break;
+      case 'nmds': DialogManager.open('NMDS'); break;
       case 'diversity': this.handleAnalysis('Diversity Indices'); break;
-      case 'export': this.showExportDialog = true; break;
+      case 'export': DialogManager.open('Export'); break;
       case 'theme':
         this.darkMode = !this.darkMode;
         AppStorage.setOrCreate('darkMode', this.darkMode);

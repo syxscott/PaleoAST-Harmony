@@ -1,0 +1,592 @@
+[
+ {
+  "mod": "statistics",
+  "name": "ANOSIMAnalyzer",
+  "file": "statistics\\anosim.py"
+ },
+ {
+  "mod": "statistics",
+  "name": "CCAAnalyzer",
+  "file": "statistics\\cca.py"
+ },
+ {
+  "mod": "statistics",
+  "name": "ClusteringAnalyzer",
+  "file": "statistics\\clustering.py"
+ },
+ {
+  "mod": "statistics",
+  "name": "DistanceMatrixResult",
+  "file": "statistics\\distance_metrics.py"
+ },
+ {
+  "mod": "statistics",
+  "name": "GeometryAnalyzer",
+  "file": "statistics\\geometry.py"
+ },
+ {
+  "mod": "statistics",
+  "name": "LDAAnalyzer",
+  "file": "statistics\\lda.py"
+ },
+ {
+  "mod": "statistics",
+  "name": "NMDSAnalyzer",
+  "file": "statistics\\nmds.py"
+ },
+ {
+  "mod": "statistics",
+  "name": "PCAAnalyzer",
+  "file": "statistics\\pca.py"
+ },
+ {
+  "mod": "statistics",
+  "name": "ContrastResult",
+  "file": "statistics\\pcm.py"
+ },
+ {
+  "mod": "statistics",
+  "name": "AncestralStateResult",
+  "file": "statistics\\pcm.py"
+ },
+ {
+  "mod": "statistics",
+  "name": "PCMAnalyzer",
+  "file": "statistics\\pcm.py"
+ },
+ {
+  "mod": "statistics",
+  "name": "PCoAAnalyzer",
+  "file": "statistics\\pcoa.py"
+ },
+ {
+  "mod": "statistics",
+  "name": "PERMANOVAAnalyzer",
+  "file": "statistics\\permanova.py"
+ },
+ {
+  "mod": "statistics",
+  "name": "VariableContribution",
+  "file": "statistics\\simper.py"
+ },
+ {
+  "mod": "statistics",
+  "name": "SimperAnalyzer",
+  "file": "statistics\\simper.py"
+ },
+ {
+  "mod": "statistics",
+  "name": "RipleyKAnalyzer",
+  "file": "statistics\\spatial.py"
+ },
+ {
+  "mod": "statistics",
+  "name": "SummaryResult",
+  "file": "statistics\\univariate.py"
+ },
+ {
+  "mod": "statistics",
+  "name": "UnivariateAnalyzer",
+  "file": "statistics\\univariate.py"
+ },
+ {
+  "mod": "ecology",
+  "name": "AbundanceModelFitter",
+  "file": "ecology\\advanced.py"
+ },
+ {
+  "mod": "ecology",
+  "name": "SHEAnalyzer",
+  "file": "ecology\\advanced.py"
+ },
+ {
+  "mod": "ecology",
+  "name": "BetaDiversityAnalyzer",
+  "file": "ecology\\beta_diversity.py"
+ },
+ {
+  "mod": "ecology",
+  "name": "coverage_rarefaction_hill",
+  "file": "ecology\\beta_diversity.py"
+ },
+ {
+  "mod": "ecology",
+  "name": "compute_diversity_indices",
+  "file": "ecology\\diversity.py"
+ },
+ {
+  "mod": "ecology",
+  "name": "DiversityAnalyzer",
+  "file": "ecology\\diversity.py"
+ },
+ {
+  "mod": "ecology",
+  "name": "DTWAnalyzer",
+  "file": "ecology\\dtw.py"
+ },
+ {
+  "mod": "ecology",
+  "name": "NullModelAnalyzer",
+  "file": "ecology\\null_models.py"
+ },
+ {
+  "mod": "ecology",
+  "name": "PaleoEnvironmentResult",
+  "file": "ecology\\paleoenv.py"
+ },
+ {
+  "mod": "macroevolution",
+  "name": "CohortSurvivorshipAnalysis",
+  "file": "macroevolution\\cohort.py"
+ },
+ {
+  "mod": "macroevolution",
+  "name": "analyze_cohort_survivorship",
+  "file": "macroevolution\\cohort.py"
+ },
+ {
+  "mod": "macroevolution",
+  "name": "FBDEventType",
+  "file": "macroevolution\\fbd.py"
+ },
+ {
+  "mod": "macroevolution",
+  "name": "FBDEvent",
+  "file": "macroevolution\\fbd.py"
+ },
+ {
+  "mod": "macroevolution",
+  "name": "FBDSimulationResult",
+  "file": "macroevolution\\fbd.py"
+ },
+ {
+  "mod": "macroevolution",
+  "name": "GillespieSimulator",
+  "file": "macroevolution\\fbd.py"
+ },
+ {
+  "mod": "macroevolution",
+  "name": "simulate_fbd_process",
+  "file": "macroevolution\\fbd.py"
+ },
+ {
+  "mod": "macroevolution",
+  "name": "CoxPHAnalyzer",
+  "file": "macroevolution\\survival.py"
+ },
+ {
+  "mod": "morphometrics",
+  "name": "AllometryAnalyzer",
+  "file": "morphometrics\\allometry.py"
+ },
+ {
+  "mod": "morphometrics",
+  "name": "EFAHarmonic",
+  "file": "morphometrics\\efa.py"
+ },
+ {
+  "mod": "morphometrics",
+  "name": "EFAAnalyzer",
+  "file": "morphometrics\\efa.py"
+ },
+ {
+  "mod": "morphometrics",
+  "name": "EvolutionModel",
+  "file": "morphometrics\\evolution_rate.py"
+ },
+ {
+  "mod": "morphometrics",
+  "name": "EvolutionRateAnalyzer",
+  "file": "morphometrics\\evolution_rate.py"
+ },
+ {
+  "mod": "phylogenetics",
+  "name": "build_upgma_tree",
+  "file": "phylogenetics\\distance_methods.py"
+ },
+ {
+  "mod": "phylogenetics",
+  "name": "build_nj_tree",
+  "file": "phylogenetics\\distance_methods.py"
+ },
+ {
+  "mod": "phylogenetics",
+  "name": "FitchAlgorithm",
+  "file": "phylogenetics\\fitch.py"
+ },
+ {
+  "mod": "phylogenetics",
+  "name": "TreeOperation",
+  "file": "phylogenetics\\heuristic_search.py"
+ },
+ {
+  "mod": "phylogenetics",
+  "name": "NNIOperation",
+  "file": "phylogenetics\\heuristic_search.py"
+ },
+ {
+  "mod": "phylogenetics",
+  "name": "TBROperation",
+  "file": "phylogenetics\\heuristic_search.py"
+ },
+ {
+  "mod": "phylogenetics",
+  "name": "PICNodeData",
+  "file": "phylogenetics\\pic.py"
+ },
+ {
+  "mod": "phylogenetics",
+  "name": "StrictConsensusTree",
+  "file": "phylogenetics\\strict_consensus.py"
+ },
+ {
+  "mod": "phylogenetics",
+  "name": "build_strict_consensus",
+  "file": "phylogenetics\\strict_consensus.py"
+ },
+ {
+  "mod": "phylogenetics",
+  "name": "build_majority_rule_consensus",
+  "file": "phylogenetics\\strict_consensus.py"
+ },
+ {
+  "mod": "phylogenetics",
+  "name": "NodeType",
+  "file": "phylogenetics\\tree.py"
+ },
+ {
+  "mod": "stratigraphy",
+  "name": "ForecastResult",
+  "file": "stratigraphy\\arma.py"
+ },
+ {
+  "mod": "stratigraphy",
+  "name": "ARMAAnalyzer",
+  "file": "stratigraphy\\arma.py"
+ },
+ {
+  "mod": "stratigraphy",
+  "name": "CONISSAnalyzer",
+  "file": "stratigraphy\\coniss.py"
+ },
+ {
+  "mod": "stratigraphy",
+  "name": "StratigraphicCorrelationResult",
+  "file": "stratigraphy\\correlation.py"
+ },
+ {
+  "mod": "stratigraphy",
+  "name": "StratigraphicCorrelationAnalyzer",
+  "file": "stratigraphy\\correlation.py"
+ },
+ {
+  "mod": "stratigraphy",
+  "name": "SedimentationRateAnalyzer",
+  "file": "stratigraphy\\correlation.py"
+ },
+ {
+  "mod": "stratigraphy",
+  "name": "DirectionalAnalyzer",
+  "file": "stratigraphy\\directional.py"
+ },
+ {
+  "mod": "stratigraphy",
+  "name": "ExtinctionIntervalResult",
+  "file": "stratigraphy\\extinction.py"
+ },
+ {
+  "mod": "stratigraphy",
+  "name": "ExtinctionIntervalAnalyzer",
+  "file": "stratigraphy\\extinction.py"
+ },
+ {
+  "mod": "stratigraphy",
+  "name": "IsotopeData",
+  "file": "stratigraphy\\isotope_analysis.py"
+ },
+ {
+  "mod": "stratigraphy",
+  "name": "IsotopeTrend",
+  "file": "stratigraphy\\isotope_analysis.py"
+ },
+ {
+  "mod": "stratigraphy",
+  "name": "compute_moving_average",
+  "file": "stratigraphy\\isotope_analysis.py"
+ },
+ {
+  "mod": "stratigraphy",
+  "name": "detect_excursions_from_values",
+  "file": "stratigraphy\\isotope_analysis.py"
+ },
+ {
+  "mod": "stratigraphy",
+  "name": "IsotopeAnalyzer",
+  "file": "stratigraphy\\isotope_analysis.py"
+ },
+ {
+  "mod": "stratigraphy",
+  "name": "MarkovAnalyzer",
+  "file": "stratigraphy\\markov.py"
+ },
+ {
+  "mod": "stratigraphy",
+  "name": "SpectralAnalyzer",
+  "file": "stratigraphy\\spectral_analysis.py"
+ },
+ {
+  "mod": "_core",
+  "name": "PICNodeData",
+  "file": "_core\\pic.py"
+ },
+ {
+  "mod": "_core",
+  "name": "compute_pic_felsenstein",
+  "file": "_core\\pic.py"
+ },
+ {
+  "mod": "_core",
+  "name": "pagel_lambda_vcv",
+  "file": "_core\\vcv.py"
+ },
+ {
+  "mod": "parsers",
+  "name": "ChunkType",
+  "file": "parsers\\binary_cache.py"
+ },
+ {
+  "mod": "parsers",
+  "name": "BinaryCacheHeader",
+  "file": "parsers\\binary_cache.py"
+ },
+ {
+  "mod": "parsers",
+  "name": "PASTData",
+  "file": "parsers\\dat_parser.py"
+ },
+ {
+  "mod": "parsers",
+  "name": "BaseLexer",
+  "file": "parsers\\lexer.py"
+ },
+ {
+  "mod": "parsers",
+  "name": "NewickTree",
+  "file": "parsers\\newick_parser.py"
+ },
+ {
+  "mod": "parsers",
+  "name": "create_nexus_lexer",
+  "file": "parsers\\nexus_lexer.py"
+ },
+ {
+  "mod": "parsers",
+  "name": "TPSSpecimen",
+  "file": "parsers\\tps_parser.py"
+ },
+ {
+  "mod": "models",
+  "name": "ColumnMetadataManager",
+  "file": "models\\column_metadata.py"
+ },
+ {
+  "mod": "models",
+  "name": "RowMetadataManager",
+  "file": "models\\row_metadata.py"
+ },
+ {
+  "mod": "controllers",
+  "name": "CsvLoadTask",
+  "file": "controllers\\data_controller.py"
+ },
+ {
+  "mod": "controllers",
+  "name": "DataLoadTask",
+  "file": "controllers\\data_controller.py"
+ },
+ {
+  "mod": "config",
+  "name": "ColorPalette",
+  "file": "config\\design_system.py"
+ },
+ {
+  "mod": "config",
+  "name": "ColorPaletteDark",
+  "file": "config\\design_system.py"
+ },
+ {
+  "mod": "config",
+  "name": "get_modern_stylesheet",
+  "file": "config\\design_system.py"
+ },
+ {
+  "mod": "config",
+  "name": "get_stylesheet",
+  "file": "config\\design_system.py"
+ },
+ {
+  "mod": "config",
+  "name": "ImputationMethod",
+  "file": "config\\imputation.py"
+ },
+ {
+  "mod": "config",
+  "name": "MissingValueReport",
+  "file": "config\\imputation.py"
+ },
+ {
+  "mod": "config",
+  "name": "analyze_missing_values",
+  "file": "config\\imputation.py"
+ },
+ {
+  "mod": "utils",
+  "name": "requires_gui",
+  "file": "utils\\decorators.py"
+ },
+ {
+  "mod": "utils",
+  "name": "get_event_bus",
+  "file": "utils\\event_bus.py"
+ },
+ {
+  "mod": "utils",
+  "name": "impute_column_mean",
+  "file": "utils\\transformations.py"
+ },
+ {
+  "mod": "state_machine",
+  "name": "RegexNodeType",
+  "file": "state_machine\\automaton.py"
+ },
+ {
+  "mod": "state_machine",
+  "name": "RegexNode",
+  "file": "state_machine\\automaton.py"
+ },
+ {
+  "mod": "state_machine",
+  "name": "regex_to_nfa",
+  "file": "state_machine\\automaton.py"
+ },
+ {
+  "mod": "state_machine",
+  "name": "regex_to_dfa",
+  "file": "state_machine\\automaton.py"
+ },
+ {
+  "mod": "state_machine",
+  "name": "TransitionType",
+  "file": "state_machine\\base.py"
+ },
+ {
+  "mod": "app_infrastructure",
+  "name": "FunctionInfo",
+  "file": "app_infrastructure\\audit\\ast_auditor.py"
+ },
+ {
+  "mod": "app_infrastructure",
+  "name": "ImportInfo",
+  "file": "app_infrastructure\\audit\\ast_auditor.py"
+ },
+ {
+  "mod": "app_infrastructure",
+  "name": "ASTAuditor",
+  "file": "app_infrastructure\\audit\\ast_auditor.py"
+ },
+ {
+  "mod": "app_infrastructure",
+  "name": "DirectoryFixerResult",
+  "file": "app_infrastructure\\audit\\directory_fixer.py"
+ },
+ {
+  "mod": "app_infrastructure",
+  "name": "DirectoryFixer",
+  "file": "app_infrastructure\\audit\\directory_fixer.py"
+ },
+ {
+  "mod": "app_infrastructure",
+  "name": "fix_paleoast_directories",
+  "file": "app_infrastructure\\audit\\directory_fixer.py"
+ },
+ {
+  "mod": "app_infrastructure",
+  "name": "CrashReportDialog",
+  "file": "app_infrastructure\\exception_handler.py"
+ },
+ {
+  "mod": "app_infrastructure",
+  "name": "SplashScreenStyle",
+  "file": "app_infrastructure\\startup\\splash.py"
+ },
+ {
+  "mod": "app_infrastructure",
+  "name": "AnimatedLabel",
+  "file": "app_infrastructure\\startup\\splash.py"
+ },
+ {
+  "mod": "app_infrastructure",
+  "name": "CircularProgressIndicator",
+  "file": "app_infrastructure\\startup\\splash.py"
+ },
+ {
+  "mod": "app_infrastructure",
+  "name": "SplashScreen",
+  "file": "app_infrastructure\\startup\\splash.py"
+ },
+ {
+  "mod": "app_infrastructure",
+  "name": "SplashScreenManager",
+  "file": "app_infrastructure\\startup\\splash.py"
+ },
+ {
+  "mod": "app_infrastructure",
+  "name": "create_professional_splash",
+  "file": "app_infrastructure\\startup\\splash.py"
+ },
+ {
+  "mod": "app_infrastructure",
+  "name": "StyleMode",
+  "file": "app_infrastructure\\theme\\styles.py"
+ },
+ {
+  "mod": "app_infrastructure",
+  "name": "ColorPalette",
+  "file": "app_infrastructure\\theme\\styles.py"
+ },
+ {
+  "mod": "app_infrastructure",
+  "name": "PaleoASTStyles",
+  "file": "app_infrastructure\\theme\\styles.py"
+ },
+ {
+  "mod": "app_infrastructure",
+  "name": "get_dark_stylesheet",
+  "file": "app_infrastructure\\theme\\styles.py"
+ },
+ {
+  "mod": "app_infrastructure",
+  "name": "get_light_stylesheet",
+  "file": "app_infrastructure\\theme\\styles.py"
+ },
+ {
+  "mod": "app_infrastructure",
+  "name": "get_default_stylesheet",
+  "file": "app_infrastructure\\theme\\styles.py"
+ },
+ {
+  "mod": "plugins",
+  "name": "auto_register",
+  "file": "plugins\\decorators.py"
+ },
+ {
+  "mod": "plugins",
+  "name": "discover_plugins_in_package",
+  "file": "plugins\\loader.py"
+ },
+ {
+  "mod": "plugins",
+  "name": "AnalysisPluginRegistry",
+  "file": "plugins\\registry.py"
+ }
+]

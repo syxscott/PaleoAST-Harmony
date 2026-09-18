@@ -106,3 +106,23 @@ export function readCacheHeader(buffer: ArrayBuffer): CacheHeader {
     flags: view.getUint32(28),
   };
 }
+
+/** Thrown when a cache payload fails CRC or structural validation. */
+export class CorruptedCacheError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'CorruptedCacheError';
+  }
+}
+
+/** Convenience wrapper (binary_cache.py save_matrix): serialize + row/col counts. */
+export function saveMatrix(data: Float64Array, nRows: number, nCols: number): ArrayBuffer {
+  return serializeMatrix(data, { nRows, nCols });
+}
+
+/** Convenience wrapper (binary_cache.py load_matrix): deserialize + validate shape. */
+export function loadMatrix(buffer: ArrayBuffer): { data: Float64Array; nRows: number; nCols: number } {
+  const header = readCacheHeader(buffer);
+  const data = deserializeMatrix(buffer);
+  return { data, nRows: header.nRows, nCols: header.nCols };
+}

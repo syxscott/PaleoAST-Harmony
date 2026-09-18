@@ -17,6 +17,8 @@
  */
 import { PhyloNode } from './phylogenetics';
 import { randn, seed as seedRng } from '../../math/random';
+import { svd } from '../../math/linalg';
+import { Matrix } from '../../math/Matrix';
 
 export interface BrownianVCVResult {
   tipNames: string[];
@@ -257,4 +259,104 @@ export function phyloBMLogLik(V: number[][], y: number[]): number {
   if (sigma2 <= 0) return NaN;
 
   return -0.5 * n * Math.log(2 * Math.PI * sigma2) - 0.5 * logDet - quad / (2 * sigma2);
+}
+
+// ─── Kabsch rotation (port of _core/rotation.py) ────────────────────────────
+
+/** k×k matrix helpers local to the Kabsch implementation. */
+function _kabschTranspose(M: number[][]): number[][] {
+  const r = M.length, c = M[0].length;
+  const out: number[][] = Array.from({ length: c }, () => new Array(r).fill(0));
+  for (let i = 0; i < r; i++) for (let j = 0; j < c; j++) out[j][i] = M[i][j];
+  return out;
+}
+
+function _kabschMultiply(A: number[][], B: number[][]): number[][] {
+  const n = A.length, m = B[0].length, inner = B.length;
+  const out: number[][] = Array.from({ length: n }, () => new Array(m).fill(0));
+  for (let i = 0; i < n; i++) {
+    for (let j = 0; j < m; j++) {
+      let s = 0;
+      for (let p = 0; p < inner; p++) s += A[i][p] * B[p][j];
+      out[i][j] = s;
+    }
+  }
+  return out;
+}
+
+function _kabschDet(M: number[][]): number {
+  const n = M.length;
+  const a = M.map(row => [...row]);
+  let det = 1;
+  for (let col = 0; col < n; col++) {
+    let maxRow = col;
+    for (let row = col + 1; row < n; row++) {
+      if (Math.abs(a[row][col]) > Math.abs(a[maxRow][col])) maxRow = row;
+    }
+    if (Math.abs(a[maxRow][col]) < 1e-300) return 0;
+    if (maxRow !== col) { const t = a[col]; a[col] = a[maxRow]; a[maxRow] = t; det = -det; }
+    det *= a[col][col];
+    for (let row = col + 1; row < n; row++) {
+      const f = a[row][col] / a[col][col];
+      for (let j = col; j < n; j++) a[row][j] -= f * a[col][j];
+    }
+  }
+  return det;
+}
+
+/**
+ * Generic N-dimensional Kabsch alignment: finds rotation R minimising
+ * Σ‖R·x_i − y_i‖² over paired point sets via SVD of the covariance with
+ * reflection correction (Kabsch 1976). allowScale adds the uniform scale
+ * s = Σσ_i / Σ‖x−x̄‖². Works for any dimensionality.
+ */
+export function kabschRotation(
+  X: number[][], Y: number[][], allowScale: boolean = false,
+): { R: number[][]; scale: number; dims: number } {
+  const n = Math.min(X.length, Y.length);
+  if (n === 0) throw new Error('kabschRotation: empty point sets');
+  const k = X[0].length;
+  if (Y[0].length !== k) throw new Error('kabschRotation: dimension mismatch');
+
+  const cx = new Array(k).fill(0), cy = new Array(k).fill(0);
+  for (let i = 0; i < n; i++) {
+    for (let d = 0; d < k; d++) { cx[d] += X[i][d] / n; cy[d] += Y[i][d] / n; }
+  }
+
+  // covariance H = Xcᵀ·Yc
+  const H: number[][] = Array.from({ length: k }, () => new Array(k).fill(0));
+  for (let i = 0; i < n; i++) {
+    for (let a = 0; a < k; a++) {
+      for (let b = 0; b < k; b++) {
+        H[a][b] += (X[i][a] - cx[a]) * (Y[i][b] - cy[b]);
+      }
+    }
+  }
+
+  const { U, S, Vt } = svd(Matrix.from2D(H));
+  const V = _kabschTranspose(Vt.to2D());
+  // reflection correction: flip last column of V when det(V·Uᵀ) < 0
+  if (_kabschDet(_kabschMultiply(V, _kabschTranspose(U.to2D()))) < 0) {
+    for (let r = 0; r < k; r++) V[r][k - 1] = -V[r][k - 1];
+  }
+  const R = _kabschMultiply(V, _kabschTranspose(U.to2D()));
+
+  let scale = 1;
+  if (allowScale) {
+    let den = 0;
+    for (let i = 0; i < n; i++) {
+      for (let a = 0; a < k; a++) {
+        const dx = X[i][a] - cx[a];
+        den += dx * dx;
+      }
+    }
+    const num = S.reduce((s2, v) => s2 + v, 0);
+    scale = den > 0 ? num / den : 1;
+  }
+  return { R, scale, dims: k };
+}
+
+/** Convenience wrapper: rotation aligning 3-D X onto 3-D Y. */
+export function kabschRotation3D(X: number[][], Y: number[][]): number[][] {
+  return kabschRotation(X, Y, false).R;
 }

@@ -54,3 +54,18 @@ export function parseDAT(text: string, delimiter = ',', hasHeader = true, hasRow
 
   return { data, rowLabels, colLabels, nRows: data.length, nCols };
 }
+
+/** DAT parse failure with context (dat_parser.py DATParseError). */
+export class DATParseError extends Error {
+  constructor(message: string, public line: number = 0) {
+    super(line > 0 ? `${message} (line ${line})` : message);
+    this.name = 'DATParseError';
+  }
+}
+
+/** File-level convenience (dat_parser.py parse_dat_file): real fs read. */
+export async function parseDatFile(path: string): Promise<{ data: number[][]; rowLabels: string[]; colLabels: string[] }> {
+  const { FileManager } = await import('../io/FileManager');
+  const text = await FileManager.readText(path);
+  return parseDAT(text);
+}

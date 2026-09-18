@@ -538,6 +538,8 @@ export interface PICResult {
   contrastPairs: { nodeA: string; nodeB: string }[];
   /** Root variance estimate (cumulative variance at the root). */
   rootVariance: number;
+  /** Reconstructed trait at every named internal node (pic.py ancestral states). */
+  nodeValues: Record<string, number>;
 }
 
 export function pic(
@@ -547,6 +549,7 @@ export function pic(
 ): PICResult {
   const contrasts: number[] = [], seList: number[] = [];
   const contrastPairs: { nodeA: string; nodeB: string }[] = [];
+  const nodeValues: Record<string, number> = {};
 
   // Felsenstein 1985 Phylogenetic Independent Contrasts (PIC)
   // Properly handles both binary and multifurcating (polytomy) nodes
@@ -585,6 +588,7 @@ export function pic(
       // Reconstructed value at node: inverse-variance weighted mean
       const w1 = 1 / Math.max(v1, 1e-10), w2 = 1 / Math.max(v2, 1e-10);
       const recon = (w1 * c1.value! + w2 * c2.value!) / (w1 + w2);
+      if (node.name) nodeValues[node.name] = recon;
       return { value: recon, cumVar: v1 + v2 };
     } else {
       // Polytomy: produce (k-1) independent contrasts via GLS
@@ -623,6 +627,7 @@ export function pic(
         wValSum += w * childResults[ci].value!;
       }
       const recon = wValSum / wSum;
+      if (node.name) nodeValues[node.name] = recon;
       // cumVar at node = sum of variances (for rootward propagation)
       const totalVar = vars.reduce((a, b) => a + b, 0);
       return { value: recon, cumVar: totalVar };
@@ -636,7 +641,19 @@ export function pic(
     nContrasts: contrasts.length,
     contrastPairs,
     rootVariance: rootResult.cumVar + rootVariance,
+    nodeValues,
   };
+}
+
+/**
+ * PIC with ancestral states in one call (pic.py compute_pic_with_ancestral_states).
+ */
+export function computePICWithAncestralStates(
+  tree: PhyloNode,
+  traitValues: Record<string, number>,
+): { contrasts: number[]; standardErrors: number[]; nodeValues: Record<string, number> } {
+  const r = pic(tree, traitValues);
+  return { contrasts: r.contrasts, standardErrors: r.standardErrors, nodeValues: r.nodeValues };
 }
 
 /**

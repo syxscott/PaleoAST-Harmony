@@ -53,3 +53,11 @@ export class Lexer {
     return tokens;
   }
 }
+
+/** Lexer failure with position info (lexer.py LexerError). */
+export class LexerError extends Error {
+  constructor(message: string, public line: number = 0, public column: number = 0) {
+    super(line > 0 ? `${message} (line ${line}, col ${column})` : message);
+    this.name = 'LexerError';
+  }
+}

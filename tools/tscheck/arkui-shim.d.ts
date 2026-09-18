@@ -62,3 +62,10 @@ declare class TextEncoder {
 declare class TextDecoder {
   decode(input?: Uint8Array): string;
 }
+
+declare module '@kit.AbilityKit' {
+  export namespace errorManager {
+    export function on(type: string, callback: (err: Error) => void): void;
+    export function off(type: string, callback?: (err: Error) => void): void;
+  }
+}

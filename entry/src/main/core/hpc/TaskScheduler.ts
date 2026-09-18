@@ -88,3 +88,29 @@ export class TaskScheduler {
   getFailedCount(): number { return this._failed; }
   clear(): void { this._queue = []; }
 }
+
+// ─── Task bookkeeping enums (task_scheduler.py TaskStatus/TaskPriority) ─────
+
+export enum TaskStatus {
+  Pending = 'pending',
+  Running = 'running',
+  Completed = 'completed',
+  Failed = 'failed',
+  Cancelled = 'cancelled',
+}
+
+export enum TaskPriority {
+  Low = 0,
+  Normal = 5,
+  High = 10,
+  Critical = 20,
+}
+
+/** A scheduled task record with bookkeeping state (task_scheduler.py ScheduledTask). */
+export interface ScheduledTask extends Task {
+  status: TaskStatus;
+  submittedAt: number;
+  finishedAt?: number;
+}
+
+export type TaskState = TaskStatus;

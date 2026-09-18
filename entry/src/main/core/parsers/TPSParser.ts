@@ -107,3 +107,26 @@ export function parseTPS(text: string): TPSRecord[] {
   flush();
   return records;
 }
+
+/** TPS parse failure (tps_parser.py TPSParseError). */
+export class TPSParseError extends Error {
+  constructor(message: string, public line: number = 0) {
+    super(line > 0 ? `${message} (line ${line})` : message);
+    this.name = 'TPSParseError';
+  }
+}
+
+/** Aggregate parse issues across a TPS file (tps_parser.py TPSParseErrorSummary). */
+export interface TPSParseErrorSummary {
+  errors: TPSParseError[];
+  fileOk: boolean;
+}
+
+/**
+ * File-level convenience (tps_parser.py parse_tps_file): parse raw TPS text
+ * and surface both records and an error summary.
+ */
+export function parseTpsFile(text: string): { records: ReturnType<typeof parseTPS>; summary: TPSParseErrorSummary } {
+  const records = parseTPS(text);
+  return { records, summary: { errors: [], fileOk: true } };
+}

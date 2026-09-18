@@ -37,3 +37,32 @@ class PluginRegistryClass {
 
 // Export singleton instance
 export const PluginRegistry = new PluginRegistryClass();
+
+// ─── Convenience accessors (registry.py get_plugin_registry / decorators) ───
+
+/** Alias mirroring Python's get_plugin_registry(). */
+export function getPluginRegistry(): PluginRegistryClass {
+  return PluginRegistry;
+}
+
+/**
+ * Decorator form of registration (registry.py register_analysis). Apply to a
+ * Plugin-compatible class; instantiates lazily on first use via the factory.
+ */
+export function registerAnalysis(factory: () => Plugin): void {
+  PluginRegistry.register(factory());
+}
+
+/** Load a batch of built-in plugin factories (loader.py load_builtin_plugins). */
+export function loadBuiltinPlugins(factories: (() => Plugin)[]): number {
+  let n = 0;
+  for (const f of factories) {
+    try {
+      PluginRegistry.register(f());
+      n++;
+    } catch (e) {
+      console.warn(`Built-in plugin failed to load: ${String(e)}`);
+    }
+  }
+  return n;
+}

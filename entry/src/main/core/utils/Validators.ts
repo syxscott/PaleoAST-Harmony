@@ -77,3 +77,78 @@ export function validateColumnName(name: string): void {
   if (!name || name.trim().length === 0) throw new ValidationError('Column name is empty');
   if (name.length > 128) throw new ValidationError('Column name exceeds 128 characters');
 }
+
+// ─── Additional validators (utils/validators.py parity) ─────────────────────
+
+/** Report the count and positions of missing values in a matrix. */
+export function checkMissingValues(data: Matrix): { count: number; positions: [number, number][] } {
+  const positions: [number, number][] = [];
+  for (let i = 0; i < data.rows; i++) {
+    for (let j = 0; j < data.cols; j++) {
+      if (isNaN(data.get(i, j))) positions.push([i, j]);
+    }
+  }
+  return { count: positions.length, positions };
+}
+
+/** Throw if the matrix contains ±Infinity. */
+export function checkInfiniteValues(data: Matrix): void {
+  for (let i = 0; i < data.length; i++) {
+    if (!isNaN(data.data[i]) && !Number.isFinite(data.data[i])) {
+      throw new ValidationError(`Matrix contains Infinity at flat index ${i}`);
+    }
+  }
+}
+
+/** Return the indices of columns whose values never vary. */
+export function checkConstantColumns(data: Matrix): number[] {
+  const constant: number[] = [];
+  for (let j = 0; j < data.cols; j++) {
+    let first = NaN, isConstant = true;
+    for (let i = 0; i < data.rows; i++) {
+      const v = data.get(i, j);
+      if (isNaN(v)) continue;
+      if (isNaN(first)) first = v;
+      else if (v !== first) { isConstant = false; break; }
+    }
+    if (isConstant) constant.push(j);
+  }
+  return constant;
+}
+
+/** Validate row label hygiene (unique, non-empty). */
+export function validateRowLabels(labels: string[]): void {
+  const seen = new Set<string>();
+  for (let i = 0; i < labels.length; i++) {
+    if (!labels[i] || labels[i].trim().length === 0) {
+      throw new ValidationError(`Row label at index ${i} is empty`);
+    }
+    if (seen.has(labels[i])) {
+      throw new ValidationError(`Duplicate row label '${labels[i]}'`);
+    }
+    seen.add(labels[i]);
+  }
+}
+
+/** Validate that a distance metric name is supported. */
+export function validateDistanceMetric(metric: string): void {
+  const supported = ['euclidean', 'bray_curtis', 'braycurtis', 'cosine', 'jaccard',
+    'canberra', 'cityblock', 'manhattan', 'correlation', 'hamming', 'chebychev', 'chebyshev'];
+  if (!supported.includes(metric)) {
+    throw new ValidationError(`Unknown distance metric '${metric}'. Supported: ${supported.join(', ')}`);
+  }
+}
+
+/** Validate column metadata consistency (names non-empty, numeric ranges sane). */
+export function validateColumnMetadata(meta: { name: string; type: string; min?: number; max?: number }[]): void {
+  const seen = new Set<string>();
+  for (let i = 0; i < meta.length; i++) {
+    const m = meta[i];
+    if (!m.name || m.name.trim().length === 0) throw new ValidationError(`Column ${i}: empty name`);
+    if (seen.has(m.name)) throw new ValidationError(`Duplicate column name '${m.name}'`);
+    seen.add(m.name);
+    if (m.min !== undefined && m.max !== undefined && m.min > m.max) {
+      throw new ValidationError(`Column '${m.name}': min > max`);
+    }
+  }
+}

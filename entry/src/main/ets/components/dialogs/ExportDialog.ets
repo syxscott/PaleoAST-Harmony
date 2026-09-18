@@ -2,7 +2,7 @@
 export struct ExportDialog {
   @Link visible: boolean;
   @State formatIdx: number = 0;
-  formatOpts: string[] = ['CSV', 'TSV'];
+  formatOpts: string[] = ['CSV', 'TSV', 'Script'];
   @State includeLabels: boolean = true;
   @State showTips: boolean = false;
   onConfirm: (params: Record<string, Object>) => void = () => {};
