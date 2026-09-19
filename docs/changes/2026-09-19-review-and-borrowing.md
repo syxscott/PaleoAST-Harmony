@@ -130,3 +130,53 @@
 - `PlotCanvas` 的 `dendrogram` 类型缺 linkage 通道，Clustering/CONISS 目前绘制真实的「合并高度曲线」而非树状图。
 - 真机端 `hasNative()` 的最终确认需要设备（`test/device/` 骨架已就位）。
 - i18n 仍只有 en / zh。
+
+---
+
+## 附：对本次改动的自查（同日）
+
+提交后对**本轮自己写的代码**复查了一遍，发现并修复 3 个问题、补齐 1 处未接线、并强化了检查工具。
+
+### 1. ArkTS `struct` 内使用 `static`（编译错误）
+
+`PlotCanvas` 里新增的 `static readonly HOVER_RADIUS / TICK_DIVISIONS`。仓库中其他 `static readonly` 先例（`DialogManager`、`Breakpoints`）**都是 `export class`**，而 ArkTS 的 `@Component struct` 不支持 `static` 成员 —— 会在 DevEco 编译时报错，且单测看不见（测试不编译 ArkUI 层）。
+
+**修复**：移到模块级 `const HOVER_RADIUS / TICK_DIVISIONS`，引用点同步改名。
+
+### 2. `const gap` 重复声明（编译错误，且是我自己引入的）
+
+接线 `ChartComputator.barLayout` 到 `exportSVG` 时，插入了 `const gap = layout.gap;` 却没删掉原有的 `const gap = pw / labels.length * 0.3;` —— 同一作用域重复声明。
+
+**修复**：删除旧声明。**教训**：这类错误括号平衡检查抓不到，因此给 `tools/structure_check.py` 新增了两条规则（见下）。
+
+### 3. ArkTS 对象字面量缺少显式类型
+
+`restoreHistory()` 的 `.map((r) => { return { analysis, params, at } })` —— ArkTS 要求对象字面量对应**显式声明的类型**，内联匿名形状过不了严格检查。
+
+**修复**：把 `analysisHistory` 的内联类型提为 `interface AnalysisStep`，`map` 回调显式标注返回类型，`push` 处同样补齐。
+
+### 4. `barLayout` 造了没接
+
+`ChartComputator.barLayout()` 写了却没人调用，而 `drawBar` 与 `exportSVG` 仍各自内联计算柱宽 —— 正是我批评过的「两份会漂移的计算」。
+
+**修复**：两处都改为调用 `barLayout(vp, count, 0.3)`（0.3 保持原渲染不变），柱状图的数值标签同时改走 `ValueFormatter`。
+
+### 5. 工具增强：`structure_check.py` 新增两条规则
+
+- **同作用域重复声明**：带括号/花括号作用域跟踪。特意处理了 `for (let i …)` 的头部级作用域，否则两个连续循环会被误报。
+- **`static` 出现在 `@Component struct` 内**：见第 1 条。
+
+**自测 8 个用例全部符合预期**，其中包括一个反直觉的判定：`for (let i…){}` 之后的 `const i = 5;` 在 JS 里是**合法**的（循环头的 `i` 作用域仅限循环），因此检查器不报 —— 我最初的预期写错了，核对作用域规则后确认检查器正确。
+
+### 6. 死代码清理
+
+- 移除 `HistoryRepository.count()`（与 `restoreHistory()` 的返回值重复，无调用方）。
+- `HistoryRepository.deleteRecord()` 保留但注释**如实写明尚无调用方**（预留给历史列表的滑动删除）。
+
+### 复核后确认无问题的点
+
+- `darkMode` 经 `@StorageLink('darkMode')` 绑定 —— `PreferenceManager.loadAllToAppStorage()` 在启动时写入 AppStorage 是**正确**的接法，顺带补上了「暗色偏好未持久化」这个缺口。
+- `[History]` 的长按清空：即使长按与点按都触发（手势仲裁的版本差异），结果也只是「清空后报告为空」，无破坏性。
+- `NativeMath` 的 `unwrap()` 契约与 `.d.ts` 的 `ArrayBuffer | string` 返回类型一致。
+
+**验证**：单测 78/78、接线 19/19、结构检查 176 文件 0 问题（新规则生效后 0 误报）、core 108/108 模块可导入。

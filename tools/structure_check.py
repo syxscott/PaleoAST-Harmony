@@ -112,6 +112,131 @@ def check(path):
     dupes = {nm for nm in names if names.count(nm) > 1}
     for nm in sorted(dupes):
         problems.append(f'duplicate export: {nm}')
+    problems.extend(check_redeclare(code, src))
+    problems.extend(check_static_in_struct(src))
+    return problems
+
+
+DECL_RE = re.compile(r'\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)')
+
+
+def check_redeclare(code, src):
+    """Flag a const/let/var declared twice in the same brace scope.
+
+    Added after a sed-based edit produced two `const gap` in one block — a
+    compile error that bracket counting cannot see. Scope tracking is
+    approximate (arrow functions and blocks share a depth) but false positives
+    are easy to eyeball, whereas the error itself is easy to miss.
+    """
+    problems = []
+    scopes = [{}]
+    paren = 0
+    line = 1
+    i = 0
+    n = len(code)
+    # Last significant character/word. Whitespace does NOT update it, so a
+    # keyword is still recognisable after a newline+indent.
+    prev = ''
+    while i < n:
+        ch = code[i]
+        if ch == '\n':
+            line += 1
+            i += 1
+            continue
+        if ch.isspace():
+            i += 1
+            continue
+        if ch == '(':
+            # A `for (let i ...)` header declares in the loop's own scope, which
+            # ends at ')'. Pushing a scope here keeps two consecutive loops from
+            # being reported as a redeclaration of `i`.
+            paren += 1
+            scopes.append({})
+            prev = '('
+            i += 1
+            continue
+        if ch == ')':
+            if paren > 0:
+                paren -= 1
+                if len(scopes) > 1:
+                    scopes.pop()
+            prev = ')'
+            i += 1
+            continue
+        if ch == '{':
+            scopes.append({})
+            prev = '{'
+            i += 1
+            continue
+        if ch == '}':
+            if len(scopes) > 1:
+                scopes.pop()
+            prev = '}'
+            i += 1
+            continue
+        if ch == ';':
+            prev = ';'
+            i += 1
+            continue
+        if ch.isalpha() or ch in '_$':
+            j = i
+            while j < n and (code[j].isalnum() or code[j] in '_$'):
+                j += 1
+            word = code[i:j]
+            if word in ('const', 'let', 'var'):
+                m = DECL_RE.match(code, i)
+                if m:
+                    name = m.group(1)
+                    cur = scopes[-1]
+                    if name in cur:
+                        problems.append(
+                            f'line {line}: duplicate declaration of {name!r} '
+                            f'(also declared at line {cur[name]})')
+                    else:
+                        cur[name] = line
+                    i = m.end()
+                    prev = 'x'
+                    continue
+            prev = word
+            i = j
+            continue
+        prev = ch
+        i += 1
+    return problems
+
+
+def check_static_in_struct(src):
+    """ArkTS `struct` declarations do not support `static` members.
+
+    The repo's other `static readonly` usages are plain classes; a `static`
+    inside an @Component struct fails to compile and — like the duplicate
+    declaration above — is invisible to unit tests.
+    """
+    problems = []
+    for m in re.finditer(r'@Component\s*\n\s*export\s+struct\s+(\w+)\s*\{', src):
+        name = m.group(1)
+        start = m.end()
+        depth = 1
+        i = start
+        line = src.count('\n', 0, start) + 1
+        while i < len(src) and depth > 0:
+            ch = src[i]
+            if ch == '{':
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+            elif ch == '\n':
+                line += 1
+            elif ch == '/' and src[i:i + 2] == '//':
+                i = src.find('\n', i)
+                if i < 0:
+                    break
+            i += 1
+        body = src[start:i]
+        for sm in re.finditer(r'^\s*static\s+(\w+)', body, re.M):
+            problems.append(
+                f'line {line}: `static {sm.group(1)}` inside struct {name} — '
+                f'move it to module scope or to a plain class')
     return problems
 
 

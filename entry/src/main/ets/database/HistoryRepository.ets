@@ -200,27 +200,6 @@ export class HistoryRepository {
     }
   }
 
-  /** Total number of stored records. */
-  public static async count(): Promise<number> {
-    const store = HistoryRepository.store;
-    if (!store) {
-      return 0;
-    }
-    try {
-      const predicates = new relationalStore.RdbPredicates('history');
-      const rs = await store.query(predicates, ['id']);
-      try {
-        return rs.rowCount < 0 ? 0 : rs.rowCount;
-      } finally {
-        rs.close();
-      }
-    } catch (err) {
-      const e = err as Error;
-      Logger.error('[HistoryRepository] count failed: ' + e.message);
-      return 0;
-    }
-  }
-
   /** Delete every record, or only those of one analysis / comma-separated list. */
   public static async clearHistory(analysisName?: string): Promise<number> {
     const store = HistoryRepository.store;
@@ -244,7 +223,13 @@ export class HistoryRepository {
     }
   }
 
-  /** Delete one record by primary key (swipe-to-delete on a history row). */
+  /**
+   * Delete one record by primary key.
+   *
+   * Reserved for the history list's swipe-to-delete interaction, which is not
+   * built yet — no caller today. Kept because it completes the repository's
+   * CRUD surface; remove it if that UI is abandoned.
+   */
   public static async deleteRecord(id: number): Promise<number> {
     const store = HistoryRepository.store;
     if (!store) {

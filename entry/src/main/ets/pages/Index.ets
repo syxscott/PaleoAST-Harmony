@@ -35,6 +35,18 @@ interface WidgetPlot {
 }
 
 /**
+ * One entry of the reproducible-analysis script: what ran, with which
+ * parameters, and when. Declared as an interface because ArkTS requires object
+ * literals to correspond to an explicitly declared type — the `.map()` in
+ * restoreHistory() would not type-check with an inline anonymous shape.
+ */
+interface AnalysisStep {
+  analysis: string;
+  params: Record<string, Object>;
+  at: string;
+}
+
+/**
  * Ribbon tab → the navigation sections it exposes.
  * Index 0 (Home) is unrestricted; this is what makes the Ribbon an actual
  * filter rather than a highlight-only control.
@@ -672,14 +684,15 @@ struct Index {
   }
 
   // ─── 可复现分析脚本（paleopal 模式：GUI 操作 ↔ 脚本双输出） ───
-  private analysisHistory: { analysis: string; params: Record<string, Object>; at: string }[] = [];
+  private analysisHistory: AnalysisStep[] = [];
 
   private recordAnalysis(name: string, params: Record<string, Object>): void {
-    this.analysisHistory.push({
+    const step: AnalysisStep = {
       analysis: name,
       params,
       at: new Date().toISOString(),
-    });
+    };
+    this.analysisHistory.push(step);
     if (this.analysisHistory.length > 200) this.analysisHistory.shift();
     this.persistAnalysis(name, params);
   }
@@ -724,14 +737,19 @@ struct Index {
       this.analysisHistory = records
         .slice()
         .reverse()               // store returns newest-first; script is oldest-first
-        .map((r) => {
+        .map((r): AnalysisStep => {
           let params: Record<string, Object> = {};
           try {
             params = JSON.parse(r.params) as Record<string, Object>;
           } catch (e) {
             /* keep {} for a record written by an older version */
           }
-          return { analysis: r.analysisName, params, at: new Date(r.timestamp).toISOString() };
+          const step: AnalysisStep = {
+            analysis: r.analysisName,
+            params,
+            at: new Date(r.timestamp).toISOString()
+          };
+          return step;
         });
       return records.length;
     } catch (err) {

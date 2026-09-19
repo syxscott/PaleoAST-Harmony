@@ -15,6 +15,15 @@ import { ChartComputator } from './plot/ChartComputator';
 import { AdaptiveFormatter, autoFormatter } from './plot/ValueFormatter';
 import type { IValueFormatter } from './plot/ValueFormatter';
 
+/**
+ * Pick radius (in vp) shared by hover and tap selection, and the grid
+ * divisions per axis. Module-level rather than struct members: ArkTS
+ * `struct` declarations do not support `static` members (the repo's other
+ * `static readonly` usages are all plain classes).
+ */
+const HOVER_RADIUS: number = 20;
+const TICK_DIVISIONS: number = 5;
+
 @Component
 export struct PlotCanvas {
   // 样式/类型属性用 @Prop + @Watch：父级（WorkspaceView）变化时同步并触发
@@ -160,11 +169,6 @@ export struct PlotCanvas {
   private vp: ViewPortHandler = new ViewPortHandler();
   /** Formatter for axis ticks and value labels. */
   private fmt: IValueFormatter = new AdaptiveFormatter();
-
-  /** Pick radius (vp) shared by hover and tap selection. */
-  static readonly HOVER_RADIUS: number = 20;
-  /** Grid divisions per axis. */
-  static readonly TICK_DIVISIONS: number = 5;
 
   build() {
     Column() {
@@ -384,11 +388,11 @@ export struct PlotCanvas {
     // Grid — horizontal from the Y ticks, vertical from the X ticks.
     ctx.strokeStyle = this.darkMode ? '#333' : '#E4E7EB';
     ctx.lineWidth = 0.5;
-    for (const tick of ChartComputator.yTicks(this.vp, PlotCanvas.TICK_DIVISIONS)) {
+    for (const tick of ChartComputator.yTicks(this.vp, TICK_DIVISIONS)) {
       const gy = tick.pixel;
       ctx.beginPath(); ctx.moveTo(this.vp.margin.left, gy); ctx.lineTo(this.vp.margin.left + pw, gy); ctx.stroke();
     }
-    for (const tick of ChartComputator.xTicks(this.vp, PlotCanvas.TICK_DIVISIONS)) {
+    for (const tick of ChartComputator.xTicks(this.vp, TICK_DIVISIONS)) {
       const gx = tick.pixel;
       ctx.beginPath(); ctx.moveTo(gx, this.vp.margin.top); ctx.lineTo(gx, this.vp.margin.top + ph); ctx.stroke();
     }
@@ -416,11 +420,11 @@ export struct PlotCanvas {
     ctx.fillStyle = this.darkMode ? '#aaa' : '#7F8C8D';
     ctx.font = '10px sans-serif';
     ctx.textAlign = 'center';
-    for (const tick of ChartComputator.xTicks(this.vp, PlotCanvas.TICK_DIVISIONS, (v: number) => this.tickLabel(v))) {
+    for (const tick of ChartComputator.xTicks(this.vp, TICK_DIVISIONS, (v: number) => this.tickLabel(v))) {
       ctx.fillText(tick.label, tick.pixel, this.vp.margin.top + ph + 15);
     }
     ctx.textAlign = 'right';
-    for (const tick of ChartComputator.yTicks(this.vp, PlotCanvas.TICK_DIVISIONS, (v: number) => this.tickLabel(v))) {
+    for (const tick of ChartComputator.yTicks(this.vp, TICK_DIVISIONS, (v: number) => this.tickLabel(v))) {
       ctx.fillText(tick.label, this.vp.margin.left - 5, tick.pixel + 4);
     }
     ctx.textAlign = 'center';
@@ -592,26 +596,26 @@ export struct PlotCanvas {
     const data = this.plotData!;
     const labels = data.labels!, values = data.values!;
     const maxVal = values.reduce((a, b) => Math.max(a, b), 1);
-    const barW = pw / labels.length * 0.7;
-    const gap = pw / labels.length * 0.3;
+    // One layout source for the renderer and the SVG exporter.
+    const { barWidth, gap } = ChartComputator.barLayout(this.vp, labels.length, 0.3);
     const colors = ['#3498DB', '#E74C3C', '#27AE60', '#F39C12', '#9B59B6'];
 
     for (let i = 0; i < labels.length; i++) {
-      const x = this.vp.margin.left + (i * (barW + gap)) + gap / 2;
+      const x = this.vp.margin.left + (i * (barWidth + gap)) + gap / 2;
       const barH = (values[i] / maxVal) * ph;
       ctx.fillStyle = colors[i % colors.length];
       ctx.globalAlpha = 0.8;
-      ctx.fillRect(x, this.vp.margin.top + ph - barH, barW, barH);
+      ctx.fillRect(x, this.vp.margin.top + ph - barH, barWidth, barH);
       ctx.globalAlpha = 1;
 
       // Value label
       ctx.fillStyle = this.darkMode ? '#ccc' : '#2C3E50';
       ctx.font = '9px sans-serif'; ctx.textAlign = 'center';
-      ctx.fillText(values[i].toFixed(2), x + barW / 2, this.vp.margin.top + ph - barH - 3);
+      ctx.fillText(this.tickLabel(values[i]), x + barWidth / 2, this.vp.margin.top + ph - barH - 3);
 
       // X label (rotated)
       ctx.save();
-      ctx.translate(x + barW / 2, this.vp.margin.top + ph + 5);
+      ctx.translate(x + barWidth / 2, this.vp.margin.top + ph + 5);
       ctx.rotate(-Math.PI / 4);
       ctx.textAlign = 'right';
       ctx.fillText(labels[i], 0, 0);
@@ -766,7 +770,7 @@ export struct PlotCanvas {
     if (!this.plotData?.x || !this.plotData.y) return;
     // One shared hit test instead of a scan duplicated per interaction.
     const closest = ChartHighlighter.nearestIndex(
-      this.vp, this.plotData.x, this.plotData.y, x, y, PlotCanvas.HOVER_RADIUS);
+      this.vp, this.plotData.x, this.plotData.y, x, y, HOVER_RADIUS);
 
     if (closest !== this.hoveredPoint) {
       this.hoveredPoint = closest;
@@ -793,7 +797,7 @@ export struct PlotCanvas {
   private _selectAt(x: number, y: number): void {
     if (!this.plotData?.x || !this.plotData.y) return;
     const closest = ChartHighlighter.nearestIndex(
-      this.vp, this.plotData.x, this.plotData.y, x, y, PlotCanvas.HOVER_RADIUS);
+      this.vp, this.plotData.x, this.plotData.y, x, y, HOVER_RADIUS);
     if (closest >= 0) {
       if (this.selectedPoints.has(closest)) {
         this.selectedPoints.delete(closest);
@@ -890,11 +894,11 @@ export struct PlotCanvas {
 
     // Grid lines — horizontal from the Y ticks, vertical from the X ticks.
     svg += '<g stroke="' + (this.darkMode ? '#333' : '#E4E7EB') + '" stroke-width="0.5">';
-    for (const tick of ChartComputator.yTicks(this.vp, PlotCanvas.TICK_DIVISIONS)) {
+    for (const tick of ChartComputator.yTicks(this.vp, TICK_DIVISIONS)) {
       const gy = tick.pixel;
       svg += '<line x1="' + this.vp.margin.left + '" y1="' + gy + '" x2="' + (this.vp.margin.left + pw) + '" y2="' + gy + '"/>';
     }
-    for (const tick of ChartComputator.xTicks(this.vp, PlotCanvas.TICK_DIVISIONS)) {
+    for (const tick of ChartComputator.xTicks(this.vp, TICK_DIVISIONS)) {
       const gx = tick.pixel;
       svg += '<line x1="' + gx + '" y1="' + this.vp.margin.top + '" x2="' + gx + '" y2="' + (this.vp.margin.top + ph) + '"/>';
     }
@@ -927,8 +931,9 @@ export struct PlotCanvas {
         case 'bar':
           if (this.plotData.labels && this.plotData.values) {
             const maxVal = this.plotData.values.reduce((a, b) => Math.max(a, b), 1);
-            const barW = pw / this.plotData.labels.length * 0.7;
-            const gap = pw / this.plotData.labels.length * 0.3;
+            const layout = ChartComputator.barLayout(this.vp, this.plotData.labels.length, 0.3);
+            const barW = layout.barWidth;
+            const gap = layout.gap;
             const barColors = ['#3498DB', '#E74C3C', '#27AE60', '#F39C12', '#9B59B6'];
             for (let i = 0; i < this.plotData.labels.length; i++) {
               const x = this.vp.margin.left + (i * (barW + gap)) + gap / 2;
