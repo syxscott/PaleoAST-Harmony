@@ -208,7 +208,7 @@ function renderTable(tbl: { id: string; caption: string; content: string; placem
     tbl.content,
     `\\caption{${escapeLatex(tbl.caption)}}`,
     `\\label{${tbl.id}}`,
-    '\\end{figure}'
+    '\\end{table}'
   ].join('\n');
 }
 
@@ -260,14 +260,31 @@ function formatPValue(p: number): string {
 }
 
 /**
- * Escape special LaTeX characters.
+ * Escape special LaTeX characters (text mode).
+ *
+ * Done in ONE pass. Chaining `.replace(/\\/ …)` before the brace rule broke
+ * backslashes: the backslash macro's own `{}` were then escaped again, turning
+ * a single `\` into `\textbackslash\{\}`. Backslash, tilde and caret also need
+ * their macros rather than a prefixed backslash (`\~` and `\^` are accents).
  */
-function escapeLatex(s: string): string {
-  return s
-    .replace(/\\/g, '\\textbackslash{}')
-    .replace(/[&%$#_{}]/g, c => `\\${c}`)
-    .replace(/~/g, '\\textasciitilde{}')
-    .replace(/\^/g, '\\textasciicircum{}');
+function escapeLatex(s: string | undefined | null): string {
+  // `CompileOptions` fields are all optional, so opts.title / caption / label can
+  // legitimately arrive undefined. Iterating them threw
+  // "TypeError: s is not iterable" and aborted the whole compile.
+  if (s === undefined || s === null) return '';
+  let out = '';
+  for (const ch of s) {
+    switch (ch) {
+      case '\\': out += '\\textbackslash{}'; break;
+      case '~': out += '\\textasciitilde{}'; break;
+      case '^': out += '\\textasciicircum{}'; break;
+      case '&': case '%': case '$': case '#': case '_': case '{': case '}':
+        out += '\\' + ch;
+        break;
+      default: out += ch;
+    }
+  }
+  return out;
 }
 
 /**

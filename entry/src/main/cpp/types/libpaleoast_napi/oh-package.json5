@@ -1,0 +1,6 @@
+{
+  "name": "libpaleoast_napi.so",
+  "types": "./index.d.ts",
+  "version": "1.0.0",
+  "description": "PaleoAST native linear algebra (NAPI). See index.d.ts for the return contract."
+}

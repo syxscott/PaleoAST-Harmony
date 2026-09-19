@@ -17,6 +17,7 @@
  */
 import { DataMatrix } from '../models/DataMatrix';
 import { Matrix } from '../math/Matrix';
+import { splitCSVLine } from './CSVParser';
 
 export interface ExcelData {
   sheets: SheetData[];
@@ -547,7 +548,10 @@ function parseSheetXml(xml: string, sharedStrings: string[], opts: Required<Pars
       rows.set(rowNum, new Map());
     }
 
-    const value = parseCellValue(cellContent, sharedStrings);
+    // The cell type lives on the <c> element itself, so read it from the full
+    // match and hand it to the decoder (see parseCellValue).
+    const typeAttr = (cellMatch[0].match(/<c\s[^>]*?\bt="([^"]*)"/) || [])[1] ?? 'n';
+    const value = parseCellValue(cellContent, sharedStrings, typeAttr);
     rows.get(rowNum)!.set(col, value);
   }
 
@@ -571,6 +575,10 @@ function parseSheetXml(xml: string, sharedStrings: string[], opts: Required<Pars
           row.push(NaN);
         } else if (typeof cell === 'number') {
           row.push(cell);
+        } else if (typeof cell === 'boolean') {
+          // Boolean cells (t="b") are produced by parseCellValue; without this
+          // branch they fell through to NaN and the value was lost.
+          row.push(cell ? 1 : 0);
         } else if (typeof cell === 'string') {
           if (opts.naValues.includes(cell)) {
             row.push(NaN);
@@ -604,10 +612,10 @@ function parseSheetXml(xml: string, sharedStrings: string[], opts: Required<Pars
     }
   }
 
-  // Remove header row from data if present
-  if (opts.hasHeader && data.length > 0) {
-    data.shift();
-  }
+  // NOTE: the header row needs no removal here. The loop above already starts
+  // at `dataStartRow` (= 1 when hasHeader), so row 0 never entered `data`.
+  // A trailing `data.shift()` used to be here and silently dropped the FIRST
+  // DATA ROW of every header-bearing workbook.
 
   // Pad rows to same length
   if (data.length > 0) {
@@ -622,38 +630,50 @@ function parseSheetXml(xml: string, sharedStrings: string[], opts: Required<Pars
 
 type CellValue = number | string | boolean | null;
 
-function parseCellValue(cellContent: string, sharedStrings: string[]): CellValue {
-  const typeMatch = cellContent.match(/t="([^"]*)"/);
-  const type = typeMatch ? typeMatch[1] : 'n';
+/**
+ * Decode one `<c>` cell.
+ *
+ * @param cellContent  inner XML of the `<c>` element
+ * @param sharedStrings shared string table
+ * @param typeAttr     the `t` attribute of the ENCLOSING `<c>` tag. It has to be
+ *   passed in: the attribute lives on the element, not in its inner content.
+ *   Looking it up inside `cellContent` (the previous behaviour) never matched
+ *   anything, so `type` was always 'n' and every branch below was dead code —
+ *   shared strings were silently replaced by their table INDEX and text cells
+ *   by 0.
+ */
+function parseCellValue(cellContent: string, sharedStrings: string[], typeAttr: string = 'n'): CellValue {
+  const type = typeAttr || 'n';
 
-  const vMatch = cellContent.match(/<v>([^<]*)<\/v>/);
-  if (!vMatch) {
-    return type === 's' ? '' : 0;
+  // inlineStr keeps its text in <is><t>…</t></is> rather than <v>.
+  if (type === 'inlineStr') {
+    const isMatch = cellContent.match(/<t[^>]*>([\s\S]*?)<\/t>/);
+    return isMatch ? unescapeXml(isMatch[1]) : '';
   }
+
+  const vMatch = cellContent.match(/<v>([\s\S]*?)<\/v>/);
+  if (!vMatch) return (type === 's' || type === 'str') ? '' : 0;
 
   const raw = vMatch[1];
 
   switch (type) {
-    case 'n': // Number
-    case null: // Default type
-      return parseFloat(raw) || 0;
-
-    case 's': // Shared string
+    case 's': { // Shared string: raw is an index into the shared table
       const idx = parseInt(raw, 10);
-      return sharedStrings[idx] || '';
+      return sharedStrings[idx] ?? '';
+    }
 
-    case 'str': // Inline string
-    case 'inlineStr':
+    case 'str': // Formula string result
+    case 'e':   // Error literal
       return unescapeXml(raw);
 
     case 'b': // Boolean
-      return raw === '1' || raw.toLowerCase() === 'true';
+      return raw.trim() === '1' || raw.trim().toLowerCase() === 'true';
 
-    case 'e': // Error
-      return raw;
-
-    default:
-      return raw;
+    case 'n': // Number
+    default: {
+      const n = parseFloat(raw);
+      return isNaN(n) ? 0 : n;
+    }
   }
 }
 
@@ -765,30 +785,9 @@ function parseDelimited(text: string, opts: Required<ParseExcelOptions>): ExcelD
 }
 
 function parseCSVLine(line: string, delimiter: string): string[] {
-  const fields: string[] = [];
-  let current = '';
-  let inQuotes = false;
-
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i];
-
-    if (ch === '"') {
-      if (inQuotes && line[i + 1] === '"') {
-        current += '"';
-        i++;
-      } else {
-        inQuotes = !inQuotes;
-      }
-    } else if (ch === delimiter && !inQuotes) {
-      fields.push(current.trim());
-      current = '';
-    } else {
-      current += ch;
-    }
-  }
-  fields.push(current.trim());
-
-  return fields;
+  // Single shared RFC 4180 implementation (see CSVParser.splitCSVLine) so the
+  // CSV and XLSX text paths cannot drift apart again.
+  return splitCSVLine(line, delimiter);
 }
 
 // ══════════════════════════════════════════════════════════════════════════════

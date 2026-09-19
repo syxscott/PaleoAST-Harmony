@@ -190,14 +190,22 @@ export class StateManager {
 
   setData(d: DataMatrix): void {
     if (!d) throw new Error('DataMatrix cannot be null or undefined');
-    if (this._d) {
-      // Check memory before pushing
-      if (this.estimateMemory() < 50 * 1024 * 1024) { // Max 50MB for undo
-        this._u.push({ deltas: [], timestamp: Date.now() });
-        if (this._u.length > this._max) this._u.shift();
-      }
-      this._r = [];
-    }
+    // Replacing the dataset invalidates EVERY history stack, so all of them are
+    // cleared rather than appended to:
+    //   _u / _r        cell deltas carry (row, col, oldVal) triples that index
+    //                  the PREVIOUS matrix. Previously setData pushed an empty
+    //                  state on top while leaving the old deltas underneath, so
+    //                  two undos after a load replayed an old matrix's values
+    //                  into the new one.
+    //   _cmdUndo/_cmdRedo  whole-matrix snapshots of the old dataset.
+    //   _c             memoised analysis results derived from the old data
+    //                  (e.g. the parsed tree), which would otherwise be served
+    //                  as if they described the new one.
+    this._u = [];
+    this._r = [];
+    this._cmdUndo = [];
+    this._cmdRedo = [];
+    this._c.clear();
     this._d = d;
     this._m = false;
   }

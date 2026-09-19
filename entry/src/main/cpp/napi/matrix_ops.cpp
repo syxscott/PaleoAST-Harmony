@@ -1,4 +1,6 @@
 #include "napi/matrix_ops.h"
+#include "../core/ErrorHandler.h"
+#include "../utils/Logger.h"
 #include <vector>
 #include <cmath>
 #include <algorithm>
@@ -23,6 +25,26 @@ struct NapiCtx {
         (ctx).status = (call); \
         if ((ctx).status != napi_ok) return nullptr; \
     } while (false)
+
+// ---------------------------------------------------------------------------
+// ReturnError : report a BUSINESS failure to ArkTS as a short token string.
+//
+// The convention is "success -> Float64Array payload, failure -> string token",
+// so the ArkTS wrapper can surface the reason instead of an unexplained null.
+// Engine-level NAPI failures still return nullptr through NAPI_CALL.
+// ---------------------------------------------------------------------------
+static napi_value ReturnError(napi_env env, Paleo::ErrorCode code, const char* detail = nullptr) {
+    const char* token = Paleo::ToToken(code);
+    if (detail != nullptr) {
+        LOGE("%{public}s: %{public}s", token, detail);
+    } else {
+        LOGE("%{public}s", token);
+    }
+    napi_value str = nullptr;
+    NapiCtx ctx(env);
+    NAPI_CALL(ctx, napi_create_string_utf8(env, token, NAPI_AUTO_LENGTH, &str));
+    return str;
+}
 
 // ---------------------------------------------------------------------------
 // GetArray : extracts std::vector<double> from a NAPI ArrayBuffer.
@@ -65,7 +87,7 @@ napi_value Multiply(napi_env env, napi_callback_info info) {
     size_t argc = 4;
     napi_value a[4];
     NAPI_CALL(ctx, napi_get_cb_info(env, info, &argc, a, nullptr, nullptr));
-    if (argc < 4) return nullptr;
+    if (argc < 4) return ReturnError(env, Paleo::ErrorCode::BAD_ARGUMENT, "multiply needs 4 arguments");
 
     auto A = GetArray(env, a[0]);
     auto B = GetArray(env, a[1]);
@@ -73,9 +95,9 @@ napi_value Multiply(napi_env env, napi_callback_info info) {
     NAPI_CALL(ctx, napi_get_value_int32(env, a[2], &m));
     NAPI_CALL(ctx, napi_get_value_int32(env, a[3], &n));
 
-    if (m <= 0 || n <= 0) return nullptr;
+    if (m <= 0 || n <= 0) return ReturnError(env, Paleo::ErrorCode::BAD_ARGUMENT, "multiply: non-positive dimension");
     int k = static_cast<int>(A.size()) / m;
-    if (k <= 0 || static_cast<size_t>(k * n) != B.size()) return nullptr;
+    if (k <= 0 || static_cast<size_t>(k * n) != B.size()) return ReturnError(env, Paleo::ErrorCode::DIM_MISMATCH, "multiply: shape mismatch");
 
     std::vector<double> C(m * n, 0.0);
     for (int i = 0; i < m; i++)
@@ -98,15 +120,15 @@ napi_value Transpose(napi_env env, napi_callback_info info) {
     size_t argc = 3;
     napi_value a[3];
     NAPI_CALL(ctx, napi_get_cb_info(env, info, &argc, a, nullptr, nullptr));
-    if (argc < 3) return nullptr;
+    if (argc < 3) return ReturnError(env, Paleo::ErrorCode::BAD_ARGUMENT, "transpose needs 3 arguments");
 
     auto A = GetArray(env, a[0]);
     int r = 0, c = 0;
     NAPI_CALL(ctx, napi_get_value_int32(env, a[1], &r));
     NAPI_CALL(ctx, napi_get_value_int32(env, a[2], &c));
 
-    if (r <= 0 || c <= 0) return nullptr;
-    if (static_cast<size_t>(r * c) != A.size()) return nullptr;
+    if (r <= 0 || c <= 0) return ReturnError(env, Paleo::ErrorCode::BAD_ARGUMENT, "transpose: non-positive dimension");
+    if (static_cast<size_t>(r * c) != A.size()) return ReturnError(env, Paleo::ErrorCode::DIM_MISMATCH, "transpose: shape mismatch");
 
     std::vector<double> T(c * r);
     for (int i = 0; i < r; i++)
@@ -127,15 +149,15 @@ napi_value SVD(napi_env env, napi_callback_info info) {
     size_t argc = 3;
     napi_value a[3];
     NAPI_CALL(ctx, napi_get_cb_info(env, info, &argc, a, nullptr, nullptr));
-    if (argc < 3) return nullptr;
+    if (argc < 3) return ReturnError(env, Paleo::ErrorCode::BAD_ARGUMENT, "svd needs 3 arguments");
 
     auto A = GetArray(env, a[0]);
     int m = 0, n = 0;
     NAPI_CALL(ctx, napi_get_value_int32(env, a[1], &m));
     NAPI_CALL(ctx, napi_get_value_int32(env, a[2], &n));
 
-    if (m <= 0 || n <= 0) return nullptr;
-    if (static_cast<size_t>(m * n) != A.size()) return nullptr;
+    if (m <= 0 || n <= 0) return ReturnError(env, Paleo::ErrorCode::BAD_ARGUMENT, "svd: non-positive dimension");
+    if (static_cast<size_t>(m * n) != A.size()) return ReturnError(env, Paleo::ErrorCode::DIM_MISMATCH, "svd: shape mismatch");
 
     auto B = A; // working copy
     const double eps = 1e-14;
@@ -189,13 +211,13 @@ napi_value Inverse(napi_env env, napi_callback_info info) {
     size_t argc = 2;
     napi_value a[2];
     NAPI_CALL(ctx, napi_get_cb_info(env, info, &argc, a, nullptr, nullptr));
-    if (argc < 2) return nullptr;
+    if (argc < 2) return ReturnError(env, Paleo::ErrorCode::BAD_ARGUMENT, "inverse needs 2 arguments");
 
     auto A = GetArray(env, a[0]);
     int n = 0;
     NAPI_CALL(ctx, napi_get_value_int32(env, a[1], &n));
 
-    if (n <= 0 || static_cast<size_t>(n * n) != A.size()) return nullptr;
+    if (n <= 0 || static_cast<size_t>(n * n) != A.size()) return ReturnError(env, Paleo::ErrorCode::DIM_MISMATCH, "inverse: shape mismatch");
 
     std::vector<double> aug(n * 2 * n);
     for (int i = 0; i < n; i++) {
@@ -215,7 +237,7 @@ napi_value Inverse(napi_env env, napi_callback_info info) {
         double pv = aug[c * 2 * n + c];
         if (std::abs(pv) < 1e-15) {
             // CRITICAL: singular matrix — return nullptr so JS layer can handle
-            return nullptr;
+            return ReturnError(env, Paleo::ErrorCode::SINGULAR, "inverse: pivot below 1e-15");
         }
         // Normalize pivot row
         for (int j = 0; j < 2 * n; j++) aug[c * 2 * n + j] /= pv;
@@ -245,25 +267,44 @@ napi_value Eigh(napi_env env, napi_callback_info info) {
     size_t argc = 2;
     napi_value a[2];
     NAPI_CALL(ctx, napi_get_cb_info(env, info, &argc, a, nullptr, nullptr));
-    if (argc < 2) return nullptr;
+    if (argc < 2) return ReturnError(env, Paleo::ErrorCode::BAD_ARGUMENT, "eigh needs 2 arguments");
 
     auto A = GetArray(env, a[0]);
     int n = 0;
     NAPI_CALL(ctx, napi_get_value_int32(env, a[1], &n));
 
-    if (n <= 0 || static_cast<size_t>(n * n) != A.size()) return nullptr;
+    if (n <= 0) return ReturnError(env, Paleo::ErrorCode::BAD_ARGUMENT, "eigh: n <= 0");
+    if (static_cast<size_t>(n * n) != A.size()) {
+        return ReturnError(env, Paleo::ErrorCode::DIM_MISMATCH, "eigh: A.size() != n*n");
+    }
 
     auto T = A; // working copy
+    bool converged = false;
+    double last_off = 0.0;
     for (int it = 0; it < 100 * n; it++) {
         double mx = 0.0;
         int pi = 0, qi = 1;
         for (int i = 0; i < n; i++)
             for (int j = i + 1; j < n; j++)
                 if (std::abs(T[i * n + j]) > mx) { mx = std::abs(T[i * n + j]); pi = i; qi = j; }
-        if (mx < 1e-14) break;
-        double th = (T[pi * n + pi] == T[qi * n + qi])
+        last_off = mx;
+        if (mx < 1e-14) { converged = true; break; }
+
+        // Rotation J = [[c, s], [-s, c]] applied as T <- J^T T J zeroes T[p,q]
+        // when tan(2θ) = 2·T[p,q] / (T[q,q] − T[p,p]).
+        //
+        // CRITICAL FIX: the denominator used to be (T[pi,pi] − T[qi,qi]) — the
+        // wrong sign — which rotates the wrong way, INCREASES the off-diagonal
+        // instead of annihilating it, and never converges. Same defect as the
+        // ArkTS eigh in core/math/linalg.ts. For [[4,1,0],[1,3,1],[0,1,2]] the
+        // old code returned (3.792, 3.000, 2.208) with 1.48 of off-diagonal
+        // mass left; the true eigenvalues are (4.732, 3.000, 1.268), and with
+        // the correct sign the sweep converges to ~1e-17.
+        // (The SVD routine below already used the correct (be - al) form, which
+        // is an independent cross-check of this sign.)
+        double th = (std::abs(T[qi * n + qi] - T[pi * n + pi]) < 1e-15)
                         ? M_PI / 4.0
-                        : 0.5 * std::atan2(2.0 * T[pi * n + qi], T[pi * n + pi] - T[qi * n + qi]);
+                        : 0.5 * std::atan2(2.0 * T[pi * n + qi], T[qi * n + qi] - T[pi * n + pi]);
         double c = std::cos(th);
         double s = std::sin(th);
         for (int i = 0; i < n; i++) {
@@ -279,6 +320,16 @@ napi_value Eigh(napi_env env, napi_callback_info info) {
             T[qi * n + j] = s * tp + c * tq;
         }
     }
+    // A non-converged sweep leaves the diagonal meaningless; report it instead
+    // of handing back numbers that merely look plausible.
+    if (!converged) {
+        double diag_scale = 0.0;
+        for (int i = 0; i < n; i++) diag_scale = std::max(diag_scale, std::abs(T[i * n + i]));
+        if (last_off > 1e-6 * std::max(diag_scale, 1.0)) {
+            return ReturnError(env, Paleo::ErrorCode::NO_CONVERGENCE, "eigh: Jacobi did not converge");
+        }
+    }
+
     std::vector<double> ev(n);
     for (int i = 0; i < n; i++) ev[i] = T[i * n + i];
     std::sort(ev.rbegin(), ev.rend());
@@ -296,7 +347,7 @@ napi_value DistanceMatrix(napi_env env, napi_callback_info info) {
     size_t argc = 4;
     napi_value a[4];
     NAPI_CALL(ctx, napi_get_cb_info(env, info, &argc, a, nullptr, nullptr));
-    if (argc < 4) return nullptr;
+    if (argc < 4) return ReturnError(env, Paleo::ErrorCode::BAD_ARGUMENT, "distanceMatrix needs 4 arguments");
 
     auto X = GetArray(env, a[0]);
     int n = 0, p = 0, mt = 0;
@@ -304,8 +355,8 @@ napi_value DistanceMatrix(napi_env env, napi_callback_info info) {
     NAPI_CALL(ctx, napi_get_value_int32(env, a[2], &p));
     NAPI_CALL(ctx, napi_get_value_int32(env, a[3], &mt));
 
-    if (n <= 0 || p <= 0) return nullptr;
-    if (static_cast<size_t>(n * p) != X.size()) return nullptr;
+    if (n <= 0 || p <= 0) return ReturnError(env, Paleo::ErrorCode::BAD_ARGUMENT, "distanceMatrix: non-positive dimension");
+    if (static_cast<size_t>(n * p) != X.size()) return ReturnError(env, Paleo::ErrorCode::DIM_MISMATCH, "distanceMatrix: X.size() != n*p");
 
     std::vector<double> D(n * n, 0.0);
     for (int i = 0; i < n; i++) {
@@ -361,15 +412,15 @@ napi_value Clustering(napi_env env, napi_callback_info info) {
     size_t argc = 3;
     napi_value a[3];
     NAPI_CALL(ctx, napi_get_cb_info(env, info, &argc, a, nullptr, nullptr));
-    if (argc < 3) return nullptr;
+    if (argc < 3) return ReturnError(env, Paleo::ErrorCode::BAD_ARGUMENT, "clustering needs 3 arguments");
 
     auto D = GetArray(env, a[0]);
     int n = 0, method = 0;
     NAPI_CALL(ctx, napi_get_value_int32(env, a[1], &n));
     NAPI_CALL(ctx, napi_get_value_int32(env, a[2], &method));
 
-    if (n <= 0) return nullptr;
-    if (static_cast<size_t>(n * n) != D.size()) return nullptr;
+    if (n <= 0) return ReturnError(env, Paleo::ErrorCode::BAD_ARGUMENT, "clustering: n <= 0");
+    if (static_cast<size_t>(n * n) != D.size()) return ReturnError(env, Paleo::ErrorCode::DIM_MISMATCH, "clustering: D.size() != n*n");
 
     int nn = n;
     // Active cluster flag: active[i] = true iff cluster i is still alive
@@ -401,7 +452,7 @@ napi_value Clustering(napi_env env, napi_callback_info info) {
 
         if (min_i == -1 || min_j == -1) {
             // Degenerate case: should not happen with valid distance matrix
-            return nullptr;
+            return ReturnError(env, Paleo::ErrorCode::SINGULAR, "clustering: no merge candidate");
         }
 
         int sz_i = sz[min_i];
@@ -440,8 +491,20 @@ napi_value Clustering(napi_env env, napi_callback_info info) {
                 new_d = std::max(d_ik, d_jk);
             } else if (method == 2) { // Single: min(d_ik, d_jk)
                 new_d = std::min(d_ik, d_jk);
-            } else { // Default: average (UPGMA)
-                new_d = (sz_i * d_ik + sz_j * d_jk) / new_sz;
+            } else {
+                // method == 3: Ward.D2 via the Lance-Williams update, matching
+                // hierarchicalClustering() in core/analysis/statistics. The
+                // previous code fell through to average linkage here while the
+                // surrounding comments claimed Ward support, silently
+                // downgrading Ward clustering to UPGMA.
+                //   d(i∪j,k) = sqrt( ((n_i+n_k)d_ik² + (n_j+n_k)d_jk² − n_k·d_ij²)
+                //                    / (n_i+n_j+n_k) )
+                const double sz_k = static_cast<double>(sz[k]);
+                const double inside =
+                    ((sz_i + sz_k) * d_ik * d_ik
+                     + (sz_j + sz_k) * d_jk * d_jk
+                     - sz_k * min_d * min_d) / (sz_i + sz_j + sz_k);
+                new_d = inside > 0.0 ? std::sqrt(inside) : 0.0;
             }
 
             dist[new_idx * nn + k] = new_d;

@@ -59,30 +59,54 @@ export function rarefaction(abundances: number[], m: number): number {
 }
 
 /**
- * Chao & Jost (2012) extrapolation formula for expected species richness at
- * coverage c (0 < c < 1).  Coverage of a sample is:
- *   c = 1 - f1/N  (proportion of individuals in non-singleton species)
+ * Expected species richness at coverage c, extrapolated from the observed
+ * sample (Chao & Jost 2012, coverage-based extrapolation).
  *
- * Extrapolated richness at coverage c:
- *   E(S|c) = S_obs + f1(1 - c)^(-1)  [Chao & Jost 2012, Eq. 8b]
+ * The estimator saturates at the Chao1 asymptote. The estimated pool of
+ * undetected species is f̂₀ = Ŝ_Chao1 − S_obs, and only the fraction of the
+ * coverage gap that is actually closed — (c − c_obs)/(1 − c_obs) — is filled in:
  *
- * This is only valid for c ≥ c_obs (extrapolation beyond observed coverage).
+ *     S(c) = S_obs + f̂₀ · (c − c_obs) / (1 − c_obs)
  *
- * @param abundances    species abundances
- * @param c            target coverage (0–1)
- * @param chao1        Chao1 asymptotic estimator (S_obs + f1²/(2f2))
+ * Boundary behaviour (all enforced below):
+ *   c = c_obs → S_obs        (nothing to extrapolate)
+ *   c → 1     → Ŝ_Chao1      (finite asymptote)
+ *   monotone non-decreasing in c, clamped to [S_obs, Ŝ_Chao1]
+ *
+ * The previous implementation returned `chao1 + f1/(1 − c)`, which both
+ * double-counted f1 (the Chao1 asymptote already contains it) and DIVERGED as
+ * c → 1 — at c = 0.99 with f1 = 5 it inflated richness by 500 species, and
+ * species richness is bounded. f1 is still the driver of how much extra
+ * richness is reachable, but through c_obs and f̂₀ rather than directly.
+ *
+ * @param abundances    species abundances (observed sample)
+ * @param c             target coverage (0–1)
+ * @param chao1         Chao1 asymptote S_obs + f1²/(2f2) (or S_obs + f1(f1−1)/2)
  * @returns extrapolated species richness at coverage c
  */
 export function extrapolation(abundances: number[], c: number, chao1: number): number {
   const counts = abundances.filter(v => v > 0 && !isNaN(v));
   const N = counts.reduce((a, b) => a + b, 0);
-  if (N === 0 || c <= 0 || c >= 1) return chao1;
+  const Sobs = counts.length;
 
-  // f1 = number of singletons
+  if (N === 0) return chao1;
+  if (c >= 1) return chao1;
+
+  // f1 = number of singletons → observed sample coverage c_obs = 1 − f1/N
   const f1 = counts.filter(v => v === 1).length;
-  // E(S|c) from Chao & Jost (2012) Eq. 8b
-  const extrapolated = chao1 + f1 * Math.pow(1 - c, -1);
-  return extrapolated;
+  const cObs = 1 - f1 / N;
+  if (c <= cObs) return Sobs;
+
+  // Pool of undetected species carried by the Chao1 asymptote.
+  const f0 = Math.max(0, chao1 - Sobs);
+  if (f0 === 0) return Sobs;
+
+  const denom = 1 - cObs; // = f1/N > 0, since c > cObs here
+  if (!(denom > 0)) return chao1;
+
+  const closed = Math.min(1, (c - cObs) / denom);
+  const value = Sobs + f0 * closed;
+  return Math.min(chao1, Math.max(Sobs, value));
 }
 
 /**

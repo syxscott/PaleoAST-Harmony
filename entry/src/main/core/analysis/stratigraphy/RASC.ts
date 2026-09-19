@@ -121,13 +121,18 @@ function _constructReferenceSection(
     for (let i = 0; i < n; i++) {
       for (let j = i + 1; j < n; j++) {
         // Swap test: does swapping improve reference section quality?
+        // _refQuality is a MISFIT (Σ D·Δrank²) and must be minimised, matching
+        // the `_cost` convention rasc() itself uses. Keep the swap only when it
+        // lowers the misfit; otherwise restore the previous order. The two
+        // branches were inverted, so the search kept worse arrangements and
+        // discarded better ones.
         const before = _refQuality(positions, D, sectionData);
         [positions[i], positions[j]] = [positions[j], positions[i]];
         const after = _refQuality(positions, D, sectionData);
         if (after < before) {
-          [positions[i], positions[j]] = [positions[j], positions[i]]; // revert
+          changed = true; // improvement kept
         } else {
-          changed = true;
+          [positions[i], positions[j]] = [positions[j], positions[i]]; // revert
         }
       }
     }

@@ -2,17 +2,22 @@
  * ESM hooks for the test runner:
  *  - resolve: extensionless relative imports resolve to .ts files
  *  - load: strips ArkUI-only decorators from models/ and redirects
- *    '@kit.ArkUI' imports to a plain-TS shim, so core modules are testable
- *    under node --experimental-transform-types.
+ *    '@kit.ArkUI' / '@kit.CoreFileKit' imports to plain-TS shims, so core
+ *    modules are testable under node --experimental-transform-types.
  */
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
+const SHIMS = {
+  '@kit.ArkUI': '../entry/src/main/tests/shims/arkui.ts',
+  '@kit.CoreFileKit': '../entry/src/main/tests/shims/corefilekit.ts',
+};
+
 export async function resolve(specifier, context, next) {
-  if (specifier === '@kit.ArkUI') {
+  if (Object.prototype.hasOwnProperty.call(SHIMS, specifier)) {
     return {
       shortCircuit: true,
-      url: new URL('../entry/src/main/tests/shims/arkui.ts', import.meta.url).href,
+      url: new URL(SHIMS[specifier], import.meta.url).href,
     };
   }
   try {

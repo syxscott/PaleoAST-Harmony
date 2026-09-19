@@ -4,6 +4,12 @@
   "description": "PaleoAST HarmonyOS Entry Module",
   "main": "",
   "author": "",
-  "license": "",
-  "dependencies": {}
+  "license": "MIT",
+  "dependencies": {
+    // Declares the NAPI library to ArkTS. Without this, the runtime specifier
+    // import('libpaleoast_napi.so') in core/math/NativeMath.ts cannot resolve
+    // and initNative() returns false forever, leaving the C++ layer unused.
+    // The referenced directory must contain index.d.ts + oh-package.json5.
+    "libpaleoast_napi.so": "file:./src/main/cpp/types/libpaleoast_napi"
+  }
 }

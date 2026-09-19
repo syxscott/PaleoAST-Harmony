@@ -601,7 +601,15 @@ export interface NeutralSimResult {
   extinctionRates: number[];
 }
 
-export function simulateNeutral(nTaxa: number, duration: number, specRate = 0.1, extRate = 0.05, dt = 0.1): NeutralSimResult {
+/**
+ * Neutral (zero-sum) simulation of standing richness through time.
+ *
+ * @param rngSeed seed for the simulation's PRNG (default 42, matching the
+ *   convention used elsewhere in this repo). Without it the trajectory was
+ *   driven by Math.random() and changed on every call.
+ */
+export function simulateNeutral(nTaxa: number, duration: number, specRate = 0.1, extRate = 0.05, dt = 0.1, rngSeed: number = 42): NeutralSimResult {
+  seedRng(rngSeed);
   const nSteps = Math.floor(duration / dt);
   const times: number[] = new Array(nSteps).fill(0);
   const richness: number[] = new Array(nSteps).fill(0);
@@ -626,9 +634,12 @@ export function simulateNeutral(nTaxa: number, duration: number, specRate = 0.1,
 }
 
 function poisson_sim(lambda: number): number {
+  // Knuth's Poisson sampler driven by the repo's SEEDED generator. It used
+  // Math.random(), so simulateNeutral() produced a different trajectory on
+  // every run and could not be reproduced (or published).
   const L = Math.exp(-lambda);
   let k = 0, p = 1;
-  do { k++; p *= Math.random(); } while (p > L);
+  do { k++; p *= rand(); } while (p > L);
   return k - 1;
 }
 
@@ -1240,20 +1251,63 @@ export function expectedDiversity(lambda: number, mu: number, time: number): num
   return Math.exp((lambda - mu) * time);
 }
 
-/** Poisson pmf of fossil counts per lineage over an age span (fbd.py fossil_count_distribution). */
+/**
+ * Poisson pmf of the fossil count produced by ONE lineage over an age span
+ * (fbd.py fossil_count_distribution).
+ *
+ * The mean count is the sampling rate times the expected time-integrated
+ * standing diversity of the lineage:
+ *
+ *     E[K] = ψ · ∫₀^age E[N(t)] dt,   E[N(t)] = e^{(λ−μ)t}
+ *          = ψ · (e^{(λ−μ)·age} − 1)/(λ − μ)      (λ ≠ μ)
+ *          = ψ · age                              (λ = μ)
+ *
+ * The previous implementation hard-coded `meanCount = ψ · age` and explicitly
+ * discarded λ, μ and ρ (`void lambda; void mu; void rho`), so every
+ * diversification rate produced the same distribution. The form above reduces
+ * to `ψ · age` exactly when λ = μ — the one case the old formula was right for
+ * — and otherwise accounts for the growth or decay of the lineage.
+ *
+ * ρ (probability of sampling an extant lineage) affects the FBD *likelihood*
+ * through the conditioning on survival to the present; it does not enter this
+ * per-lineage fossil-count expectation, so it is intentionally unused here.
+ *
+ * The returned vector covers k = 0..maxK; the tail mass above maxK is not
+ * renormalised in (a truncated count distribution).
+ */
 export function fossilCountDistribution(
   lambda: number, mu: number, psi: number, rho: number, age: number, maxK: number = 20,
 ): number[] {
-  // Mean fossil count ≈ ψ · ∫₀^age N(t)dt for a lineage running age years,
-  // standardised by survival: ψ·age for a lineage that persists the span.
-  void lambda; void mu; void rho;
-  const meanCount = Math.max(0, psi * age);
+  void rho; // see note above: enters the likelihood, not this expectation
+  const r = lambda - mu;
+  let meanCount: number;
+  if (Math.abs(r) < 1e-10) {
+    meanCount = psi * age;                       // λ = μ: pure Poisson sampling
+  } else {
+    meanCount = psi * (Math.exp(r * age) - 1) / r;
+  }
+  if (!isFinite(meanCount) || meanCount < 0) meanCount = Math.max(0, psi * age);
+
   const probs: number[] = [];
   let logFact = 0;
   for (let k = 0; k <= maxK; k++) {
     if (k > 0) logFact += Math.log(k);
-    const logP = -meanCount + k * Math.log(meanCount > 0 ? meanCount : 1e-300) - logFact;
-    probs.push(meanCount === 0 ? (k === 0 ? 1 : 0) : Math.exp(logP));
+    if (meanCount === 0) { probs.push(k === 0 ? 1 : 0); continue; }
+    const logP = -meanCount + k * Math.log(meanCount) - logFact;
+    probs.push(logP < -700 ? 0 : Math.exp(logP));
+  }
+
+  // If the grid stops well before the mode, the vector is all-but-zero — which
+  // reads as "no fossils" rather than "grid too small". Refuse instead of
+  // returning a misleading distribution (e.g. lambda=0.5, mu=0.1, psi=0.5,
+  // age=10 has mean 67, so a 0..40 grid captures only 0.03% of the mass).
+  const captured = probs.reduce((a, b) => a + b, 0);
+  if (captured < 0.99 && maxK < meanCount) {
+    throw new Error(
+      `fossilCountDistribution: maxK=${maxK} is too small for mean count ${meanCount.toFixed(2)} ` +
+      `(grid captures only ${(captured * 100).toFixed(2)}% of the mass). ` +
+      'Increase maxK to at least ceil(mean + 6*sqrt(mean)).'
+    );
   }
   return probs;
 }

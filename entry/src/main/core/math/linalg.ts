@@ -111,16 +111,46 @@ export function svd(A: Matrix): { U: Matrix; S: number[]; Vt: Matrix } {
 export function eigh(A: Matrix): { eigenvalues: number[]; eigenvectors: Matrix } {
   assertFiniteMatrix('eigh:A', A);
   const n = A.rows;
+  if (n !== A.cols) throw new Error(`eigh: not square (${A.rows}x${A.cols})`);
+  // Jacobi rotations annihilate the off-diagonal in symmetric fashion. Feeding
+  // a non-symmetric matrix does not fail loudly — it simply fails to converge
+  // and the returned diagonal is meaningless. Guard against that misuse (the
+  // classic trigger is passing the product Sw^-1·Sb straight from LDA).
+  let asym = 0, scale = 0;
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      asym = Math.max(asym, Math.abs(A.get(i, j) - A.get(j, i)));
+      scale = Math.max(scale, Math.abs(A.get(i, j)), Math.abs(A.get(j, i)));
+    }
+  }
+  if (asym > 1e-8 * Math.max(scale, 1)) {
+    throw new Error(
+      `eigh: matrix is not symmetric (max asymmetry ${asym.toExponential(3)}). ` +
+      'Symmetrise the operator first (e.g. Sw^-1/2·Sb·Sw^-1/2 for LDA).'
+    );
+  }
   let T = A.clone(), Q = Matrix.eye(n);
+  let converged = false;
+  let lastOff = 0;
   for (let iter = 0; iter < 100 * n; iter++) {
     let maxOff = 0, pi = 0, qi = 1;
     for (let i = 0; i < n; i++)
       for (let j = i + 1; j < n; j++)
         if (Math.abs(T.get(i, j)) > maxOff) { maxOff = Math.abs(T.get(i, j)); pi = i; qi = j; }
-    if (maxOff < 1e-14) break;
+    lastOff = maxOff;
+    if (maxOff < 1e-14) { converged = true; break; }
     let theta: number;
-    if (Math.abs(T.get(pi, pi) - T.get(qi, qi)) < 1e-15) theta = Math.PI / 4;
-    else theta = 0.5 * Math.atan2(2 * T.get(pi, qi), T.get(pi, pi) - T.get(qi, qi));
+    // Rotation J = [[c, s], [-s, c]] applied as T <- J^T T J zeroes T[p,q] when
+    //     tan(2θ) = 2·T[p,q] / (T[q,q] − T[p,p])
+    // The denominator's sign matters: using (T[p,p] − T[q,q]) rotates the wrong
+    // way, INCREASING the off-diagonal instead of annihilating it. The loop then
+    // never converges and the returned diagonal is not a set of eigenvalues —
+    // for [[4,1,0],[1,3,1],[0,1,2]] it produced (3.792, 3.000, 2.208) where the
+    // true values are (4.732, 3.000, 1.268), and still had 1.48 of off-diagonal
+    // mass left after 300 sweeps. With the correct sign the same matrix
+    // converges in 10 sweeps to 8e-18.
+    if (Math.abs(T.get(qi, qi) - T.get(pi, pi)) < 1e-15) theta = Math.PI / 4;
+    else theta = 0.5 * Math.atan2(2 * T.get(pi, qi), T.get(qi, qi) - T.get(pi, pi));
     const c = Math.cos(theta), s = Math.sin(theta);
     for (let i = 0; i < n; i++) {
       const tp = T.get(i, pi), tq = T.get(i, qi);
@@ -135,11 +165,26 @@ export function eigh(A: Matrix): { eigenvalues: number[]; eigenvectors: Matrix }
       Q.set(i, pi, c * qp - s * qq); Q.set(i, qi, s * qp + c * qq);
     }
   }
-  const eigenvalues: number[] = [];
-  for (let i = 0; i < n; i++) eigenvalues.push(T.get(i, i));
+  // A non-converged Jacobi sweep leaves a non-negligible off-diagonal, and the
+  // diagonal is then NOT the eigenvalue set. Fail loudly instead of returning
+  // numbers that look plausible (the rotation-sign bug did exactly that).
+  let diagScale = 0;
+  for (let i = 0; i < n; i++) diagScale = Math.max(diagScale, Math.abs(T.get(i, i)));
+  if (!converged && lastOff > 1e-6 * Math.max(diagScale, 1)) {
+    throw new Error(
+      `eigh: Jacobi iteration did not converge (residual off-diagonal ${lastOff.toExponential(3)})`
+    );
+  }
+  const rawEigenvalues: number[] = [];
+  for (let i = 0; i < n; i++) rawEigenvalues.push(T.get(i, i));
 
-  // Sort in descending order (preserve V·V^T=I)
-  const order = eigenvalues.map((_, i) => i).sort((a, b) => eigenvalues[b] - eigenvalues[a]);
+  // Sort eigenvectors in descending order (preserve V·V^T=I) AND permute the
+  // eigenvalues with the SAME index map, so that eigenvalues[k] always pairs
+  // with eigenvectors column k. Permuting only the vectors silently breaks
+  // every caller that reads an eigenvalue together with its direction
+  // (Eigenshape, LDA's Wilks' lambda, RDA/CCA inertia, paleoEnvironment).
+  const order = rawEigenvalues.map((_, i) => i).sort((a, b) => rawEigenvalues[b] - rawEigenvalues[a]);
+  const eigenvalues = order.map(i => rawEigenvalues[i]);
   const evd = new Float64Array(n * n);
   for (let j = 0; j < n; j++)
     for (let i = 0; i < n; i++)

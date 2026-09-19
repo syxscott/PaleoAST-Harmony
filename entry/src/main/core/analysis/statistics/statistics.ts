@@ -3,9 +3,10 @@ import { svd, eigh, inv } from '../../math/linalg';
 // p-value paths use the verified CDF/quantile functions from math/stats
 // (pt/pF/pchisq/pnorm/qnorm/qt/gammainc); the local *_approx helpers below are
 // kept only because core/math is frozen (they must not gain new call sites).
-import { mean, std, rankdata, skewness, kurtosis, pt, qt, pF, pchisq, pnorm, qchisq } from '../../math/stats';
+import { mean, std, median, rankdata, skewness, kurtosis, pt, qt, pF, pchisq, pnorm, qchisq } from '../../math/stats';
 import { randnArray } from '../../math/random';
 import { seed, randint, shuffle as rngShuffle } from '../../math/random';
+import { blombergKFromVCV } from '../phylogenetics/vcv';
 import { tukeyHsd, type TukeyPairResult } from './Tukey';
 
 /**
@@ -432,7 +433,9 @@ export function univariateSummary(data: Matrix, colNames: string[]): ColumnStats
   for (let j = 0; j < data.cols; j++) {
     const vals = data.col(j).filter(v => !isNaN(v));
     if (vals.length === 0) { results.push({ name: colNames[j] || `Var${j}`, n: 0, mean: 0, std: 0, variance: 0, min: 0, max: 0, median: 0, skewness: 0, kurtosis: 0, se: 0, ci95: [0, 0] }); continue; }
-    const m = mean(vals), s = std(vals), v = s * s, med = [...vals].sort((a, b) => a - b)[Math.floor(vals.length / 2)];
+    // median() averages the two central values for even n; indexing
+    // floor(n/2) directly returned the upper-middle value instead.
+    const m = mean(vals), s = std(vals), v = s * s, med = median(vals);
     const se_val = s / Math.sqrt(vals.length);
     // Fixed: compute actual skewness and kurtosis instead of hardcoding to 0
     const skew_val = skewness(vals);
@@ -699,6 +702,48 @@ export interface LDAResult {
 }
 
 /**
+ * Solve the LDA generalized eigenproblem Sw⁻¹·Sb while keeping the operator
+ * handed to `eigh` symmetric.
+ *
+ * Using M = Sw⁻¹·Sb directly is invalid on two counts: (a) the product of two
+ * symmetric matrices is symmetric only when they commute, and (b) `eigh` is a
+ * Jacobi solver that assumes symmetry — a non-symmetric input does not throw,
+ * it just fails to converge and the returned diagonal is meaningless.
+ *
+ * Correct form — whiten the within-class scatter and solve the symmetric
+ * system, which has the same spectrum as Sw⁻¹·Sb:
+ *
+ *     Msym = Sw^{-1/2} · Sb · Sw^{-1/2}
+ *     W    = Sw^{-1/2} · U        (discriminant directions)
+ *
+ * Sw^{-1/2} is assembled from the SVD of Sw with a relative threshold, so a
+ * rank-deficient within-class scatter degrades gracefully instead of producing
+ * NaN/Inf.
+ *
+ * @returns eigenvalues (descending) and the full p×p loading matrix whose
+ *          columns are ordered to match them — callers slice to their nc.
+ */
+function ldaSolveGeneralized(Sw: Matrix, Sb: Matrix, p: number): { loadings: Matrix; eigenvalues: number[] } {
+  const { S: swS, Vt: swVt } = svd(Sw);
+  let smax = 0;
+  for (const s of swS) smax = Math.max(smax, s);
+  const tol = smax > 0 ? smax * 1e-10 : 1e-10;
+
+  // Sw^-1/2 = V · diag(s^-1/2) · V^T, assembled as (V·diag) · V^T.
+  const halfD = new Float64Array(p * p);
+  for (let i = 0; i < p; i++) {
+    const s = swS[i];
+    const inv = s > tol ? 1 / Math.sqrt(s) : 0;
+    for (let j = 0; j < p; j++) halfD[i * p + j] = swVt.get(i, j) * inv;
+  }
+  const swHalf = swVt.transpose().matmul(new Matrix(halfD, p, p));
+
+  const msym = swHalf.matmul(Sb).matmul(swHalf);
+  const { eigenvalues, eigenvectors } = eigh(msym);
+  return { loadings: swHalf.matmul(eigenvectors), eigenvalues };
+}
+
+/**
  * Fit LDA on a data matrix and return the top-nc discriminant loadings plus
  * the class centroids in LD space. Used by `lda` (full fit) and by the
  * k-fold cross-validation branch (refit on each training split, so the
@@ -740,17 +785,9 @@ function ldaFit(data: Matrix, groups: number[], uniqueGroups: number[], nc: numb
     }
   }
 
-  // Solve Sw^-1 * Sb via the SVD of Sw (pseudo-inverse with threshold)
-  const { S: swS, Vt: swVt } = svd(Sw);
-  const swInvD = new Float64Array(p * p);
-  for (let i = 0; i < p; i++) {
-    const invS = swS[i] > 1e-10 ? 1 / swS[i] : 0;
-    for (let j = 0; j < p; j++) swInvD[i * p + j] = swVt.get(i, j) * invS;
-  }
-  const swInv = swVt.transpose().matmul(new Matrix(swInvD, p, p).transpose());
-  const M = swInv.matmul(Sb);
-  const { eigenvectors: eVecs } = eigh(M);
-  const loadings = eVecs.sliceCols(0, nc);
+  // Solve the generalized eigenproblem (Sw, Sb) in symmetric form.
+  const { loadings: allLoadings } = ldaSolveGeneralized(Sw, Sb, p);
+  const loadings = allLoadings.sliceCols(0, nc);
 
   const centroidsLD = Matrix.zeros(k, nc);
   for (let ci = 0; ci < k; ci++) {
@@ -833,20 +870,9 @@ export function lda(data: Matrix, groups: number[], nComponents?: number, cvFold
     }
   }
 
-  // Solve generalized eigenvalue problem: Sw^-1 * Sb
-  // Use SVD of Sw for regularization
-  const { S: swS, Vt: swVt } = svd(Sw);
-  // Regularize: invert with threshold
-  const swInvD = new Float64Array(p * p);
-  for (let i = 0; i < p; i++) {
-    const invS = swS[i] > 1e-10 ? 1 / swS[i] : 0;
-    for (let j = 0; j < p; j++) swInvD[i * p + j] = swVt.get(i, j) * invS;
-  }
-  const swInv = swVt.transpose().matmul(new Matrix(swInvD, p, p).transpose());
-
-  // Sw^-1 * Sb
-  const M = swInv.matmul(Sb);
-  const { eigenvalues: eigs, eigenvectors: eVecs } = eigh(M);
+  // Solve the generalized eigenproblem (Sw, Sb) in symmetric form. The
+  // returned eigenvalues are descending and aligned with the loading columns.
+  const { loadings: allLoadings, eigenvalues: eigs } = ldaSolveGeneralized(Sw, Sb, p);
 
   // Wilks' Lambda: Λ = |Sw| / |Sw + Sb|
   // Ref: Wilks S.S. (1932) Biometrika 24: 471-494.
@@ -864,8 +890,8 @@ export function lda(data: Matrix, groups: number[], nComponents?: number, cvFold
   // Extend to nc components (pad with last value if needed)
   while (wilksLambdaVals.length < nc) wilksLambdaVals.push(wilksLambdaVals[wilksLambdaVals.length - 1] ?? 1);
 
-  // Take top nc eigenvectors (sorted descending by eigh)
-  const loadings = eVecs.sliceCols(0, nc);
+  // Take the top nc discriminant directions (descending, from ldaSolveGeneralized)
+  const loadings = allLoadings.sliceCols(0, nc);
   const eigTop = eigs.slice(0, nc);
   const totalEig = eigs.reduce((a, b) => a + Math.max(0, b), 0);
   const explainedRatio = eigTop.map(e => totalEig > 0 ? Math.max(0, e) / totalEig : 0);
@@ -1746,7 +1772,7 @@ export function phylogeneticSignal(root: any, traitValues: Record<string, number
   const y = tipNames.map(nm => traitValues[nm] ?? NaN);
   const V = buildVCV(root, tipNames);
 
-  const K = blombergKFromVcv(y, V);
+  const K = blombergKFromVCV(y, V);
 
   // Permutation test: shuffle the trait values across tips (groups/VCV fixed)
   let count = 0;
@@ -1754,7 +1780,7 @@ export function phylogeneticSignal(root: any, traitValues: Record<string, number
   for (let perm = 0; perm < nRandomizations; perm++) {
     const shuffled = [...y];
     rngShuffle(shuffled);
-    const permK = blombergKFromVcv(shuffled, V);
+    const permK = blombergKFromVCV(shuffled, V);
     permKs.push(permK);
     if (permK >= K) count++;
   }
@@ -1770,45 +1796,15 @@ export function phylogeneticSignal(root: any, traitValues: Record<string, number
 }
 
 /**
- * Canonical Blomberg et al. (2003) K from a trait vector and an
- * ape-convention VCV — exact port of Python `_blomberg_k_from_vcv`:
+ * Blomberg et al. (2003) K now lives in ONE place — `blombergKFromVCV` in
+ * analysis/phylogenetics/vcv.ts — and is imported rather than duplicated.
  *
- *     K = s²_ord / (σ̂²_GLS · tr(V)/n)
- *
- * Returns 0.0 when the computation is degenerate (singular VCV, zero
- * variance, or n < 3).
+ * The duplicate that used to sit here had the same two defects as the copy in
+ * vcv.ts (arithmetic mean in the numerator; normaliser `tr(V)/n` instead of
+ * `(tr(V) − n/(1ᵀV⁻¹1))/(n−1)`), which biased K low on every non-star tree:
+ * E[K] must be 1 under Brownian motion, and measured 0.83 / 0.76 on two test
+ * trees. Keeping a second copy is how the two drifted apart in the first place.
  */
-function blombergKFromVcv(y: number[], V: number[][]): number {
-  const n = y.length;
-  if (n < 3) return 0;
-  if (y.some(v => isNaN(v))) return 0;
-  // Tiny ridge for numerical stability (Python adds 1e-10 on the diagonal)
-  const Vr: number[][] = V.map((row, i) => row.map((v, j) => (i === j ? v + 1e-10 : v)));
-  let Vinv: Matrix;
-  try {
-    Vinv = inv(new Matrix(new Float64Array(Vr.flat()), n, n));
-  } catch {
-    return 0;
-  }
-
-  const ones = new Array<number>(n).fill(1);
-  const oneViOne = quadForm(Vinv, ones, ones);
-  if (!(oneViOne > 0)) return 0;
-
-  const oneViY = quadForm(Vinv, ones, y);
-  const aHat = oneViY / oneViOne;
-  const resid = y.map(v => v - aHat);
-  const sigma2Gls = quadForm(Vinv, resid, resid) / (n - 1);
-
-  const yMean = mean(y);
-  const s2Ord = y.reduce((s, v) => s + (v - yMean) ** 2, 0) / (n - 1);
-
-  let trace = 0;
-  for (let i = 0; i < n; i++) trace += Vr[i][i];
-  const denom = sigma2Gls * trace / n;
-  if (!(denom > 0)) return 0;
-  return s2Ord / denom;
-}
 
 /** uᵀ A v for symmetric A held as a Matrix. */
 function quadForm(A: Matrix, u: number[], v: number[]): number {
@@ -2143,7 +2139,10 @@ export function phyloANOVA(root: any, traitValues: Record<string, number>, group
       nValidPerms++;
     }
   }
-  const pValue = nValidPerms > 0 ? count / nValidPerms : 1.0;
+  // Phipson & Smyth (2010) correction, matching anosim / permanova /
+  // phylogeneticSignal in this module. The bare count/nValidPerms form used
+  // here could return p = 0 and was not comparable with its siblings.
+  const pValue = nValidPerms > 0 ? (count + 1) / (nValidPerms + 1) : 1.0;
 
   return {
     fStatistic: F, pValue, ssBetween, ssWithin, nPermutations,

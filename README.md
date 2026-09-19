@@ -10,7 +10,7 @@ PaleoAST-Harmony 是 [PaleoAST](https://github.com/syxscott/PaleoAST) Python 版
 
 ## 核心功能
 
-### 统计分析（78 个函数）
+### 统计分析（196 个导出函数 + 10 个导出类）
 
 | 模块 | 函数数 | 覆盖算法 |
 |------|--------|---------|
@@ -23,9 +23,15 @@ PaleoAST-Harmony 是 [PaleoAST](https://github.com/syxscott/PaleoAST) Python 版
 | **形态测量** | 7 | GPA 普氏对齐、EFA 椭圆傅里叶 (Kuhl & Giardina 1982)、异速生长、演化速率 (随机游走/定向/停滞)、TPS 薄板样条变形、相对扭曲、配置块划分 |
 | **3D 形态测量** | 5 | 四元数旋转、3D GPA、3D TPS 变形、半地标滑动、网格法向量/面积计算 |
 
-### 图表引擎（26 种图表）
+### 图表引擎
 
-散点图、折线图、柱状图、直方图、箱线图、热力图、树状图、饼图、玫瑰图、Shepard 图、Scree 图、稀疏化曲线、Q-Q 图、置信椭圆、零模型直方图、系统发育树、PCA 双标图、SIMPER 贡献图、丰度排名图、存活曲线、灭绝 CI 范围图、频谱周期图、小波标度图、CCA 三标图、混淆矩阵、地层柱状图。
+`PlotCanvas` 实现 **9 条绘制通道**：`scatter` / `line` / `bar` / `histogram` / `boxplot` / `heatmap` / `range` / `dendrogram` / `none`。
+各分析把结果映射到这些通道上，呈现为散点图、折线图、直方图、箱线图、树状图、稀疏化曲线、存活曲线、灭绝 CI 范围图、频谱周期图、小波标度图、地层柱状图等。
+
+坐标系、刻度、命中判定与数值格式化已抽到 `ets/components/plot/`（纯 TS，有单测）：
+`ViewPortHandler`（视口唯一真源）、`ChartComputator`（刻度）、`ChartHighlighter`（命中判定）、`ValueFormatter`（格式化）。
+
+> `dendrogram` 通道缺少 linkage 数据通路，因此聚类/CONISS 目前绘制的是**真实的合并高度曲线**，而不是树状图。
 
 ### UI 组件
 
@@ -33,23 +39,24 @@ PaleoAST-Harmony 是 [PaleoAST](https://github.com/syxscott/PaleoAST) Python 版
 |------|------|
 | **Index.ets** | 主页面，含 Ribbon 工具栏 (5 标签)、SideBarContainer 响应式布局、42 个分析处理器 |
 | **Spreadsheet.ets** | 数据表格，LazyForEach + IDataSource 虚拟列表、单元格编辑、排序、筛选、组管理 |
-| **PlotCanvas.ets** | 交互式图表画布，hover tooltip、zoom/pan、选择、PNG/SVG/PDF/EPS/TIFF 导出 |
-| **NavigationTree.ets** | 导航树，9 个分类、30+ 条目、搜索、展开/折叠 |
+| **PlotCanvas.ets** | 交互式图表画布，hover tooltip、zoom/pan、选择，导出 PNG / SVG / EPS（PDF 与 TIFF 未实现，会明确提示） |
+| **NavigationTree.ets** | 导航树，9 个分类、90+ 条目、搜索、展开/折叠，受 Ribbon 标签过滤 |
 | **DiagnosticConsole.ets** | 诊断控制台，日志过滤、导出 |
 | **FloatingToolbar.ets** | 浮动工具栏，快速操作 |
 | **FileDropHandler.ets** | 文件拖放支持 |
-| **34 个对话框** | 每个分析有独立参数配置对话框，含描述、校验、Tips |
+| **35 个对话框** | 每个分析有独立参数配置对话框，含描述、校验、Tips |
 
 ### 鸿蒙特性
 
 | 特性 | 用途 |
 |------|------|
-| **NAPI C++** | SVD/特征值/逆矩阵/距离矩阵用 C++ 原生实现，性能提升 10-100x |
+| **NAPI C++** | SVD/特征值/逆/距离矩阵/聚类共 7 个 C++ 函数，带错误码通道（`Error:Singular` 等） |
 | **TaskPool** | @kit.ArkTS 多线程，@Sendable 跨线程数据共享 |
 | **LazyForEach** | IDataSource 虚拟列表，避免 1000+ 行 DOM 爆炸 |
 | **FilePicker** | @ohos.file.picker 沙箱安全文件导入/导出 |
 | **SideBarContainer** | 响应式布局，适配手机(折叠)/平板(展开) |
-| **@StorageLink** | 暗色模式偏好持久化 |
+| **Preferences** | 设置持久化（暗色模式、精度、alpha、rngSeed、导出格式），启动时经 `PreferenceManager` 注入 AppStorage |
+| **RDB** | 分析历史持久化（`HistoryRepository`：单宽表 + 扩展槽 + 复合索引 + 静默去重 + 保留最新 100 条） |
 | **SwipeGesture** | 全局滑动手势切换标签 |
 | **TransitionEffect** | 对话框缩放+淡入过渡 |
 | **LoadingProgress** | 分析执行中的加载动画 |
@@ -147,8 +154,51 @@ PaleoAST-Harmony/
 | numpy | math/Matrix.ts + linalg.ts | 自研矩阵库 |
 | scipy.stats | math/special.ts | lgamma/betainc/erf/分布函数 |
 | scipy.spatial | scipy/DistanceCluster.ts | 距离矩阵 + 聚类 |
-| matplotlib | chart/plotters/ | Canvas 2D 图表引擎 |
+| matplotlib | `PlotCanvas.ets` + `ets/components/plot/` | Canvas 2D 图表引擎 |
 | PyQt6 | ets/ | ArkUI 声明式 UI |
+
+## 验证
+
+不需要设备即可跑完这三项，它们覆盖了本项目历史上绝大多数缺陷：
+
+```bash
+# 1. 算法正确性（78 个用例）
+node --experimental-transform-types tests/test.mjs
+
+# 2. 界面接线（19 条用例）：分析入口 → 对话框 → 派发开关 → 参数传递
+node test/device/run.mjs
+
+# 3. 结构完整性（括号平衡 + 重复导出）
+python tools/structure_check.py
+```
+
+> `--experimental-transform-types` 不能省；测试必须走 `tests/test.mjs`（核心模块使用无扩展名相对导入，靠 `tests/loader.mjs` 解析）。
+
+真机探测（安装、启动、可达性）：
+
+```bash
+node test/device/run.mjs --device <udid>
+```
+
+## 文档
+
+| 文档 | 内容 |
+|---|---|
+| [docs/architecture.md](docs/architecture.md) | 分层、职责边界、三条核心数据流、状态与持久化原则 |
+| [docs/architecture/troubleshooting.md](docs/architecture/troubleshooting.md) | **按症状定位调用链 —— 遇到问题先读这篇** |
+| [docs/code-style.md](docs/code-style.md) | 数值正确性要求、类型与模块规则、命名约定 |
+| [CONTRIBUTING.md](docs/CONTRIBUTING.md) | 改动流程、变更记录模板、许可边界 |
+| [AGENTS.md](AGENTS.md) | AI 助手的工作约定 |
+| [docs/changes/](docs/changes/) | 每次修复的变更记录 |
+| [test/device/README.md](test/device/README.md) | 设备测试的两种模式与已知缺口 |
+
+## 已知限制
+
+- **NAPI 加速尚未启用**：C++ 侧的 7 个函数与错误码通道已就绪，但**分析路径目前不调用它们**（`nativeSVD` 等尚无调用方）。且 C++ 的 `matrixSVD` 只返回奇异值、`matrixEigh` 只返回特征值，与返回向量/矩阵的 TS 版本不是等价替换 —— 切换前必须逐一对拍并补对比测试。
+- `dendrogram` 通道缺 linkage 数据通路，聚类/CONISS 绘制合并高度曲线而非树状图。
+- 导出支持 PNG / SVG / EPS；PDF 与 TIFF 未实现（会在状态栏明确提示，不会静默失败）。
+- i18n 目前只有英文与中文。
+- 界面级断言尚未实现：`test/device/run.mjs` 目前验证的是接线，不是端到端通过。
 
 ## 许可证
 

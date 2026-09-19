@@ -1,0 +1,43 @@
+{
+  "//": "Declarative device-runnable analysis cases. `params` keys MUST match the keys",
+  "//2": "read by runDialogAnalysisCore() in ets/pages/Index.ets — `node test/device/run.mjs`",
+  "//3": "verifies that statically, without a device.",
+  "suite": "analysis-smoke",
+  "data": {
+    "//": "Cases need a loaded dataset. Provide a small CSV via --data, or let the",
+    "//2": "device run load the bundled sample before executing the cases.",
+    "minRows": 4,
+    "minCols": 2
+  },
+  "cases": [
+    { "analysis": "Summary", "params": {} },
+
+    { "analysis": "Univariate", "params": { "test_type": "Summary" } },
+    { "analysis": "Univariate", "params": { "test_type": "Normality" } },
+    { "analysis": "Univariate", "params": { "test_type": "t-test" } },
+    { "analysis": "Univariate", "params": { "test_type": "ANOVA" } },
+    { "analysis": "Univariate", "params": { "test_type": "Kruskal-Wallis" } },
+
+    { "analysis": "PCA", "params": { "nComponents": 3, "method": "covariance" } },
+    { "analysis": "PCoA", "params": { "metric": "bray_curtis", "n_components": 3 } },
+    {
+      "analysis": "NMDS",
+      "params": { "metric": "bray_curtis", "n_dimensions": 2, "max_iterations": 200, "n_restarts": 4 }
+    },
+    {
+      "analysis": "Clustering",
+      "params": { "n_clusters": 3, "method": "ward", "metric": "euclidean" }
+    },
+    { "analysis": "CCA", "params": { "n_env_columns": 1, "n_components": 3, "method": "cca" } },
+
+    { "analysis": "Diversity Indices", "params": { "sample_index": 0 } },
+    { "analysis": "Rarefaction", "params": { "sample_index": 0, "max_n": 100, "n_points": 20 } },
+    { "analysis": "NullModel", "params": { "metric": "c_score", "n_permutations": 200 } },
+    { "analysis": "SIMPER", "params": { "metric": "bray_curtis" } },
+    { "analysis": "ANOSIM", "params": { "metric": "bray_curtis", "n_permutations": 200 } },
+
+    { "analysis": "CONISS", "params": { "n_zones": 3 } },
+    { "analysis": "Extinction", "params": { "method": "marshall", "confidence_level": 0.95 } },
+    { "analysis": "EFA", "params": { "n_harmonics": 6, "n_points": 100 } }
+  ]
+}

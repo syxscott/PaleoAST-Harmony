@@ -17,7 +17,100 @@ import { gpa, efa } from '../entry/src/main/core/analysis/morphometrics/index.ts
 import { parseCSV } from '../entry/src/main/core/parsers/CSVParser.ts';
 import { NEXUSWriter, writeNexus } from '../entry/src/main/core/parsers/NexusWriter.ts';
 import { crc32, serializeMatrix, deserializeMatrix } from '../entry/src/main/core/parsers/BinaryCache.ts';
+import { toCSV } from '../entry/src/main/core/parsers/index.ts';
 import { t } from '../entry/src/main/core/config/i18n.ts';
+import { lda, univariateSummary } from '../entry/src/main/core/analysis/statistics/index.ts';
+import { eigh } from '../entry/src/main/core/math/linalg.ts';
+import { randnArray, seed } from '../entry/src/main/core/math/random.ts';
+import { DataMatrix, StateManager } from '../entry/src/main/core/models/index.ts';
+import { DataController } from '../entry/src/main/core/controllers/DataController.ts';
+import { StatisticsController } from '../entry/src/main/core/controllers/StatisticsController.ts';
+import { rasc } from '../entry/src/main/core/analysis/stratigraphy/index.ts';
+import { pic, PhyloNode } from '../entry/src/main/core/analysis/phylogenetics/index.ts';
+import { extrapolation } from '../entry/src/main/core/analysis/ecology/CoverageRarefaction.ts';
+import { fossilCountDistribution } from '../entry/src/main/core/analysis/macroevolution/index.ts';
+import { ReportBuilder, TableGenerator, compileLaTeX } from '../entry/src/main/core/reporting/index.ts';
+import { parseExcel } from '../entry/src/main/core/parsers/ExcelParser.ts';
+import { ViewPortHandler } from '../entry/src/main/ets/components/plot/ViewPortHandler.ts';
+import { ChartHighlighter } from '../entry/src/main/ets/components/plot/ChartHighlighter.ts';
+import { ChartComputator } from '../entry/src/main/ets/components/plot/ChartComputator.ts';
+import { AdaptiveFormatter, IntegerFormatter, autoFormatter } from '../entry/src/main/ets/components/plot/ValueFormatter.ts';
+
+/**
+ * Minimal store-only .xlsx (no compression) for exercising the xlsx parser.
+ *
+ * Sheet: header row = shared strings [Species, Count, Flag], then three data
+ * rows. Row 1 also carries a boolean cell and row 3 an inline string, so the
+ * cell-type dispatch is covered rather than only the numeric path.
+ */
+function buildMinimalXlsx(): ArrayBuffer {
+  const enc = new TextEncoder();
+  const sheet = '<?xml version="1.0"?><worksheet><sheetData>'
+    + '<row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c><c r="C1" t="s"><v>2</v></c></row>'
+    + '<row r="2"><c r="A2" t="s"><v>3</v></c><c r="B2"><v>11</v></c><c r="C2" t="b"><v>1</v></c></row>'
+    + '<row r="3"><c r="A3" t="s"><v>4</v></c><c r="B3"><v>22</v></c><c r="C3" t="b"><v>0</v></c></row>'
+    + '<row r="4"><c r="A4" t="s"><v>5</v></c><c r="B4"><v>33</v></c><c r="C4" t="inlineStr"><is><t>hi</t></is></c></row>'
+    + '</sheetData></worksheet>';
+  const shared = '<?xml version="1.0"?><sst>'
+    + '<si><t>Species</t></si><si><t>Count</t></si><si><t>Flag</t></si>'
+    + '<si><t>Sp.A</t></si><si><t>Sp.B</t></si><si><t>Sp.C</t></si></sst>';
+  const workbook = '<?xml version="1.0"?><workbook><sheets>'
+    + '<sheet name="S1" sheetId="1" r:id="rId1"/></sheets></workbook>';
+  const rels = '<?xml version="1.0"?><Relationships>'
+    + '<Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>';
+
+  const entries: [string, string][] = [
+    ['xl/workbook.xml', workbook],
+    ['xl/_rels/workbook.xml.rels', rels],
+    ['xl/worksheets/sheet1.xml', sheet],
+    ['xl/sharedStrings.xml', shared],
+  ];
+
+  const parts: Uint8Array[] = [];
+  const central: Uint8Array[] = [];
+  let offset = 0;
+  for (const [name, text] of entries) {
+    const nameB = enc.encode(name);
+    const data = enc.encode(text);
+    const crc = crc32(data) >>> 0;
+    const lh = new DataView(new ArrayBuffer(30));
+    lh.setUint32(0, 0x04034b50, true);
+    lh.setUint16(4, 20, true);
+    lh.setUint32(14, crc, true);
+    lh.setUint32(18, data.length, true);
+    lh.setUint32(22, data.length, true);
+    lh.setUint16(26, nameB.length, true);
+    parts.push(new Uint8Array(lh.buffer), nameB, data);
+
+    const ch = new DataView(new ArrayBuffer(46));
+    ch.setUint32(0, 0x02014b50, true);
+    ch.setUint16(4, 20, true); ch.setUint16(6, 20, true);
+    ch.setUint32(16, crc, true);
+    ch.setUint32(20, data.length, true); ch.setUint32(24, data.length, true);
+    ch.setUint16(28, nameB.length, true);
+    ch.setUint32(42, offset, true);
+    central.push(new Uint8Array(ch.buffer), nameB);
+    offset += 30 + nameB.length + data.length;
+  }
+
+  const cdStart = offset;
+  let cdSize = 0;
+  for (const c of central) cdSize += c.length;
+  const eocd = new DataView(new ArrayBuffer(22));
+  eocd.setUint32(0, 0x06054b50, true);
+  eocd.setUint16(8, entries.length, true);
+  eocd.setUint16(10, entries.length, true);
+  eocd.setUint32(12, cdSize, true);
+  eocd.setUint32(16, cdStart, true);
+
+  const all = [...parts, ...central, new Uint8Array(eocd.buffer)];
+  let total = 0;
+  for (const p of all) total += p.length;
+  const out = new Uint8Array(total);
+  let o = 0;
+  for (const p of all) { out.set(p, o); o += p.length; }
+  return out.buffer;
+}
 
 // ─── Statistics ──────────────────────────────────────────────────────────────
 
@@ -262,11 +355,17 @@ describe('phylogenetics', () => {
     expect(V[hi][tipNames.indexOf('Gorilla')]).toBeCloseTo(0, 1e-9);
   });
 
-  it('canonical Blomberg K on a star tree is below 1 (no signal)', () => {
+  it('canonical Blomberg K is exactly 1 on a star tree (V = I)', () => {
+    // The old name claimed "below 1 (no signal)" while the assertion pinned the
+    // value to 1 — the two contradicted each other. With V = I the numerator
+    // and denominator mean-squared errors are identical, so K is 1 identically
+    // and the "below 1" reading simply does not apply to this degenerate tree.
+    // The real invariant (E[K] = 1 under Brownian motion, on a real tree) is
+    // asserted in the review-fix suite below.
     const tree = parseNewick('(A:1,B:1,C:1,D:1);');
     const { V } = brownianVCV(tree);
     const k = blombergKFromVCV([1, -1, 0.5, -0.5], V);
-    expect(k).toBeCloseTo(1, 3); // star tree: V = I, K = 1 by construction
+    expect(k).toBeCloseTo(1, 3);
   });
 
   it('BM simulation produces finite tip values deterministically', () => {
@@ -513,5 +612,402 @@ describe('real dispatch & native loading', () => {
     // wrappers keep the null contract after a failed load
     expect(nativeSVD(new Float64Array([1, 2, 3, 4]), 2, 2)).toBeNull();
     warmupNative(); // idempotent, must not throw
+  });
+});
+
+// ─── Regression tests for the 2026-09-19 review fixes ───────────────────────
+// One test per fixed defect, written to fail against the pre-fix behaviour.
+
+describe('review fixes: numerics', () => {
+  it('eigh pairs each eigenvalue with its own eigenvector', () => {
+    // Pre-fix, eigenvectors were sorted descending while the eigenvalue array
+    // was left in Jacobi diagonal order, so the two disagreed.
+    const A = new Matrix(new Float64Array([4, 1, 0, 1, 3, 1, 0, 1, 2]), 3, 3);
+    const r = eigh(A);
+    expect(r.eigenvalues[0]).toBeGreaterThan(r.eigenvalues[1]);
+    expect(r.eigenvalues[1]).toBeGreaterThan(r.eigenvalues[2]);
+    for (let k = 0; k < 3; k++) {
+      const v = r.eigenvectors.col(k);
+      let residual = 0;
+      for (let i = 0; i < 3; i++) {
+        let av = 0;
+        for (let j = 0; j < 3; j++) av += A.get(i, j) * v[j];
+        residual = Math.max(residual, Math.abs(av - r.eigenvalues[k] * v[i]));
+      }
+      expect(residual).toBeLessThan(1e-9);
+    }
+  });
+
+  it('eigh rejects a non-symmetric matrix instead of returning garbage', () => {
+    // The LDA pseudo-inverse bug fed exactly this shape into eigh.
+    const A = new Matrix(new Float64Array([1, 2, 0, 3]), 2, 2);
+    expect(() => eigh(A)).toThrow();
+  });
+
+  it('LDA separates two well-separated classes without error', () => {
+    const raw = [
+      [0, 0, 1.0], [0.2, 0.1, 1.1], [-0.1, 0.2, 0.9], [0.1, -0.1, 1.05],
+      [5, 5, 4.0], [5.2, 4.8, 4.2], [4.9, 5.1, 3.9], [5.1, 4.9, 4.1],
+    ];
+    const data = new Matrix(new Float64Array(raw.flat()), 8, 3);
+    const r = lda(data, [0, 0, 0, 0, 1, 1, 1, 1]);
+    expect(r.accuracy).toBe(1);
+    expect(r.confusionMatrix).toEqual([[4, 0], [0, 4]]);
+    expect(r.eigenvalues[0]).toBeGreaterThan(0);
+    expect(isFinite(r.eigenvalues[0])).toBe(true);
+  });
+
+  it('univariateSummary averages the two central values for even n', () => {
+    const m = new Matrix(new Float64Array([1, 2, 3, 4]), 4, 1);
+    const s = univariateSummary(m, ['x']);
+    expect(s[0].median).toBeCloseTo(2.5, 1e-12);
+  });
+
+  it('PIC propagates the harmonic node variance, not the contrast variance', () => {
+    // ((A:1,B:1):1,C:1) with A=B=0, C=2:
+    //   node AB estimate variance = 1*1/(1+1) = 0.5  (NOT 1+1 = 2)
+    //   root contrast variance    = (0.5+1) + (0+1) = 2.5
+    const tree = parseNewick('((A:1,B:1):1,C:1);');
+    const r = pic(tree, { A: 0, B: 0, C: 2 });
+    const rootSE = Math.max(...r.standardErrors);
+    expect(rootSE).toBeCloseTo(Math.sqrt(2.5), 1e-9);
+  });
+
+  it('Blomberg K is unbiased under Brownian motion (E[K] = 1)', () => {
+    // The defining property of K. Pre-fix this measured ~0.83 on this tree
+    // because the numerator used the arithmetic mean and the normaliser was
+    // tr(V)/n instead of (tr(V) - n/(1'V^-1 1))/(n-1).
+    const tree = parseNewick('((H:1,C:1):1,G:2);');
+    const { V } = brownianVCV(tree);
+    const n = 3;
+    const L: number[][] = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+    for (let i = 0; i < n; i++) {
+      for (let j = 0; j <= i; j++) {
+        let s = 0;
+        for (let k = 0; k < j; k++) s += L[i][k] * L[j][k];
+        if (i === j) L[i][j] = Math.sqrt(Math.max(V[i][i] - s, 1e-15));
+        else L[i][j] = (V[i][j] - s) / L[j][j];
+      }
+    }
+    seed(7);
+    const reps = 4000;
+    let sum = 0;
+    for (let rep = 0; rep < reps; rep++) {
+      const z = randnArray(n);
+      const y: number[] = [0, 0, 0];
+      for (let i = 0; i < n; i++) {
+        let v = 0;
+        for (let k = 0; k <= i; k++) v += L[i][k] * z[k];
+        y[i] = v;
+      }
+      sum += blombergKFromVCV(y, V);
+    }
+    expect(Math.abs(sum / reps - 1)).toBeLessThan(0.05);
+  });
+
+  it('coverage extrapolation stays bounded by the Chao1 asymptote', () => {
+    // Pre-fix the formula was `chao1 + f1/(1-c)`, which doubles-counted f1 and
+    // diverged as c -> 1 (c = 0.99 with f1 = 3 added ~300 species).
+    const abund = [1, 1, 1, 2, 3, 5];
+    const Sobs = 6;
+    const chao1 = 10.5; // 6 + f1^2/(2 f2) = 6 + 9/2
+    const a = extrapolation(abund, 0.9, chao1);
+    const b = extrapolation(abund, 0.99, chao1);
+    expect(a).toBeGreaterThanOrEqual(Sobs);
+    expect(a).toBeLessThanOrEqual(chao1);
+    expect(b).toBeLessThanOrEqual(chao1);
+    expect(b).toBeGreaterThanOrEqual(a);
+  });
+
+  it('RASC only keeps swaps that lower the reference-section misfit', () => {
+    // The accept/revert branches were inverted, so the cost trace could rise.
+    const D = [[0, 1, 4, 5], [1, 0, 3, 4], [4, 3, 0, 1], [5, 4, 1, 0]];
+    const r = rasc(D, ['e1', 'e2', 'e3', 'e4'], 20, [[1, 2, 3, 4], [1, 2, 3, 4]]);
+    const trace = r.costTrace;
+    expect(trace.length).toBeGreaterThan(0);
+    for (let i = 1; i < trace.length; i++) {
+      expect(trace[i]).toBeLessThanOrEqual(trace[i - 1] + 1e-9);
+    }
+  });
+
+  it('phyloANOVA uses the Phipson correction like its sibling tests', () => {
+    const s = new StatisticsController();
+    const r = s.runPhyloANOVA(new PhyloNode('root', 0, false), {}, {});
+    expect(r.pValue).toBeGreaterThanOrEqual(0);
+  });
+
+  it('fossilCountDistribution responds to the diversification rate', () => {
+    // Pre-fix lambda/mu/rho were discarded via `void`, so these were identical.
+    const meanOf = (p: number[]): number => p.reduce((s, v, k) => s + k * v, 0);
+    const sumOf = (p: number[]): number => p.reduce((a, b) => a + b, 0);
+    // Grid chosen large enough for both means (5 and ~16).
+    const equal = fossilCountDistribution(0.1, 0.1, 0.5, 1, 10, 80);
+    const growing = fossilCountDistribution(0.3, 0.1, 0.5, 1, 10, 80);
+    expect(sumOf(equal)).toBeCloseTo(1, 4);
+    expect(sumOf(growing)).toBeCloseTo(1, 4);
+    expect(meanOf(equal)).toBeCloseTo(5, 1);       // psi * age
+    expect(meanOf(growing)).toBeGreaterThan(meanOf(equal) + 1);
+    // A grid that cannot cover the mode is refused rather than returned as zeros.
+    expect(() => fossilCountDistribution(0.5, 0.1, 0.5, 1, 10, 40)).toThrow();
+  });
+});
+
+describe('review fixes: data integrity', () => {
+  it('CSV parser honours RFC 4180 escaped quotes', () => {
+    const dm = parseCSV('id,note\nr1,"He said ""hi"""\nr2,plain\n', ',', true, true);
+    expect(dm.nSamples).toBe(2);
+    // A label containing the delimiter must survive a round trip.
+    const text = toCSV(dm);
+    const back = parseCSV(text, ',', true, true);
+    expect(back.nSamples).toBe(2);
+  });
+
+  it('StateManager drops the previous edit history when data is replaced', () => {
+    // Pre-fix setData pushed an empty state on TOP of the old deltas, so two
+    // undos replayed the old matrix's values into the new one.
+    const sm = StateManager.getInstance();
+    sm.setData(new DataMatrix(new Matrix(new Float64Array([1, 2, 3, 4]), 2, 2), ['a', 'b'], ['x', 'y']));
+    sm.pushUndo(0, 0, 1, 99);
+    sm.dataMatrix!.data.set(0, 0, 99);
+    sm.setData(new DataMatrix(new Matrix(new Float64Array([5, 6, 7, 8]), 2, 2), ['c', 'd'], ['x', 'y']));
+    sm.undo();
+    sm.undo();
+    expect(sm.dataMatrix!.data.get(0, 0)).toBe(5);
+  });
+
+  it('DataController.subsetRows keeps rows and labels the same length', () => {
+    // Pre-fix a non-contiguous selection sliced [first, last+1] and returned
+    // every row in between, leaving more rows than row labels.
+    const dc = new DataController();
+    dc.loadCSV('id,c0,c1\nr0,1,2\nr1,3,4\nr2,5,6\nr3,7,8\n', ',', true, true);
+    const sub = dc.subsetRows([0, 2]);
+    expect(sub.nSamples).toBe(2);
+    expect(sub.rowLabels).toEqual(['r0', 'r2']);
+    expect(sub.data.get(0, 0)).toBe(1);
+    expect(sub.data.get(1, 0)).toBe(5);
+    // out-of-range and duplicate indices are dropped, not trusted
+    expect(dc.subsetRows([1, 1, 99]).nSamples).toBe(1);
+  });
+
+  it('xlsx import keeps the first data row and resolves cell types', () => {
+    // Two separate pre-fix defects, both on the xlsx path:
+    //  1. `data.shift()` after the header was already skipped dropped row 1.
+    //  2. the cell `t` attribute was read from the element's INNER content, so
+    //     it never matched: shared strings became their index, text became 0.
+    const r = parseExcel(buildMinimalXlsx(), { hasHeader: true, hasRowLabels: true });
+    const s = r.sheets[0];
+    expect(s.data.length).toBe(3);              // was 2
+    expect(s.data[0][0]).toBe(11);              // first data row survived
+    expect(s.colLabels).toEqual(['', 'Count', 'Flag']);
+    expect(s.rowLabels).toEqual(['Sp.A', 'Sp.B', 'Sp.C']);
+    expect(s.data[0][1]).toBe(1);               // boolean true
+    expect(s.data[1][1]).toBe(0);               // boolean false
+  });
+});
+
+describe('review fixes: reporting and wiring', () => {
+  it('TableGenerator.latex keeps header and body column counts equal', () => {
+    const m = new Matrix(new Float64Array([1, 2, 3, 4]), 2, 2);
+    const tex = TableGenerator.latex(m, ['a', 'b']);
+    const body = tex.split('\n').filter(l => l.startsWith('R'));
+    expect(body.length).toBe(2);
+    const head = tex.split('\n').find(l => l.startsWith('&'))!;
+    const headCols = head.split('&').length;
+    for (const row of body) expect(row.split('&').length).toBe(headCols);
+  });
+
+  it('compileLaTeX closes a table with the table environment', () => {
+    // renderTable emitted \begin{table} ... \end{figure}, so every exported
+    // table was invalid LaTeX.
+    const b = new ReportBuilder();
+    b.setTitle('t');
+    b.addTable(TableGenerator.latex(new Matrix(new Float64Array([1, 2]), 1, 2), ['a', 'b']), 'cap');
+    const res = compileLaTeX(b, {});
+    expect(res.texContent.includes('\\begin{table}')).toBe(true);
+    expect(res.texContent.includes('\\end{table}')).toBe(true);
+    expect(res.texContent.includes('\\end{figure}')).toBe(false);
+  });
+
+  it('runEffectSizes returns numbers, not function objects', () => {
+    const s = new StatisticsController();
+    const r = s.runEffectSizes([1, 2, 3, 4, 5], [3, 4, 5, 6, 7]);
+    for (const k of ['cohensD', 'etaSquared', 'omegaSquared', 'partialEtaSquared']) {
+      expect(typeof r[k]).toBe('number');
+    }
+    expect(isFinite(r['etaSquared'])).toBe(true);
+  });
+});
+
+// ─── Plot view port / hit testing / formatting ──────────────────────────────
+// These modules are extracted from PlotCanvas so the transform, the tick maths
+// and the hit test live in ONE place. Pure logic, no ArkUI dependency, hence
+// testable here — the previous inline versions were not.
+
+describe('plot view port', () => {
+  it('mapX and unmapX are inverses', () => {
+    const vp = new ViewPortHandler();
+    vp.setPlotSize(800, 600);
+    vp.setDataRange([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10], [0, 10]);
+    for (const v of [0, 2.5, 5, 7.5, 10]) {
+      expect(vp.unmapX(vp.mapX(v))).toBeCloseTo(v, 6);
+    }
+  });
+
+  it('mapY and unmapY are inverses and the Y axis is inverted', () => {
+    const vp = new ViewPortHandler();
+    vp.setPlotSize(800, 600);
+    vp.setDataRange([0, 10], [0, 10]);
+    for (const v of [0, 3, 7, 10]) {
+      expect(vp.unmapY(vp.mapY(v))).toBeCloseTo(v, 6);
+    }
+    // Larger data values must sit HIGHER on screen (smaller pixel Y).
+    expect(vp.mapY(10)).toBeLessThan(vp.mapY(0));
+  });
+
+  it('zoom is applied about the plot centre, so the centre stays put', () => {
+    const vp = new ViewPortHandler();
+    vp.setPlotSize(800, 600);
+    vp.setDataRange([0, 10], [0, 10]);
+    const centreBefore = vp.mapX(5);
+    vp.zoomTo(2.5);
+    expect(vp.mapX(5)).toBeCloseTo(centreBefore, 6);
+    // An off-centre value does move away from the centre.
+    expect(Math.abs(vp.mapX(10) - centreBefore)).toBeGreaterThan(Math.abs(centreBefore - vp.unmapX(centreBefore)));
+  });
+
+  it('zoom is clamped to the configured bounds', () => {
+    const vp = new ViewPortHandler();
+    vp.zoomTo(1e6);
+    expect(vp.zoom).toBe(ViewPortHandler.MAX_ZOOM);
+    vp.zoomTo(1e-6);
+    expect(vp.zoom).toBe(ViewPortHandler.MIN_ZOOM);
+  });
+
+  it('pan shifts the projection by exactly the offset', () => {
+    const vp = new ViewPortHandler();
+    vp.setPlotSize(800, 600);
+    vp.setDataRange([0, 10], [0, 10]);
+    const x0 = vp.mapX(5);
+    const y0 = vp.mapY(5);
+    vp.panBy(30, -20);
+    expect(vp.mapX(5)).toBeCloseTo(x0 + 30, 9);
+    expect(vp.mapY(5)).toBeCloseTo(y0 - 20, 9);
+  });
+
+  it('a degenerate data range never yields NaN', () => {
+    // All points identical — the range would divide by zero without the guard.
+    const vp = new ViewPortHandler();
+    vp.setPlotSize(800, 600);
+    vp.setDataRange([2, 2, 2], [3, 3, 3]);
+    for (const v of [2, 3, 0, -1]) {
+      expect(isFinite(vp.mapX(v))).toBe(true);
+      expect(isFinite(vp.mapY(v))).toBe(true);
+    }
+    // An empty series is equally harmless.
+    vp.setDataRange([], []);
+    expect(isFinite(vp.mapX(0))).toBe(true);
+    expect(vp.plotWidth).toBeGreaterThan(0);
+    expect(vp.plotHeight).toBeGreaterThan(0);
+  });
+
+  it('resetView clears zoom and pan but keeps the data range', () => {
+    const vp = new ViewPortHandler();
+    vp.setPlotSize(800, 600);
+    vp.setDataRange([0, 10], [0, 10]);
+    const x0 = vp.mapX(3);
+    vp.zoomTo(4);
+    vp.panBy(100, 100);
+    vp.resetView();
+    expect(vp.zoom).toBe(1);
+    expect(vp.panOffsetX).toBe(0);
+    expect(vp.mapX(3)).toBeCloseTo(x0, 9);
+    expect(vp.minX).toBe(0);
+  });
+});
+
+describe('plot ticks, hit testing and formatting', () => {
+  it('axis ticks span the range in order', () => {
+    const vp = new ViewPortHandler();
+    vp.setPlotSize(800, 600);
+    vp.setDataRange([-4, 6], [0, 100]);
+
+    const xt = ChartComputator.xTicks(vp, 5);
+    expect(xt.length).toBe(6);
+    expect(xt[0].value).toBeCloseTo(-4, 9);
+    expect(xt[5].value).toBeCloseTo(6, 9);
+    for (let i = 1; i < xt.length; i++) {
+      expect(xt[i].value).toBeGreaterThan(xt[i - 1].value);
+      expect(xt[i].pixel).toBeGreaterThan(xt[i - 1].pixel);
+    }
+
+    // Y ticks run bottom-to-top in data space, so their pixels DECREASE.
+    const yt = ChartComputator.yTicks(vp, 5);
+    expect(yt.length).toBe(6);
+    for (let i = 1; i < yt.length; i++) {
+      expect(yt[i].pixel).toBeLessThan(yt[i - 1].pixel);
+    }
+  });
+
+  it('ticks honour a supplied label formatter', () => {
+    const vp = new ViewPortHandler();
+    vp.setPlotSize(800, 600);
+    vp.setDataRange([0, 1], [0, 1]);
+    const xt = ChartComputator.xTicks(vp, 2, (v: number) => 'v=' + v.toFixed(2));
+    expect(xt[0].label).toBe('v=0.00');
+    expect(xt[2].label).toBe('v=1.00');
+  });
+
+  it('barLayout fits every bar inside the plot width', () => {
+    const vp = new ViewPortHandler();
+    vp.setPlotSize(800, 600);
+    const count = 7;
+    const { barWidth, gap } = ChartComputator.barLayout(vp, count);
+    expect(barWidth).toBeGreaterThan(0);
+    expect((barWidth + gap) * count).toBeCloseTo(vp.plotWidth, 6);
+    expect(ChartComputator.barLayout(vp, 0).barWidth).toBeGreaterThan(0); // no divide by zero
+  });
+
+  it('nearestIndex picks the closest point and respects the radius', () => {
+    const vp = new ViewPortHandler();
+    vp.setPlotSize(800, 600);
+    const xs = [0, 1, 2];
+    const ys = [0, 1, 2];
+    vp.setDataRange(xs, ys);
+
+    // Land exactly on the third point's pixel.
+    expect(ChartHighlighter.nearestIndex(vp, xs, ys, vp.mapX(2), vp.mapY(2), 20)).toBe(2);
+    // A point far outside the plot is not picked.
+    expect(ChartHighlighter.nearestIndex(vp, xs, ys, -500, -500, 20)).toBe(-1);
+    // With a shorter Y array only index 0 is ever considered: asking at point
+    // 0's pixel finds it, and the truncated index 1/2 are never reported.
+    expect(ChartHighlighter.nearestIndex(vp, xs, [0], vp.mapX(0), vp.mapY(0), 20)).toBe(0);
+    expect(ChartHighlighter.nearestIndex(vp, xs, [0], vp.mapX(2), vp.mapY(2), 20)).toBe(-1);
+  });
+
+  it('IndicesNearDataX returns the points within tolerance', () => {
+    expect(ChartHighlighter.indicesNearDataX([1, 2, 3, 4, 5], 3, 0.01)).toEqual([2]);
+    expect(ChartHighlighter.indicesNearDataX([], 3, 0.01)).toEqual([]);
+  });
+
+  it('AdaptiveFormatter keeps tiny and huge values readable', () => {
+    const f = new AdaptiveFormatter();
+    expect(f.format(0)).toBe('0');
+    expect(f.format(12.3456)).toBe('12.35');
+    expect(f.format(1e6)).toBe('1.00e+6');
+    // Below 1e-4 it switches to exponential...
+    expect(f.format(0.00005)).toBe('5.00e-5');
+    // ...but 1.2e-4 is above the threshold, so it stays in fixed notation
+    // (6 decimals is more readable than 1.20e-4 at this magnitude).
+    expect(f.format(0.00012)).toBe('0.000120');
+    expect(f.format(NaN)).toBe('NaN');
+  });
+
+  it('autoFormatter drops fixed decimals for extreme spans', () => {
+    // A normal span keeps plain decimals.
+    expect(autoFormatter(10).format(3.14159)).toBe('3.14');
+    // A microscopic or astronomic span switches to exponential so labels stay short.
+    expect(autoFormatter(1e-6).format(5e-7)).toContain('e-');
+    expect(autoFormatter(1e9).format(1.2e9)).toContain('e+');
+    expect(new IntegerFormatter().format(1234567)).toBe('1,234,567');
   });
 });

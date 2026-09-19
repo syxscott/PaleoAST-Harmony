@@ -1,3 +1,5 @@
+import { seed as seedRng, rand, randint } from '../../math/random';
+
 /**
  * Phylogenetic analysis — replaces phylogenetics/*.py
  */
@@ -589,7 +591,15 @@ export function pic(
       const w1 = 1 / Math.max(v1, 1e-10), w2 = 1 / Math.max(v2, 1e-10);
       const recon = (w1 * c1.value! + w2 * c2.value!) / (w1 + w2);
       if (node.name) nodeValues[node.name] = recon;
-      return { value: recon, cumVar: v1 + v2 };
+      // cumVar semantics: variance of this node's RECONSTRUCTED value around
+      // its true value, so a parent can add its own branch length to get the
+      // child's variance around the parent (a tip therefore has cumVar = 0).
+      // The reconstruction is an inverse-variance weighted mean, so its
+      // variance is the harmonic form 1/(1/v1 + 1/v2) = v1·v2/(v1+v2) —
+      // NOT v1+v2, which is the variance of the CONTRAST and inflates the
+      // standard error of every higher-level contrast (by up to √2 per level).
+      const nodeVar = (v1 * v2) / Math.max(v1 + v2, 1e-10);
+      return { value: recon, cumVar: nodeVar };
     } else {
       // Polytomy: produce (k-1) independent contrasts via GLS
       // V = diag(v_1, ..., v_k) since independent tips under Brownian motion
@@ -601,16 +611,16 @@ export function pic(
       // For k-way node, produce (k-1) orthogonal contrasts
       // Helmert matrix: each contrast is difference between one child and mean of remaining
       for (let ci = 0; ci < k - 1; ci++) {
-        // Contrast: child_ci vs mean of children ci+1..k-1
+        // Contrast: child_ci vs inverse-variance weighted mean of children ci+1..k-1
         const w_ci = 1 / Math.max(vars[ci], 1e-10);
         let w_others = 0, val_others = 0;
         for (let cj = ci + 1; cj < k; cj++) {
           w_others += 1 / Math.max(vars[cj], 1e-10);
           val_others += childResults[cj].value! / Math.max(vars[cj], 1e-10);
         }
-        const w_sum = w_ci + w_others;
-        const mean_others = val_others / w_others; // unweighted mean for contrast denominator
-        // Variance of Helmert contrast = v_ci + v_others (simplified)
+        const mean_others = val_others / w_others; // inverse-variance weighted mean
+        // Variance of the Helmert contrast = v_ci + v_others, where v_others is
+        // the variance of the weighted mean of the remaining children.
         const v_others = 1 / Math.max(w_others, 1e-10);
         const v_contrast = vars[ci] + v_others;
         const contrast = (childResults[ci].value! - mean_others) / Math.sqrt(v_contrast);
@@ -628,9 +638,9 @@ export function pic(
       }
       const recon = wValSum / wSum;
       if (node.name) nodeValues[node.name] = recon;
-      // cumVar at node = sum of variances (for rootward propagation)
-      const totalVar = vars.reduce((a, b) => a + b, 0);
-      return { value: recon, cumVar: totalVar };
+      // cumVar at node: variance of the inverse-variance weighted mean, i.e.
+      // the harmonic combination 1/Σ(1/v_i) — NOT Σv_i (see the binary branch).
+      return { value: recon, cumVar: 1 / Math.max(wSum, 1e-10) };
     }
   }
 
@@ -698,7 +708,23 @@ export interface SearchResult {
   nRearrangements: number;
 }
 
-export function heuristicSearch(sequences: Record<string, string>, nReplicates: number = 10, maxRearrangements: number = 1000): SearchResult {
+/**
+ * Heuristic parsimony tree search (NNI + SPR) from random starting trees.
+ *
+ * @param rngSeed seed for the search's PRNG. The starting trees and every
+ *   rearrangement are drawn from the repo's seeded generator, so a run is
+ *   reproducible across sessions; it used to call Math.random() directly, which
+ *   made the reported best tree impossible to reproduce (and therefore to
+ *   publish). Default 42 matches the convention used elsewhere in this repo
+ *   (e.g. coverageRarefaction).
+ */
+export function heuristicSearch(
+  sequences: Record<string, string>,
+  nReplicates: number = 10,
+  maxRearrangements: number = 1000,
+  rngSeed: number = 42,
+): SearchResult {
+  seedRng(rngSeed);
   const taxa = Object.keys(sequences);
 
   let bestTree: PhyloNode | null = null;
@@ -799,7 +825,7 @@ function trySPR(tree: PhyloNode, sequences: Record<string, string>): { newTree: 
   if (internals.length === 0) return { newTree: tree, newScore: Infinity };
 
   // Pick a random internal node to prune
-  const pruneNode = internals[Math.floor(Math.random() * internals.length)];
+  const pruneNode = internals[randint(0, internals.length - 1)];
   if (pruneNode.parent === null) return { newTree: tree, newScore: Infinity };
 
   const parent = pruneNode.parent;
@@ -816,7 +842,7 @@ function trySPR(tree: PhyloNode, sequences: Record<string, string>): { newTree: 
   }
 
   // Pick random regraft location
-  const regraftNode = allNodes[Math.floor(Math.random() * allNodes.length)];
+  const regraftNode = allNodes[randint(0, allNodes.length - 1)];
 
   // For binary nodes, regraft as a new child; for polytomies, add to children
   pruneNode.branchLength = (regraftNode.branchLength || 0) * 0.5;
@@ -845,13 +871,13 @@ function buildRandomTree(taxa: string[]): PhyloNode {
   // Build a random binary tree via sequential insertion
   const nodes = taxa.map(t => new PhyloNode(t, 0, true));
   while (nodes.length > 1) {
-    const i = Math.floor(Math.random() * nodes.length);
+    const i = randint(0, nodes.length - 1);
     const node1 = nodes.splice(i, 1)[0];
-    const j = Math.floor(Math.random() * nodes.length);
+    const j = randint(0, nodes.length - 1);
     const node2 = nodes.splice(j, 1)[0];
-    const parent = new PhyloNode('', Math.random() * 0.5 + 0.1, false);
-    node1.branchLength = Math.random() * 0.5 + 0.1;
-    node2.branchLength = Math.random() * 0.5 + 0.1;
+    const parent = new PhyloNode('', rand() * 0.5 + 0.1, false);
+    node1.branchLength = rand() * 0.5 + 0.1;
+    node2.branchLength = rand() * 0.5 + 0.1;
     parent.addChild(node1);
     parent.addChild(node2);
     nodes.push(parent);

@@ -117,21 +117,45 @@ export class DataController {
 
   // ─── Subset Operations ─────────────────────────────────────────
 
+  /**
+   * Select a set of rows, in the order requested.
+   *
+   * The previous version sliced the CONTIGUOUS range [first, last+1], so a
+   * request for e.g. [0, 2, 4] returned all five rows while rowLabels held only
+   * three entries — a DataMatrix whose rows and labels disagree (and a crash
+   * downstream). Indices are now validated, de-duplicated and copied one by one.
+   */
   subsetRows(indices: number[]): DataMatrix {
     const dm = this.getDM();
-    const newData = dm.data.sliceRows(indices[0], indices[indices.length - 1] + 1);
-    const newRL = indices.map(i => dm.rowLabels[i]);
-    return new DataMatrix(newData, newRL, [...dm.colLabels]);
+    const valid = this.sanitize(dm.data.rows, indices);
+    const d = new Float64Array(valid.length * dm.data.cols);
+    for (let r = 0; r < valid.length; r++)
+      for (let c = 0; c < dm.data.cols; c++)
+        d[r * dm.data.cols + c] = dm.data.get(valid[r], c);
+    const newRL = valid.map(i => dm.rowLabels[i]);
+    return new DataMatrix(new Matrix(d, valid.length, dm.data.cols), newRL, [...dm.colLabels]);
   }
 
   subsetColumns(indices: number[]): DataMatrix {
     const dm = this.getDM();
-    const d = new Float64Array(dm.data.rows * indices.length);
+    const valid = this.sanitize(dm.data.cols, indices);
+    const d = new Float64Array(dm.data.rows * valid.length);
     for (let i = 0; i < dm.data.rows; i++)
-      for (let j = 0; j < indices.length; j++)
-        d[i * indices.length + j] = dm.data.get(i, indices[j]);
-    const newCL = indices.map(j => dm.colLabels[j]);
-    return new DataMatrix(new Matrix(d, dm.data.rows, indices.length), [...dm.rowLabels], newCL);
+      for (let j = 0; j < valid.length; j++)
+        d[i * valid.length + j] = dm.data.get(i, valid[j]);
+    const newCL = valid.map(j => dm.colLabels[j]);
+    return new DataMatrix(new Matrix(d, dm.data.rows, valid.length), [...dm.rowLabels], newCL);
+  }
+
+  /** Keep in-range integer indices, de-duplicated, original order preserved. */
+  private sanitize(dim: number, indices: number[]): number[] {
+    const out: number[] = [];
+    for (const i of indices) {
+      if (!Number.isInteger(i) || i < 0 || i >= dim) continue;
+      if (out.includes(i)) continue;
+      out.push(i);
+    }
+    return out;
   }
 
   // ─── Apply Transform to State ──────────────────────────────────

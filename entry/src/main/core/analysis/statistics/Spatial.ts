@@ -1,3 +1,4 @@
+import { seed as seedRng, rand } from '../../math/random';
 /**
  * Ripley's K Spatial Point Pattern Analysis — replaces statistics/spatial.py.
  *
@@ -57,6 +58,10 @@ export type BoundaryCorrection = 'none' | 'loeffler' | 'translation';
  * @param nRValues            number of r values to evaluate (default 50)
  * @param nSimulations        Monte Carlo simulations (default 99)
  * @param boundaryCorrection  'none' | 'loeffler' | 'translation' (default 'none')
+ * @param rngSeed             seed for the Monte Carlo envelope. The simulations
+ *   previously drew from Math.random(), so the confidence envelope changed on
+ *   every run; the seeded generator makes the result reproducible. Default 42
+ *   matches the convention used elsewhere in this repo.
  */
 export function ripleyK(
   coords: number[][] | Matrix,
@@ -64,7 +69,9 @@ export function ripleyK(
   nRValues: number = 50,
   nSimulations: number = 99,
   boundaryCorrection: BoundaryCorrection = 'none',
+  rngSeed: number = 42,
 ): SpatialResult {
+  seedRng(rngSeed);
   let pts: number[][];
   if (coords instanceof Matrix) {
     if (coords.cols !== 2) throw new ComputationError('Coords must have 2 columns');
@@ -98,7 +105,7 @@ export function ripleyK(
   for (let s = 0; s < nSimulations; s++) {
     const random = new Array(n);
     for (let i = 0; i < n; i++) {
-      random[i] = [xMin + Math.random() * (xMax - xMin), yMin + Math.random() * (yMax - yMin)];
+      random[i] = [xMin + rand() * (xMax - xMin), yMin + rand() * (yMax - yMin)];
     }
     const kRand = _computeK(random, rValues, area, xMin, xMax, yMin, yMax, boundaryCorrection);
     const lRand = kRand.map((k, i) => Math.sqrt(Math.max(k, 0) / Math.PI) - rValues[i]);

@@ -1,9 +1,13 @@
 /**
- * Theme manager ¡ª replaces app_infrastructure/theme/manager.py
+ * Theme manager ï¿½ï¿½ replaces app_infrastructure/theme/manager.py
  * Manages dark/light theme switching and propagation.
  */
 
-import { ThemePalette, LIGHT_THEME, DARK_THEME } from '../config/DesignSystem';
+import { LIGHT_THEME, DARK_THEME } from '../config/DesignSystem';
+// ThemePalette is a pure type alias. Importing it as a VALUE binding makes the
+// module graph fail to instantiate outside the hvigor/TS pipeline
+// ("does not provide an export named 'ThemePalette'").
+import type { ThemePalette } from '../config/DesignSystem';
 
 export class ThemeManager {
   private static _instance: ThemeManager | null = null;

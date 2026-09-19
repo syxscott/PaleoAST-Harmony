@@ -1,0 +1,23 @@
+# ============================================================
+# PaleoAST-Harmony local development config — TEMPLATE
+# ============================================================
+# Usage:
+#   1. Copy this file to `local.properties` (which is gitignored)
+#   2. Fill in your paths and credentials
+#   3. Never commit the filled-in file
+# ============================================================
+
+# --- HarmonyOS signing -------------------------------------
+# These map onto the sensitive fields of `signingConfigs` in
+# build-profile.json5. Keep the .p12 / .p7b / .cer files OUTSIDE the repo.
+
+signing.storeFile=/path/to/your/PaleoAST.p12
+signing.storePassword=your-store-password-here
+signing.keyAlias=your-key-alias
+signing.keyPassword=your-key-password-here
+signing.signAlg=SHA256withECDSA
+signing.profile=/path/to/your/release.p7b
+signing.certpath=/path/to/your/release.cer
+
+# --- DevEco Studio SDK (only if not in the default location) ---
+# sdk.dir=E:/Program Files/HUAWEI/DevEco Studio/sdk

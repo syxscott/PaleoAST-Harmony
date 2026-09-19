@@ -1,11 +1,16 @@
 import { Matrix } from '../math/Matrix';
 import { DataMatrix, StateManager } from '../models/index';
 import {
-  computeDistanceMatrix, Metric, pca, pcoa, nmds, lda, cca, anosim, permanova, simper,
+  computeDistanceMatrix, pca, pcoa, nmds, lda, cca, anosim, permanova, simper,
   hierarchicalClustering, univariateSummary, tTest, anova, kruskalWallis, phylogeneticSignal,
   mannWhitneyU, convexHullVolume, morphospaceDisparity, plsAnalysis, minimumSpanningTree,
   reconstructAncestralStates, ripleyK, normalityTest, phyloANOVA
 } from '../analysis/statistics/index';
+// `Metric` is a pure type alias. Importing it as a value binding makes the
+// module graph fail to instantiate outside the hvigor/TS pipeline
+// ("does not provide an export named 'Metric'"), which blocked the Node test
+// harness from importing this controller at all.
+import type { Metric } from '../analysis/statistics/index';
 import {
   computeDiversity, computeRarefaction, betaDiversityDecomposition, nullModel, sheAnalysis,
   paleoEnvironment, fitAbundanceModels, fitLogSeries, lbKeogh, sampleBasedRarefaction,
@@ -448,13 +453,34 @@ export class StatisticsController {
     return tTest(before, after, true);
   }
 
+  /**
+   * Effect sizes for a two-group comparison.
+   *
+   * The previous implementation returned the FUNCTIONS `etaSquared`,
+   * `omegaSquared` and `partialEtaSquared` rather than calling them, so callers
+   * received function objects where they expected numbers. An F test on the two
+   * groups gives the df pair these estimators need (and is equivalent to the
+   * two-sample t test).
+   */
   runEffectSizes(group1: number[], group2: number[]) {
-    return {
-      cohensD: cohensD(group1, group2),
-      etaSquared,
-      omegaSquared,
-      partialEtaSquared,
-    };
+    const a = group1.filter(v => isFinite(v));
+    const b = group2.filter(v => isFinite(v));
+    const result: Record<string, number> = { cohensD: cohensD(a, b) };
+    const n1 = a.length, n2 = b.length;
+    if (n1 < 2 || n2 < 2) return result;
+
+    const r = anova([a, b], false);
+    const f = r.fStatistic;
+    const dfBetween = r.dfBetween;
+    const dfWithin = r.dfWithin;
+    if (!isFinite(f) || dfBetween <= 0 || dfWithin <= 0) return result;
+
+    result['etaSquared'] = etaSquared(f, dfBetween, dfWithin);
+    result['partialEtaSquared'] = partialEtaSquared(f, dfBetween, dfWithin);
+    if (n1 + n2 > dfBetween) {
+      result['omegaSquared'] = omegaSquared(f, dfBetween, dfWithin, n1 + n2);
+    }
+    return result;
   }
 
   runAICc(logLik: number, nParams: number, nObs: number) {

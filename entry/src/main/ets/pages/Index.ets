@@ -1,6 +1,7 @@
 import { DataController } from '../../core/controllers/DataController';
 import { StatisticsController } from '../../core/controllers/StatisticsController';
 import { StateManager } from '../../core/models/index';
+import { Matrix } from '../../core/math/Matrix';
 import { parseCSV } from '../../core/parsers/CSVParser';
 import { PhyloNode } from '../../core/analysis/phylogenetics/index';
 import { EventBus } from '../../core/utils/EventBus';
@@ -17,19 +18,48 @@ import { LoadingView } from '../components/LoadingView';
 import { ConsoleView } from '../components/ConsoleView';
 import { StatusBar } from '../components/StatusBar';
 import { DialogLayer } from '../components/DialogLayer';
+import Logger from '../utils/Logger';
+import { PreferenceManager } from '../utils/PreferenceManager';
+import { AppSettings } from '../utils/AppSettings';
+import { HistoryRepository } from '../database/HistoryRepository';
 import fs from '@ohos.file.fs';
 
 // ─── 主页面 ──────────────────────────────────────────────────────
 
+/** A single analysis chart, stored per widget tab. */
+interface WidgetPlot {
+  x: number[];
+  y: number[];
+  title: string;
+  type: string;
+}
+
+/**
+ * Ribbon tab → the navigation sections it exposes.
+ * Index 0 (Home) is unrestricted; this is what makes the Ribbon an actual
+ * filter rather than a highlight-only control.
+ */
+const RIBBON_TAB_SECTIONS: string[][] = [
+  [],
+  ['Multivariate', 'Univariate', 'Diversity', 'Clustering', 'Tests'],
+  ['Morphometrics'],
+  ['Stratigraphy'],
+  ['Macroevolution', 'Phylogenetics'],
+];
+
 @Entry
 @Component
 struct Index {
-  @State currentTab: number = 0;
+  @State @Watch('onTabChanged') currentTab: number = 0;
+  // Sections the navigation tree should show for the active Ribbon tab.
+  @State navSections: string[] = [];
   @State hasData: boolean = false;
   @State statusText: string = 'PaleoAST-Harmony - Ready';
   @State dataInfo: string = 'No data loaded';
   @State workspaceWidgets: string[] = [];
-  @State currentWidget: number = 0;
+  // @Watch：切换标签页时把该标签自己的图表快照重新灌入 plot* 状态。
+  // 没有它时所有绘图标签共用最后一组序列，标签与图像永久错配。
+  @State @Watch('onWidgetChanged') currentWidget: number = 0;
   @State showConsole: boolean = false;
   @State canUndo: boolean = false;
   @State canRedo: boolean = false;
@@ -54,9 +84,56 @@ struct Index {
   private dataCtrl = new DataController();
   private statCtrl = new StatisticsController();
 
+  /**
+   * Per-tab chart snapshots, keyed by widget NAME.
+   *
+   * Keyed by name rather than index because addWidget() shifts the array once
+   * it exceeds 8 widgets, which would silently re-point index keys at the
+   * wrong analysis.
+   */
+  private widgetPlots: Map<string, WidgetPlot> = new Map();
+
+  /** Re-hydrate the plot state from the newly selected tab's snapshot. */
+  private onWidgetChanged(): void {
+    const name = this.workspaceWidgets[this.currentWidget] ?? '';
+    const snap = this.widgetPlots.get(name);
+    if (snap) {
+      this.plotDataX = snap.x;
+      this.plotDataY = snap.y;
+      this.plotTitle = snap.title;
+      this.plotType = snap.type;
+    } else {
+      // No chart for this tab — clear rather than leaving the previous tab's
+      // series in place.
+      this.plotDataX = [];
+      this.plotDataY = [];
+      this.plotTitle = name;
+      this.plotType = 'none';
+    }
+  }
+
+  /** Store the chart just computed under its widget name. */
+  private captureWidgetPlot(name: string): void {
+    const usable = this.plotDataX.length > 0 && this.plotDataX.length === this.plotDataY.length;
+    this.widgetPlots.set(name, {
+      x: usable ? [...this.plotDataX] : [],
+      y: usable ? [...this.plotDataY] : [],
+      title: this.plotTitle,
+      type: this.plotType,
+    });
+  }
+
   aboutToAppear(): void {
     // Ensure StateManager singleton is stored in AppStorage for reactivity
     AppStorage.setOrCreate('stateMgr', StateManager.getInstance());
+    // Seed the navigation filter for the initially selected Ribbon tab.
+    this.onTabChanged();
+    // Pull the persisted reproducible-script history back into memory so the
+    // export survives a restart. The store may still be opening; a failure just
+    // means this session starts with an empty history.
+    this.restoreHistory()
+      .then((n: number) => { if (n > 0) Logger.info('Restored ' + n + ' history records'); })
+      .catch((err: Error) => Logger.error('History restore failed: ' + err.message));
   }
 
   build() {
@@ -83,7 +160,7 @@ struct Index {
       // 展开态(md/lg/xl)：侧栏常驻，宽度随断点放大。
       SideBarContainer(SideBarContainerType.Embed) {
         // SideBar: 左侧导航
-        NavigationTree()
+        NavigationTree({ allowedSections: this.navSections })
           .onNavigate((name: string) => { this.handleAnalysis(name); })
 
         // Content: 右侧工作区
@@ -232,6 +309,13 @@ struct Index {
       this.statusText = 'Loaded: ' + this.dataInfo;
       this.workspaceWidgets = ['spreadsheet'];
       this.currentWidget = 0;
+      // New dataset → every cached chart describes the OLD data, so drop them
+      // together with the live series.
+      this.widgetPlots.clear();
+      this.plotDataX = [];
+      this.plotDataY = [];
+      this.plotTitle = '';
+      this.plotType = 'none';
       this.canUndo = false;
       this.canRedo = false;
       // 通知已挂载的 WorkspaceView/Spreadsheet 换用新 DataMatrix
@@ -269,6 +353,42 @@ struct Index {
   }
 
   // ─── 同步计算核心（原 taskpool 闭包体，避免跨线程序列化组件 this） ───
+
+  /** Ribbon tab changed → restrict which navigation sections are listed. */
+  private onTabChanged(): void {
+    this.navSections = RIBBON_TAB_SECTIONS[this.currentTab] ?? [];
+  }
+
+  /** Clamp a dialog-supplied sample row index to the loaded matrix. */
+  private sampleIndex(params: Record<string, Object>): number {
+    const nRows = this.stateMgr?.dataMatrix?.data.rows ?? 1;
+    const raw = params['sample_index'] as number;
+    const idx = Number.isFinite(raw) ? Math.floor(raw) : 0;
+    return Math.min(Math.max(idx, 0), Math.max(0, nRows - 1));
+  }
+
+  /**
+   * First plain numeric array exposed by a result object, used to give
+   * dialog-routed analyses a chart that belongs to them. Returns null when the
+   * result holds nothing plottable — in that case the caller leaves the series
+   * empty so PlotCanvas clears rather than showing the previous analysis.
+   */
+  private firstNumericSeries(result: Record<string, Object>): number[] | null {
+    const preferred: string[] = [
+      'values', 'series', 'expectedRichness', 'amplitudes', 'coefficients',
+      'heights', 'permutationScores', 'simulatedScores', 'eigenvalues',
+      'proportionExplained', 'survivorship', 'rates'
+    ];
+    for (const k of preferred) {
+      const v = result[k];
+      if (Array.isArray(v) && v.length > 0 && typeof v[0] === 'number') return v as number[];
+    }
+    for (const k of Object.keys(result)) {
+      const v = result[k];
+      if (Array.isArray(v) && v.length > 1 && typeof v[0] === 'number') return v as number[];
+    }
+    return null;
+  }
 
   private runDialogAnalysisCore(name: string, params: Record<string, Object>): any {
     switch (name) {
@@ -314,14 +434,39 @@ struct Index {
         );
       // Extended wiring: analyses opened from their dialogs
       case 'Summary':
-      case 'Univariate':
         return this.statCtrl.runSummary();
+      case 'Univariate': {
+        // Dispatch on the test the user actually picked. This case used to fall
+        // through to runSummary(), so selecting t-test / ANOVA / Kruskal-Wallis
+        // / Normality silently produced the descriptive summary instead.
+        const dm = this.stateMgr.dataMatrix;
+        const col = (i: number): number[] => {
+          const j = Math.min(Math.max(i, 0), Math.max(0, dm.data.cols - 1));
+          const c = dm.data.col(j);
+          return c.length > 0 ? c : [0];
+        };
+        switch ((params['test_type'] as string) ?? 'Summary') {
+          case 'Normality': return this.statCtrl.runNormalityTest(0);
+          case 't-test': return this.statCtrl.runTTest(col(0), col(1));
+          case 'ANOVA': return this.statCtrl.runANOVA([col(0), col(1)]);
+          case 'Kruskal-Wallis': return this.statCtrl.runKruskal([col(0), col(1)]);
+          default: return this.statCtrl.runSummary();
+        }
+      }
       case 'Diversity Indices':
-        return this.statCtrl.runDiversity(this.stateMgr.dataMatrix.data.row(params['sample_index'] as number ?? 0));
+        return this.statCtrl.runDiversity(
+          this.stateMgr.dataMatrix.data.row(this.sampleIndex(params)));
       case 'Rarefaction':
-        return this.statCtrl.runRarefaction(this.stateMgr.dataMatrix.data.row(params['sample_index'] as number ?? 0));
+        // The dialog collects max_n / n_points and a sample row; all three used
+        // to be discarded (the row index it read was never supplied).
+        return this.statCtrl.runRarefaction(
+          this.stateMgr.dataMatrix.data.row(this.sampleIndex(params)),
+          params['max_n'] as number ?? 100,
+          params['n_points'] as number ?? 50);
       case 'SIMPER':
-        return this.statCtrl.runSIMPER(this.stateMgr.dataMatrix.getGroups() ?? []);
+        return this.statCtrl.runSIMPER(
+          this.stateMgr.dataMatrix.getGroups() ?? [],
+          params['metric'] as string ?? 'bray_curtis');
       case 'LDA':
         return this.statCtrl.runLDA(this.stateMgr.dataMatrix.getGroups() ?? []);
       case 'ANOSIM':
@@ -332,8 +477,23 @@ struct Index {
         );
       case 'PERMANOVA':
         return this.statCtrl.runPERMANOVA(this.stateMgr.dataMatrix.getGroups() ?? []);
-      case 'CCA':
-        return this.statCtrl.runCCA(this.stateMgr.dataMatrix.data, this.stateMgr.dataMatrix.data);
+      case 'CCA': {
+        // Y = response (species) block, X = constraining (environment) block.
+        // Passing the SAME matrix as both (the old behaviour) makes the fitted
+        // model degenerate — the constraints are the data. The dialog says how
+        // many trailing columns form the constraining block; default 1.
+        const d = this.stateMgr.dataMatrix.data;
+        const nEnv = Math.min(
+          Math.max((params['n_env_columns'] as number) ?? 1, 1),
+          Math.max(1, d.cols - 1));
+        const nResp = d.cols - nEnv;
+        const Y: Matrix = nResp >= 1 ? d.sliceCols(0, nResp) : d;
+        const X: Matrix = nResp >= 1 ? d.sliceCols(nResp, d.cols) : d;
+        return this.statCtrl.runCCA(
+          Y, X,
+          params['n_components'] as number ?? 3,
+          params['method'] as string ?? 'cca');
+      }
       case 'GPA':
         return this.statCtrl.runGPA();
       case 'Allometry':
@@ -521,6 +681,81 @@ struct Index {
       at: new Date().toISOString(),
     });
     if (this.analysisHistory.length > 200) this.analysisHistory.shift();
+    this.persistAnalysis(name, params);
+  }
+
+  /**
+   * Mirror the run into the persistent history store.
+   *
+   * The in-memory list above is capped at 200 and dies with the process; the RDB
+   * record is what makes the reproducible-script export survive a restart.
+   * The insert is fire-and-forget: persistence must never block or fail an
+   * analysis, and HistoryRepository already de-duplicates repeats and trims
+   * each analysis to its newest 100 rows.
+   */
+  private persistAnalysis(name: string, params: Record<string, Object>): void {
+    if (!HistoryRepository.isReady()) return;
+    if (!PreferenceManager.fromAppStorage<boolean>(AppSettings.KEY_HISTORY_ENABLED, true)) return;
+
+    const dm = this.stateMgr?.dataMatrix;
+    let summary = name;
+    try {
+      summary = name + (dm ? ' on ' + dm.nSamples + 'x' + dm.nVariables : '');
+    } catch (e) {
+      /* summary is cosmetic */
+    }
+    HistoryRepository.insertRecord({
+      analysisName: name,
+      params: JSON.stringify(params ?? {}),
+      resultSummary: summary,
+      plotType: this.plotType,
+      dataShape: dm ? dm.nSamples + 'x' + dm.nVariables : '',
+      timestamp: Date.now(),
+    })
+      .then((rowId: number) => { Logger.debug('History row ' + rowId + ' for ' + name); })
+      .catch((err: Error) => { Logger.error('History persist failed: ' + err.message); });
+  }
+
+  /** Reload the in-memory history from the store (newest first). */
+  private async restoreHistory(): Promise<number> {
+    if (!HistoryRepository.isReady()) return 0;
+    try {
+      const records = await HistoryRepository.queryRecords('all', 200);
+      this.analysisHistory = records
+        .slice()
+        .reverse()               // store returns newest-first; script is oldest-first
+        .map((r) => {
+          let params: Record<string, Object> = {};
+          try {
+            params = JSON.parse(r.params) as Record<string, Object>;
+          } catch (e) {
+            /* keep {} for a record written by an older version */
+          }
+          return { analysis: r.analysisName, params, at: new Date(r.timestamp).toISOString() };
+        });
+      return records.length;
+    } catch (err) {
+      Logger.error('History restore failed: ' + (err as Error).message);
+      return 0;
+    }
+  }
+
+  /** Tap: report the stored history. Long-press: clear it. */
+  private async onHistoryAction(clear: boolean): Promise<void> {
+    if (!HistoryRepository.isReady()) {
+      this.statusText = 'History store not ready';
+      return;
+    }
+    if (clear) {
+      const removed = await HistoryRepository.clearHistory();
+      this.analysisHistory = [];
+      this.statusText = 'History cleared (' + removed + ' records)';
+      return;
+    }
+    const n = await this.restoreHistory();
+    this.statusText = n > 0
+      ? 'History: ' + n + ' records loaded (long-press [History] to clear)'
+      : 'History is empty';
   }
 
   /**
@@ -557,6 +792,15 @@ struct Index {
       // serialized across threads via taskpool (would crash at runtime).
       result = this.runDialogAnalysisCore(name, params);
 
+      // Reset the series FIRST. Every branch below must either supply a fresh
+      // one or leave the canvas empty; previously the previous analysis's
+      // series survived, so the new analysis's title was drawn over the old
+      // chart (e.g. PCA then NMDS showed one NMDS plot under two tab labels).
+      this.plotDataX = [];
+      this.plotDataY = [];
+      this.plotTitle = name;
+      this.plotType = 'none';
+
       switch (name) {
         case 'PCA':
           this.plotDataX = result.scores.col(0);
@@ -576,53 +820,94 @@ struct Index {
           this.plotTitle = 'NMDS Plot (stress=' + result.stress.toFixed(3) + ')';
           this.plotType = 'scatter';
           break;
-        case 'Clustering':
-          this.plotTitle = 'Clustering Dendrogram';
-          this.plotType = 'dendrogram';
-          break;
-        case 'CONISS':
-          this.plotTitle = 'CONISS Dendrogram';
-          this.plotType = 'dendrogram';
-          break;
-        case 'NullModel':
-          this.plotTitle = 'Null Model (SES=' + result.ses.toFixed(2) + ')';
-          this.plotType = 'histogram';
-          break;
-        case 'Extinction':
-          this.plotTitle = 'Extinction CI';
-          this.plotType = 'range';
-          break;
-        case 'EFA':
-          this.plotTitle = 'EFA Contours';
+        case 'Clustering': {
+          // A true dendrogram needs both merge endpoints per row, which the
+          // single X/Y channel cannot carry. Plot the real merge-height profile
+          // instead of claiming a dendrogram the canvas cannot draw.
+          const lm = result.linkageMatrix as number[][];
+          this.plotDataX = lm.map((_: number[], i: number) => i + 1);
+          this.plotDataY = lm.map((r: number[]) => r[2]);
+          this.plotTitle = 'Clustering merge profile (' + result.method + ', k=' + result.nClusters
+            + ', cophenetic r=' + result.copheneticCorr.toFixed(2) + ')';
           this.plotType = 'line';
           break;
+        }
+        case 'CONISS': {
+          const lm = result.linkageMatrix as number[][];
+          this.plotDataX = lm.map((_: number[], i: number) => i + 1);
+          this.plotDataY = lm.map((r: number[]) => r[2]);
+          this.plotTitle = 'CONISS merge profile (' + result.nZones + ' zones, ISS='
+            + result.issTotal.toFixed(3) + ')';
+          this.plotType = 'line';
+          break;
+        }
+        case 'NullModel': {
+          const sim = result.simulatedScores as number[];
+          this.plotDataX = sim.map((_: number, i: number) => i + 1);
+          this.plotDataY = sim;
+          this.plotTitle = 'Null model ' + result.metric + ' (observed='
+            + result.observedScore.toFixed(3) + ', SES=' + result.ses.toFixed(2)
+            + ', p=' + result.pValue.toFixed(3) + ')';
+          this.plotType = 'histogram';
+          break;
+        }
+        case 'Extinction': {
+          const lad = result.ladPositions as number[] | undefined;
+          if (lad && lad.length > 0) {
+            this.plotDataX = lad.map((_: number, i: number) => i + 1);
+            this.plotDataY = lad;
+            this.plotTitle = 'Extinction CI — last-appearance positions';
+            this.plotType = 'line';
+          } else {
+            this.plotTitle = 'Extinction CI';
+            this.plotType = 'none';
+          }
+          break;
+        }
+        case 'EFA': {
+          const rec = result.reconstructed as number[][] | undefined;
+          const pts = rec && rec.length > 0 ? rec : (result.original as number[][] | undefined);
+          if (pts && pts.length > 0) {
+            this.plotDataX = pts.map((p: number[]) => p[0]);
+            this.plotDataY = pts.map((p: number[]) => p[1]);
+            this.plotTitle = 'EFA ' + (rec === pts ? 'reconstructed' : 'resampled') + ' contour';
+            this.plotType = 'line';
+          }
+          break;
+        }
         default: {
           // Generic result handling for the extended dialog-routed analyses:
-          // show a first-two-column scatter/line when the result exposes
-          // coordinates, otherwise leave the title line for the status bar.
+          // take the first plottable series the result exposes so the chart
+          // belongs to THIS analysis. When nothing is plottable the series
+          // stays empty and PlotCanvas clears itself.
           if (result && typeof result === 'object') {
             const r = result as Record<string, Object>;
-            const coords = r['coordinates'] as number[][] | undefined;
             const scores = r['scores'] as number[][] | undefined;
-            if (scores && Array.isArray(scores)) {
-              this.plotDataX = scores.map((row: number[]) => row[0]);
-              this.plotDataY = scores.map((row: number[]) => row[1]);
-              this.plotTitle = name;
-              this.plotType = 'scatter';
-            } else if (coords && Array.isArray(coords)) {
-              this.plotDataX = coords.map((row: number[]) => row[0]);
-              this.plotDataY = coords.map((row: number[]) => row[1]);
-              this.plotTitle = name;
+            const coords = r['coordinates'] as number[][] | undefined;
+            const pairs = (scores && scores.length > 0) ? scores
+              : ((coords && coords.length > 0) ? coords : undefined);
+            if (pairs) {
+              this.plotDataX = pairs.map((row: number[]) => row[0]);
+              this.plotDataY = pairs.map((row: number[]) => row[1]);
               this.plotType = 'scatter';
             } else {
-              this.plotTitle = name + ' result';
-              this.plotType = 'line';
+              const series = this.firstNumericSeries(r);
+              if (series) {
+                this.plotDataX = series.map((_: number, i: number) => i + 1);
+                this.plotDataY = series;
+                this.plotType = 'line';
+              } else {
+                this.plotType = 'none';
+              }
             }
           }
           break;
         }
       }
 
+      // Freeze this analysis's chart under its own tab name before switching to
+      // it, so each tab keeps a faithful snapshot of what it actually computed.
+      this.captureWidgetPlot(name);
       this.statusText = name + ' completed';
       this.addWidget(name);
     } catch (e) {
@@ -758,6 +1043,8 @@ struct Index {
       case 'nmds': DialogManager.open('NMDS'); break;
       case 'diversity': this.handleAnalysis('Diversity Indices'); break;
       case 'export': DialogManager.open('Export'); break;
+      case 'history': void this.onHistoryAction(false); break;
+      case 'clearhistory': void this.onHistoryAction(true); break;
       case 'theme':
         this.darkMode = !this.darkMode;
         AppStorage.setOrCreate('darkMode', this.darkMode);
@@ -767,7 +1054,12 @@ struct Index {
 
   private addWidget(name: string): void {
     if (!this.workspaceWidgets.includes(name)) {
-      if (this.workspaceWidgets.length >= 8) this.workspaceWidgets.shift();
+      if (this.workspaceWidgets.length >= 8) {
+        const evicted = this.workspaceWidgets.shift();
+        // Drop the evicted tab's chart too, otherwise the map grows without
+        // bound and a re-run of the same name could resurrect a stale chart.
+        if (evicted) this.widgetPlots.delete(evicted);
+      }
       this.workspaceWidgets.push(name);
     }
     this.currentWidget = this.workspaceWidgets.indexOf(name);

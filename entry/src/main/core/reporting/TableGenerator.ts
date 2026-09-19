@@ -15,6 +15,11 @@ export interface TableStyle {
 export class TableGenerator {
   /**
    * Build a LaTeX table from a numeric Matrix and headers.
+   *
+   * The header row carries a leading empty cell for the row-label column, so
+   * every data row must carry one too (markdown()/html() both emit `R{i}`).
+   * Emitting bare data cells made the body one column short of the header and
+   * of the declared `colSpec`, which LaTeX renders as a misaligned table.
    */
   static latex(matrix: Matrix, headers: string[], style: TableStyle = {}): string {
     const digits = style.digits ?? 3;
@@ -27,7 +32,7 @@ export class TableGenerator {
         const v = matrix.get(i, j);
         cells.push(v.toFixed(digits));
       }
-      rows.push(cells.join(' & ') + ' \\\\');
+      rows.push(`R${i + 1} & ${cells.join(' & ')} \\\\`);
     }
     return [
       `\\begin{table}[htbp]\\centering`,
@@ -68,7 +73,26 @@ export class TableGenerator {
     return `<table>${thead}<tbody>${rows.join('')}</tbody></table>`;
   }
 
+  /**
+   * Escape a string for LaTeX text mode.
+   *
+   * Backslash, tilde and caret need explicit macros: a bare `\\` is a line
+   * break and `\~` / `\^` are accents, so blindly prefixing a backslash (the
+   * previous behaviour) produced wrong output for all three.
+   */
   private static _escape(s: string): string {
-    return s.replace(/[\\$&%#_{}~^]/g, c => `\\${c}`);
+    let out = '';
+    for (const ch of s) {
+      switch (ch) {
+        case '\\': out += '\\textbackslash{}'; break;
+        case '~': out += '\\textasciitilde{}'; break;
+        case '^': out += '\\textasciicircum{}'; break;
+        case '&': case '%': case '$': case '#': case '_': case '{': case '}':
+          out += '\\' + ch;
+          break;
+        default: out += ch;
+      }
+    }
+    return out;
   }
 }

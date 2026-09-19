@@ -1,4 +1,5 @@
-import { Plugin } from './Base';
+// Plugin is an interface, so this must be a type-only import.
+import type { Plugin } from './Base';
 
 /**
  * Plugin registry for managing analysis plugins.

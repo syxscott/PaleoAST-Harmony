@@ -23,10 +23,20 @@ export interface AuditReport {
   warningCount: number;
 }
 
-/** Strip string literals and comments so bracket counting sees only code. */
+/**
+ * Strip string literals, template literals, COMMENTS and REGEX literals so
+ * bracket counting sees only code.
+ *
+ * Regex literals matter: `/[{(]/` inside a character class would otherwise
+ * unbalance the counter and report a phantom error. The previous version
+ * ignored them, which made this auditor flag ~20 perfectly valid files
+ * (every `replace(/[\r\n]/g, ...)` in the parsers, for example) — a false
+ * positive rate that made the whole audit report useless.
+ */
 function stripLiterals(source: string): string {
   let out = '';
   let i = 0;
+  let prevSignificant = ''; // last non-space code char; a '/' in expression position starts a regex
   while (i < source.length) {
     const ch = source[i];
     if (ch === '"' || ch === "'" || ch === '`') {
@@ -34,21 +44,47 @@ function stripLiterals(source: string): string {
       i++;
       while (i < source.length && source[i] !== quote) {
         if (source[i] === '\\') i++;
+        if (source[i] === '\n') out += '\n';
         i++;
       }
       i++;
       out += ' ';
-    } else if (ch === '/' && source[i + 1] === '/') {
+      continue;
+    }
+    if (ch === '/' && source[i + 1] === '/') {
       while (i < source.length && source[i] !== '\n') i++;
-    } else if (ch === '/' && source[i + 1] === '*') {
+      continue;
+    }
+    if (ch === '/' && source[i + 1] === '*') {
       i += 2;
-      while (i < source.length && !(source[i] === '*' && source[i + 1] === '/')) i++;
+      while (i < source.length && !(source[i] === '*' && source[i + 1] === '/')) {
+        if (source[i] === '\n') out += '\n';
+        i++;
+      }
       i += 2;
       out += ' ';
-    } else {
-      out += ch;
-      i++;
+      continue;
     }
+    if (ch === '/' && '=(,:[!&|?{;'.includes(prevSignificant)) {
+      // Regex literal: skip to the unescaped closing '/' outside a character class.
+      i++;
+      let inClass = false;
+      while (i < source.length) {
+        const c = source[i];
+        if (c === '\\') { i += 2; continue; }
+        if (c === '[') inClass = true;
+        else if (c === ']') inClass = false;
+        else if (c === '/' && !inClass) { i++; break; }
+        else if (c === '\n') break;
+        i++;
+      }
+      while (i < source.length && /[a-z]/.test(source[i])) i++; // flags
+      out += ' ';
+      continue;
+    }
+    out += ch;
+    if (!/\s/.test(ch)) prevSignificant = ch;
+    i++;
   }
   return out;
 }

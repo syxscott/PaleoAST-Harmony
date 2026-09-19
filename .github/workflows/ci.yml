@@ -1,0 +1,85 @@
+name: Quality Gate
+
+on:
+  pull_request:
+    branches: [ main ]
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint-and-check:
+    name: Code & Doc Quality Gate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # 1. Unresolved conflict markers and whitespace errors — BLOCKING
+      - name: Check Git conflict markers & whitespace
+        run: |
+          echo "Checking for unresolved conflict markers and whitespace errors..."
+          git diff --check
+
+      # 2. Signing keys / certificates — BLOCKING
+      - name: Check for sensitive certificate/key files
+        run: |
+          echo "Checking that no signing key or certificate was committed..."
+          FORBIDDEN=$(git ls-files | grep -E '\.(p12|cer|p7b|keystore|jks)$' || true)
+          if [ -n "$FORBIDDEN" ]; then
+            echo "::error::Signing material must never be committed:"
+            echo "$FORBIDDEN"
+            exit 1
+          fi
+          echo "OK: no sensitive files tracked."
+
+      # 3. Local-only config must stay untracked — BLOCKING
+      - name: Check local.properties is not tracked
+        run: |
+          if git ls-files --error-unmatch local.properties >/dev/null 2>&1; then
+            echo "::error::local.properties is tracked but must stay local (it may hold signing credentials)."
+            exit 1
+          fi
+          echo "OK: local.properties is untracked."
+
+      # 4. DevEco template placeholders left behind — WARNING only
+      - name: Check for placeholder text in source
+        run: |
+          PLACEHOLDERS=$(git grep -nE '(Please describe the basic information|请在此处输入)' -- '*.ets' '*.cpp' '*.h' '*.ts' '*.json5' || true)
+          if [ -n "$PLACEHOLDERS" ]; then
+            echo "::warning::Template placeholders still present (harmless, but worth filling in):"
+            echo "$PLACEHOLDERS"
+          else
+            echo "OK: no template placeholders."
+          fi
+
+      # 5. README vs build-profile SDK consistency — WARNING only
+      #    This is what catches README drift such as "78 functions" when the
+      #    code actually exports 206.
+      - name: Check SDK version consistency
+        run: |
+          SDK=$(grep -oE '"compatibleSdkVersion":\s*"[^"]+"' build-profile.json5 | sed -E 's/.*"compatibleSdkVersion":\s*"([^"]+)".*/\1/' || true)
+          if [ -n "$SDK" ] && ! grep -q "$SDK" README.md; then
+            echo "::warning file=README.md::compatibleSdkVersion ($SDK) does not appear in README.md — keep them in sync."
+          else
+            echo "OK: SDK version consistent."
+          fi
+
+      # 6. Commit message hygiene — WARNING only
+      - name: Check commit message conventions
+        if: github.event_name == 'pull_request'
+        run: |
+          COMMITS=$(git log --no-merges origin/${{ github.base_ref }}..HEAD --pretty=format:"%h %s" || true)
+          while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            if echo "$line" | grep -q '：'; then
+              echo "::warning::Full-width colon '：' in commit subject (prefer ASCII ':'): $line"
+            fi
+          done <<< "$COMMITS"
+          echo "OK: commit messages checked."

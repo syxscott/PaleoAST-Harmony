@@ -2,17 +2,20 @@
  * CCA Configuration Dialog
  * Canonical Correspondence Analysis (or Redundancy Analysis).
  * (ArkTS structs cannot extend; BaseAnalysisDialog is only a structural template.)
+ *
+ * onConfirm payload:
+ *   n_components   number of constrained axes
+ *   method         'cca' | 'rda'
+ *   n_env_columns  how many TRAILING table columns form the constraining
+ *                  (environment) block; the leading columns are the response
+ *                  block. 1 by default.
  */
-
-interface CCAParams {
-  n_components: number;
-  method: string;
-}
 
 @Component
 export struct CCADialog {
   @Link @Watch('onVisibleChange') visible: boolean;
   @State n_components: number = 3;
+  @State n_env_columns: number = 1;
   @State methodIdx: number = 0;
   @State componentError: string = '';
   @State showTips: boolean = false;
@@ -23,6 +26,7 @@ export struct CCADialog {
   onVisibleChange() {
     if (this.visible) {
       this.n_components = 3;
+      this.n_env_columns = 1;
       this.methodIdx = 0;
       this.componentError = '';
       this.showTips = false;
@@ -32,6 +36,8 @@ export struct CCADialog {
   aboutToUpdate() {
     if (this.n_components < 1) {
       this.componentError = 'n_components must be >= 1';
+    } else if (this.n_env_columns < 1) {
+      this.componentError = 'env columns must be >= 1 (at least one constraining column)';
     } else {
       this.componentError = '';
     }
@@ -44,6 +50,14 @@ export struct CCADialog {
       TextInput({ text: String(this.n_components) }).width(100).type(InputType.Number)
         .onChange((v: string) => {
           this.n_components = parseInt(v) || 3;
+        })
+    }.width('100%').margin({ bottom: 8 })
+
+    Row() {
+      Text('Env columns (from end):').width(140).fontSize(13)
+      TextInput({ text: String(this.n_env_columns) }).width(100).type(InputType.Number)
+        .onChange((v: string) => {
+          this.n_env_columns = Math.max(1, parseInt(v) || 1);
         })
     }.width('100%').margin({ bottom: 8 })
 
@@ -85,7 +99,11 @@ export struct CCADialog {
         Button('Run Analysis').type(ButtonType.Capsule).backgroundColor('#3498DB').fontColor('#FFFFFF')
           .enabled(this.componentError === '')
           .onClick(() => {
-            this.onConfirm({ 'n_components': this.n_components, 'method': this.methodOpts[this.methodIdx] });
+            this.onConfirm({
+              'n_components': this.n_components,
+              'method': this.methodOpts[this.methodIdx],
+              'n_env_columns': this.n_env_columns
+            });
             this.visible = false;
           })
       }.width('100%').justifyContent(FlexAlign.End)

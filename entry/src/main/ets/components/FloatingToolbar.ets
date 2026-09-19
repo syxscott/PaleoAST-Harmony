@@ -22,6 +22,12 @@ export struct FloatingToolbar {
         Button('[Diversity]').fontSize(10).height(28).onClick(() => { this.onAction('diversity'); })
         Divider().vertical(true).height(20)
         Button('[Export]').fontSize(10).height(28).onClick(() => { this.onAction('export'); })
+        // Tap reports the persisted history; long-press clears it. Keeping both
+        // on one button avoids cluttering the toolbar while still making the
+        // destructive action reachable.
+        Button('[History]').fontSize(10).height(28)
+          .onClick(() => { this.onAction('history'); })
+          .gesture(LongPressGesture().onAction(() => { this.onAction('clearhistory'); }))
         Button('[Theme]').fontSize(10).height(28).onClick(() => { this.onAction('theme'); })
       }
       .padding(4).borderRadius(8)

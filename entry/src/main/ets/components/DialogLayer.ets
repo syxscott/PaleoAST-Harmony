@@ -89,7 +89,10 @@ export struct DialogLayer {
       }
       if (this.dialogVisible && this.activeDialog === 'Univariate') {
         UnivariateDialog({ visible: $dialogVisible })
-          .onConfirm(this.analysis('Summary'))
+          // Must dispatch on the dialog's own name: hard-writing 'Summary' here
+          // discarded the selected test (Normality / t-test / ANOVA /
+          // Kruskal-Wallis) and always produced the descriptive summary.
+          .onConfirm(this.analysis('Univariate'))
           .transition(this.transition());
       }
       if (this.dialogVisible && this.activeDialog === 'Diversity Indices') {

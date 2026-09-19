@@ -126,7 +126,9 @@ export function parseNexus(text: string): NexusData {
       if (lower.startsWith('taxlabels')) {
         const rest = t.substring(9).replace(';', '').trim();
         const names = rest.split(/\s+/);
-        for (const n of names) if (n) taxa.push(n);
+        // De-duplicate: a repeated label would make the taxon list longer than
+        // the matrix rows and shift every downstream leaf/label mapping.
+        for (const n of names) if (n && !taxa.includes(n)) taxa.push(n);
       }
     }
 

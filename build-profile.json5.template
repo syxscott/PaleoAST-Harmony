@@ -1,0 +1,67 @@
+// ============================================================
+// PaleoAST-Harmony build config — TEMPLATE / REFERENCE
+// ============================================================
+// The real `build-profile.json5` IS tracked in this repository because it
+// currently contains no secrets (`signingConfigs` is empty). This template
+// documents the full shape, including how signing is meant to be configured.
+//
+// Signing: configure it in DevEco Studio via
+//   File -> Project Structure -> Signing Configs
+// or keep the credentials in `local.properties` (gitignored, see
+// local.properties.template) and reference them from here.
+//
+// ⚠️ Never paste store/key passwords into a tracked file. CI blocks
+//    *.p12 / *.cer / *.p7b / *.keystore / *.jks.
+// ============================================================
+
+{
+  "app": {
+    // "signingConfigs": [
+    //   {
+    //     "name": "default",
+    //     "type": "HarmonyOS",
+    //     "material": {
+    //       "storeFile": "path to your .p12",
+    //       "storePassword": "do not hard-code",
+    //       "keyAlias": "your key alias",
+    //       "keyPassword": "do not hard-code",
+    //       "signAlg": "SHA256withECDSA",
+    //       "profile": "path to your .p7b",
+    //       "certpath": "path to your .cer"
+    //     }
+    //   }
+    // ],
+    "products": [
+      {
+        "name": "default",
+        // "signingConfig": "default",   // uncomment once signing is configured
+        "compatibleSdkVersion": "5.0.0(12)",
+        "runtimeOS": "HarmonyOS",
+        "buildOption": {
+          // 华为毕昇编译器（the C++ layer is built with it)
+          "nativeCompiler": "BiSheng",
+          "strictMode": {
+            "caseSensitiveCheck": true,
+            "useNormalizedOHMUrl": true
+          }
+        }
+      }
+    ],
+    "buildModeSet": [
+      { "name": "debug" },
+      { "name": "release" }
+    ]
+  },
+  "modules": [
+    {
+      "name": "entry",
+      "srcPath": "./entry",
+      "targets": [
+        {
+          "name": "default",
+          "applyToProducts": ["default"]
+        }
+      ]
+    }
+  ]
+}

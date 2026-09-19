@@ -63,6 +63,13 @@ export class Assertion {
     const a = this.actual as { length?: number };
     if (a?.length !== len) throw new Error(`expected length ${len}, got ${a?.length}`);
   }
+  /** Works for both strings and arrays. */
+  toContain(needle: unknown): void {
+    const a = this.actual as { includes?: (n: unknown) => boolean };
+    if (typeof a?.includes !== 'function' || !a.includes(needle)) {
+      throw new Error(`expected ${JSON.stringify(this.actual)} to contain ${JSON.stringify(needle)}`);
+    }
+  }
   toThrow(): void {
     const fn = this.actual as () => void;
     try { fn(); } catch { return; }

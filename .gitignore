@@ -1,0 +1,60 @@
+# HarmonyOS / DevEco Studio build output
+.ohos/
+.arkui-x/
+/oh_modules/
+/entry/oh_modules/
+/entry/.preview/
+/entry/build/
+/build/
+**/build/
+/.test
+/.appanalyzer
+*.har
+*.hap
+*.hsp
+*.app
+
+# Hvigor and IDE state
+/.hvigor/
+/.idea/
+*.iml
+/.devco/
+local.properties
+/local.properties
+
+# C++ build cache and clang tooling state
+/.cxx/
+.cxx/
+/.clangd
+/.clang-format
+/.clang-tidy
+
+# Vendored third-party C++ archives (restore from upstream, do not commit)
+boost_*.tar.gz
+symengine-*.tar.gz
+giac-*.tar.gz
+eigen-*.tar.gz
+
+# Signing material and local secrets
+*.p12
+*.cer
+*.p7b
+*.keystore
+*.jks
+entry/src/main/ets/utils/ApiConfig.ets
+
+# Local tooling
+node_modules/
+*.tsbuildinfo
+
+# Local working data — kept out of the repository on purpose:
+#   .workbuddy/refs/    cloned third-party reference repos (tens of MB, some GPL)
+#   .workbuddy/reviews/ code review / fix / survey reports (working documents;
+#                       the substance is distilled into docs/changes/)
+#   .workbuddy/memory/  session notes and project memory
+/.workbuddy/
+
+# OS noise
+.DS_Store
+Thumbs.db
+desktop.ini

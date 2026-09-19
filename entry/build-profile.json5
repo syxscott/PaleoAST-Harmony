@@ -4,9 +4,39 @@
     "externalNativeOptions": {
       "path": "./src/main/cpp/CMakeLists.txt",
       "arguments": "",
-      "cppFlags": ""
+      "cppFlags": "",
+      // The NAPI library must be built per ABI, otherwise only one of the real
+      // device (arm64-v8a) and the emulator (x86_64) receives
+      // libpaleoast_napi.so and initNative() stays false on the other.
+      "abiFilters": [
+        "arm64-v8a",
+        "x86_64"
+      ]
     }
   },
+  "buildOptionSet": [
+    {
+      "name": "release",
+      "arkOptions": {
+        "obfuscation": {
+          "ruleOptions": {
+            "enable": true,
+            "files": [
+              "./obfuscation-rules.txt"
+            ]
+          }
+        }
+      },
+      "nativeLib": {
+        // Strip C++ debug symbols from release HAPs so the symbol table does not
+        // inflate the package.
+        "debugSymbol": {
+          "strip": true,
+          "exclude": []
+        }
+      }
+    }
+  ],
   "targets": [
     {
       "name": "default",

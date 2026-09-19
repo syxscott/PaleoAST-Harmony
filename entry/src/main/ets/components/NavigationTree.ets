@@ -10,6 +10,10 @@ export struct NavigationTree {
   // Cached result of the (expensive) filtering — rebuilt only when
   // searchText changes, never re-created during rendering.
   @State filteredSections: NavSection[] = [];
+  // Sections the current Ribbon tab allows; empty means "all sections".
+  // Without this the Ribbon tabs were pure highlight toggles that filtered
+  // nothing (a dead control).
+  @Prop @Watch('onFilterChanged') allowedSections: string[] = [];
 
   onNavigate: (name: string) => void = () => {};
 
@@ -64,6 +68,10 @@ export struct NavigationTree {
   }
 
   onSearchChanged(): void {
+    this.recomputeFilteredSections();
+  }
+
+  onFilterChanged(): void {
     this.recomputeFilteredSections();
   }
 
@@ -129,13 +137,17 @@ export struct NavigationTree {
   }
 
   private recomputeFilteredSections(): void {
+    // Ribbon tab restriction first (empty list = no restriction).
+    const pool = this.allowedSections.length === 0
+      ? this.sections
+      : this.sections.filter(s => this.allowedSections.includes(s.name));
     if (!this.searchText) {
-      this.filteredSections = this.sections;
+      this.filteredSections = pool;
       return;
     }
     const ft = this.searchText.toLowerCase();
     const result: NavSection[] = [];
-    for (const s of this.sections) {
+    for (const s of pool) {
       const entries = s.entries.filter(e => e.toLowerCase().includes(ft));
       if (entries.length > 0 || s.name.toLowerCase().includes(ft)) {
         result.push({ name: s.name, icon: s.icon, entries: entries });

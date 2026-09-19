@@ -20,18 +20,64 @@
  * produce silent wrong results — hence the explicit null contract.
  */
 
+/**
+ * Native library surface.
+ *
+ * A function returns the numeric payload on success or a short "Error:<Code>"
+ * string on a business failure (see cpp/core/ErrorHandler.h and
+ * cpp/types/libpaleoast_napi/index.d.ts). The wrappers below normalise that to
+ * `Float64Array | null` so callers keep a single null check, while
+ * `nativeLastError()` exposes why.
+ */
 interface NativeLib {
-  matrixMultiply?: (a: ArrayBufferLike, b: ArrayBufferLike, m: number, n: number) => Float64Array | null;
-  matrixTranspose?: (a: ArrayBufferLike, m: number, n: number) => Float64Array | null;
-  matrixSVD?: (a: ArrayBufferLike, m: number, n: number) => Float64Array | null;
-  matrixInverse?: (a: ArrayBufferLike, n: number) => Float64Array | null;
-  matrixEigh?: (a: ArrayBufferLike, n: number) => Float64Array | null;
-  computeDistanceMatrix?: (a: ArrayBufferLike, m: number, metric: number, r: number) => Float64Array | null;
-  hierarchicalClustering?: (a: ArrayBufferLike, n: number, method: number) => Float64Array | null;
+  matrixMultiply?: (a: ArrayBufferLike, b: ArrayBufferLike, m: number, n: number) => Float64Array | string;
+  matrixTranspose?: (a: ArrayBufferLike, m: number, n: number) => Float64Array | string;
+  matrixSVD?: (a: ArrayBufferLike, m: number, n: number) => Float64Array | string;
+  matrixInverse?: (a: ArrayBufferLike, n: number) => Float64Array | string;
+  matrixEigh?: (a: ArrayBufferLike, n: number) => Float64Array | string;
+  /** (data, points n, dimensions p, metric) — matches the C++ argument order. */
+  computeDistanceMatrix?: (a: ArrayBufferLike, n: number, p: number, metric: number) => Float64Array | string;
+  hierarchicalClustering?: (a: ArrayBufferLike, n: number, method: number) => Float64Array | string;
 }
 
 let nativeModule: NativeLib | null = null;
 let loadPromise: Promise<boolean> | null = null;
+
+/** Reason for the most recent native failure, or null when it succeeded. */
+let lastError: string | null = null;
+
+/**
+ * Why the last native call returned null.
+ *
+ * `null` covers three distinct situations, so callers should distinguish them:
+ *   - 'Error:Singular' / 'Error:NoConvergence' / ... : C++ reported a cause
+ *   - 'Error:NotLoaded'  : the .so never loaded, so the TS fallback ran
+ *   - null               : the call succeeded (no fallback needed)
+ */
+export function nativeLastError(): string | null {
+  return lastError;
+}
+
+/**
+ * Normalise a raw native return into the wrapper contract.
+ *
+ * A string means the C++ layer reported a business failure; anything falsy
+ * means we never reached C++. Either way the caller gets null and can query
+ * `nativeLastError()`.
+ */
+function unwrap(result: Float64Array | string | null | undefined, label: string): Float64Array | null {
+  if (typeof result === 'string') {
+    lastError = result;
+    return null;
+  }
+  if (!result) {
+    lastError = 'Error:NotLoaded';
+    return null;
+  }
+  lastError = null;
+  void label;
+  return result;
+}
 
 /**
  * Attempt to load the NAPI library. Idempotent; safe to call on any platform.
@@ -68,27 +114,45 @@ export function warmupNative(): void {
 }
 
 export function nativeMultiply(A: Float64Array, B: Float64Array, m: number, n: number): Float64Array | null {
-  if (nativeModule?.matrixMultiply) return nativeModule.matrixMultiply(A.buffer, B.buffer, m, n);
+  if (nativeModule?.matrixMultiply) return unwrap(nativeModule.matrixMultiply(A.buffer, B.buffer, m, n), 'multiply');
   // TS fallback — caller must check for null and use pure-TS linalg.matmul
+  lastError = 'Error:NotLoaded';
   return null;
 }
 
 export function nativeSVD(A: Float64Array, m: number, n: number): Float64Array | null {
-  if (nativeModule?.matrixSVD) return nativeModule.matrixSVD(A.buffer, m, n);
+  if (nativeModule?.matrixSVD) return unwrap(nativeModule.matrixSVD(A.buffer, m, n), 'svd');
+  lastError = 'Error:NotLoaded';
   return null;  // Fallback: caller uses linalg.ts svd()
 }
 
 export function nativeInverse(A: Float64Array, n: number): Float64Array | null {
-  if (nativeModule?.matrixInverse) return nativeModule.matrixInverse(A.buffer, n);
+  if (nativeModule?.matrixInverse) return unwrap(nativeModule.matrixInverse(A.buffer, n), 'inverse');
+  lastError = 'Error:NotLoaded';
   return null;
 }
 
 export function nativeEigh(A: Float64Array, n: number): Float64Array | null {
-  if (nativeModule?.matrixEigh) return nativeModule.matrixEigh(A.buffer, n);
+  if (nativeModule?.matrixEigh) return unwrap(nativeModule.matrixEigh(A.buffer, n), 'eigh');
+  lastError = 'Error:NotLoaded';
   return null;
 }
 
-export function nativeDistanceMatrix(A: Float64Array, m: number, metric: number): Float64Array | null {
-  if (nativeModule?.computeDistanceMatrix) return nativeModule.computeDistanceMatrix(A.buffer, m, metric, 0);
+/**
+ * Pairwise distance matrix.
+ *
+ * @param n      number of points (rows)
+ * @param p      dimensionality (columns) — previously this argument was passed
+ *               as the metric and the metric as a trailing 0, so the C++
+ *               dimension check `n*p == size` always failed and the call
+ *               silently degraded to the TS path.
+ * @param metric 0 = Euclidean, 1 = Canberra (the C++ layer only implements
+ *               these two; other metrics must use the TS implementation).
+ */
+export function nativeDistanceMatrix(A: Float64Array, n: number, p: number, metric: number): Float64Array | null {
+  if (nativeModule?.computeDistanceMatrix) {
+    return unwrap(nativeModule.computeDistanceMatrix(A.buffer, n, p, metric), 'distanceMatrix');
+  }
+  lastError = 'Error:NotLoaded';
   return null;
 }

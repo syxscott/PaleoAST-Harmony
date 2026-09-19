@@ -11,9 +11,9 @@
  *   λ = 1 → full BM;  λ = 0 → star phylogeny.
  *
  * Canonical Blomberg K (Blomberg, Garland & Ives 2003, Evolution 57: 717-745):
- *   K = s²_ord / (σ̂²_GLS · tr(V) / n)
+ *   K = MSE0 / (MSE · (tr(V) − n/(1ᵀV⁻¹1))/(n−1)),   E[K] = 1 under BM
  * with GLS intercept â = (1ᵀV⁻¹1)⁻¹ 1ᵀV⁻¹y and
- * σ̂²_GLS = (y−â1)ᵀV⁻¹(y−â1)/(n−1).
+ *   MSE0 = Σ(y_i − â)²/(n−1),  MSE = (y−â)ᵀV⁻¹(y−â)/(n−1).
  */
 import { PhyloNode } from './phylogenetics';
 import { randn, seed as seedRng } from '../../math/random';
@@ -114,6 +114,25 @@ function matInv(M: number[][]): number[][] | null {
 /**
  * Canonical Blomberg K from a trait vector and an ape-convention VCV
  * (diag = root-to-tip, off-diag = shared path). Returns 0.0 when degenerate.
+ *
+ * Blomberg's K is defined so that E[K] = 1 when the trait evolves under
+ * Brownian motion on the supplied tree. That fixes the normalisation:
+ *
+ *   K = MSE0 / (MSE · N),   N = (tr(V) − n/(1ᵀV⁻¹1)) / (n−1)
+ *
+ * where both MSE0 and MSE are computed about the GLS (phylogenetic) mean
+ * â = (1ᵀV⁻¹1)⁻¹1ᵀV⁻¹y:
+ *
+ *   MSE0 = Σ(y_i − â)² / (n−1)
+ *   MSE  = (y − â)ᵀV⁻¹(y − â) / (n−1)
+ *
+ * E[MSE0] = N and E[MSE] = 1 under BM, so E[K] = 1. Two deviations from this
+ * were present before and made K biased low on every non-star tree (measured
+ * by simulating BM on the tree's own VCV, 20k replicates):
+ *   - the numerator used the ARITHMETIC mean instead of the GLS mean;
+ *   - N was `tr(V)/n` instead of `(tr(V) − n/(1ᵀV⁻¹1))/(n−1)`.
+ * E[K] came out 0.83 for ((H:1,C:1):1,G:2) and 0.76 for
+ * (((A:1,B:1):1,C:1):1,D:3), where it must be 1.
  */
 export function blombergKFromVCV(y: number[], V: number[][]): number {
   const n = y.length;
@@ -133,6 +152,7 @@ export function blombergKFromVCV(y: number[], V: number[][]): number {
     for (let j = 0; j < n; j++) s += Vinv[i][j] * y[j];
     oneViY += s;
   }
+  // GLS / phylogenetic mean — used for BOTH mean-squared errors.
   const aHat = oneViY / oneViOne;
   const resid = y.map(v => v - aHat);
 
@@ -145,16 +165,18 @@ export function blombergKFromVCV(y: number[], V: number[][]): number {
   }
   let quad = 0;
   for (let i = 0; i < n; i++) quad += resid[i] * vinvResid[i];
-  const sigma2Gls = quad / (n - 1);
+  const mseGls = quad / (n - 1);
 
-  const yMean = y.reduce((a, b) => a + b, 0) / n;
-  const s2Ord = y.reduce((s, v) => s + (v - yMean) * (v - yMean), 0) / (n - 1);
+  const mse0 = resid.reduce((s, v) => s + v * v, 0) / (n - 1);
 
   let trace = 0;
   for (let i = 0; i < n; i++) trace += V[i][i];
-  const denom = sigma2Gls * trace / n;
-  if (denom <= 0) return 0.0;
-  return s2Ord / denom;
+  // Normaliser that makes E[K] = 1 under BM.
+  const norm = (trace - n / oneViOne) / (n - 1);
+
+  const denom = mseGls * norm;
+  if (!(denom > 0)) return 0.0;
+  return mse0 / denom;
 }
 
 export interface BMSimulationResult {

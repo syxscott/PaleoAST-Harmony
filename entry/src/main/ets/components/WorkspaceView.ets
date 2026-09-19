@@ -59,8 +59,11 @@ export struct WorkspaceView {
                 .width('100%')
                 .height('100%');
               }
-            } else if (widget === 'spreadsheet+plot' || (this.plotDataX.length > 0 && idx === this.currentWidget)) {
-              // Live chart widget: real Canvas rendering via PlotCanvas
+            } else if (idx === this.currentWidget) {
+              // Active analysis tab: always render the canvas. plotDataX/Y hold
+              // THIS tab's snapshot (hydrated by Index.onWidgetChanged), and
+              // PlotCanvas clears itself when the analysis has no series — so a
+              // tab can never display another analysis's chart.
               Column() {
                 Text(this.plotTitle)
                   .fontSize(14)
@@ -76,19 +79,6 @@ export struct WorkspaceView {
                 })
                   .width('100%')
                   .layoutWeight(1);
-              }
-              .width('100%')
-              .height('100%');
-            } else if (this.plotDataX.length > 0) {
-              Column() {
-                Text(this.plotTitle)
-                  .fontSize(14)
-                  .fontWeight(FontWeight.Bold)
-                  .fontColor(this.darkMode ? '#ccc' : '#2C3E50')
-                  .margin(10);
-                Text('Plot: ' + widget + ' (' + this.plotDataX.length + ' points)')
-                  .fontSize(12)
-                  .fontColor('#7F8C8D');
               }
               .width('100%')
               .height('100%');

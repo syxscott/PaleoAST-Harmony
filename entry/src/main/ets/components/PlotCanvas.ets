@@ -9,6 +9,12 @@ import fs from '@ohos.file.fs';
  * Full interactive chart with hover tooltips, zoom, pan, selection, export.
  * Supports: scatter, line, bar, histogram, boxplot, heatmap.
  */
+import { ViewPortHandler } from './plot/ViewPortHandler';
+import { ChartHighlighter } from './plot/ChartHighlighter';
+import { ChartComputator } from './plot/ChartComputator';
+import { AdaptiveFormatter, autoFormatter } from './plot/ValueFormatter';
+import type { IValueFormatter } from './plot/ValueFormatter';
+
 @Component
 export struct PlotCanvas {
   // 样式/类型属性用 @Prop + @Watch：父级（WorkspaceView）变化时同步并触发
@@ -18,9 +24,8 @@ export struct PlotCanvas {
   @Prop @Watch('onStyleChanged') darkMode: boolean = false;
   @State xlabel: string = '';
   @State ylabel: string = '';
-  @State zoomLevel: number = 1.0;
-  @State panX: number = 0;
-  @State panY: number = 0;
+  // zoom / pan / data range / margin now live in ViewPortHandler (see below);
+  // nothing in build() renders them, so they need no reactive state.
   @State hoveredPoint: number = -1;
   @State selectedPoints: Set<number> = new Set();
   @State showTooltip: boolean = false;
@@ -47,15 +52,74 @@ export struct PlotCanvas {
     this.ingestInputData();
   }
 
-  /** 把父级注入的 X/Y 序列按当前 plotType 装载为绘制数据。 */
+  /**
+   * Clear the surface and drop the loaded series.
+   *
+   * `redraw()` bails out as soon as `plotData` is null, so merely nulling the
+   * data leaves the PREVIOUS chart painted on the canvas. Clearing explicitly
+   * (plus a short placeholder) is what makes a stale plot impossible.
+   */
+  private clearPlot(message: string): void {
+    this.plotData = null;
+    this.vp.resetDataRange();
+    this.selectedPoints = new Set();
+    this.hoveredPoint = -1;
+    const ctx = this.ctx;
+    if (!ctx) return;
+    const w = this.canvasWidth || 800;
+    const h = this.canvasHeight || 600;
+    ctx.clearRect(0, 0, w, h);
+    ctx.fillStyle = this.darkMode ? '#aaa' : '#95A5A6';
+    ctx.font = '13px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(message, w / 2, h / 2);
+    ctx.textAlign = 'left';
+  }
+
+  /**
+   * Load the parent-injected X/Y series for the current plot type.
+   *
+   * Two rules that the previous version broke:
+   *  1. An empty series must CLEAR the canvas instead of returning early —
+   *     otherwise switching to an analysis that supplies no series kept the
+   *     last chart on screen while the header showed the new analysis name.
+   *  2. Every type with a data setter is fed from the single X/Y channel, since
+   *     the parent has no other way to inject data (it never calls the
+   *     imperative setters). Types that genuinely need a matrix/tree/interval
+   *     structure are cleared rather than left showing something unrelated.
+   */
   private ingestInputData(): void {
-    if (this.dataX.length === 0 || this.dataX.length !== this.dataY.length) return;
-    if (this.plotType === 'line') {
-      this.setLineData(this.dataX, this.dataY);
-    } else if (this.plotType === 'scatter') {
-      this.setScatterData(this.dataX, this.dataY);
+    const hasSeries = this.dataX.length > 0 && this.dataX.length === this.dataY.length;
+    if (!hasSeries) {
+      this.clearPlot('No series to plot for this analysis');
+      return;
     }
-    // bar/histogram 等类型的数据不由 X/Y 序列承载，忽略
+    switch (this.plotType) {
+      case 'bar':
+        this.setBarData(this.dataX.map(v => String(v)), this.dataY);
+        break;
+      case 'histogram':
+        this.setHistogramData(this.dataY);
+        break;
+      case 'boxplot':
+        this.setBoxPlotData([{ label: this.xlabel || 'values', values: this.dataY }]);
+        break;
+      case 'none':
+        this.clearPlot('No chart available for this analysis');
+        break;
+      case 'heatmap':
+      case 'dendrogram':
+      case 'range':
+        this.clearPlot('Plot type "' + this.plotType + '" needs a matrix or tree structure');
+        break;
+      case 'scatter':
+        this.setScatterData(this.dataX, this.dataY);
+        break;
+      case 'line':
+      default:
+        this.setLineData(this.dataX, this.dataY);
+        break;
+    }
   }
 
   private plotData: PlotData | null = null;
@@ -88,23 +152,30 @@ export struct PlotCanvas {
     if (this.resizeTimerId >= 0) { clearTimeout(this.resizeTimerId); }
   }
 
-  // Cached coordinate mapping
-  private xMin: number = 0;
-  private xMax: number = 1;
-  private yMin: number = 0;
-  private yMax: number = 1;
-  private margin = { top: 50, right: 40, bottom: 60, left: 70 };
+  /**
+   * Single source of truth for the coordinate system: data range, zoom, pan,
+   * margin and the value<->pixel transform. The renderer, the SVG exporter and
+   * the hit tester all read from here instead of each keeping their own copy.
+   */
+  private vp: ViewPortHandler = new ViewPortHandler();
+  /** Formatter for axis ticks and value labels. */
+  private fmt: IValueFormatter = new AdaptiveFormatter();
+
+  /** Pick radius (vp) shared by hover and tap selection. */
+  static readonly HOVER_RADIUS: number = 20;
+  /** Grid divisions per axis. */
+  static readonly TICK_DIVISIONS: number = 5;
 
   build() {
     Column() {
       // ─── Toolbar ───
       Row() {
         Button('Zoom+').fontSize(10).height(28).margin({ right: 4 })
-          .onClick(() => { this.zoomLevel = Math.min(10, this.zoomLevel * 1.2); this.redraw(); })
+          .onClick(() => { this.vp.zoomBy(1.2); this.redraw(); })
         Button('Zoom-').fontSize(10).height(28).margin({ right: 4 })
-          .onClick(() => { this.zoomLevel = Math.max(0.1, this.zoomLevel / 1.2); this.redraw(); })
+          .onClick(() => { this.vp.zoomBy(1 / 1.2); this.redraw(); })
         Button('Reset').fontSize(10).height(28).margin({ right: 4 })
-          .onClick(() => { this.zoomLevel = 1; this.panX = 0; this.panY = 0; this.redraw(); })
+          .onClick(() => { this.vp.resetView(); this.redraw(); })
         Button('Select All').fontSize(10).height(28).margin({ right: 4 })
           .onClick(() => { this.selectAll(); this.redraw(); })
         Button('Clear Sel').fontSize(10).height(28).margin({ right: 4 })
@@ -130,6 +201,7 @@ export struct PlotCanvas {
         // 重绘合并到动画结束后的一次（防抖），保证切换流畅。
         this.canvasWidth = newArea.width as number;
         this.canvasHeight = newArea.height as number;
+        this.syncPlotSize();
         if (this.resizeTimerId >= 0) { clearTimeout(this.resizeTimerId); }
         this.resizeTimerId = setTimeout(() => {
           this.resizeTimerId = -1;
@@ -150,9 +222,9 @@ export struct PlotCanvas {
       })
       .gesture(
         PinchGesture({ fingers: 2 })
-          .onActionStart(() => { this.pinchStartZoom = this.zoomLevel; })
+          .onActionStart(() => { this.pinchStartZoom = this.vp.zoom; })
           .onActionUpdate((event: GestureEvent) => {
-            this.zoomLevel = Math.min(10, Math.max(0.1, this.pinchStartZoom * event.scale));
+            this.vp.zoomTo(this.pinchStartZoom * event.scale);
             this.redraw();
           })
       )
@@ -248,34 +320,30 @@ export struct PlotCanvas {
 
   // ─── Coordinate Mapping ────────────────────────────────────────
 
+  /** Keep the viewport's plot size in step with the canvas. */
+  private syncPlotSize(): void {
+    this.vp.setPlotSize(this.canvasWidth || 800, this.canvasHeight || 600);
+  }
+
+  /** Recompute the data range and pick a formatter suited to its span. */
   private updateRanges(): void {
-    if (!this.plotData?.x) return;
-    this.xMin = this.plotData.x.reduce((a, b) => Math.min(a, b), Infinity);
-    this.xMax = this.plotData.x.reduce((a, b) => Math.max(a, b), -Infinity);
-    this.yMin = this.plotData.y!.reduce((a, b) => Math.min(a, b), Infinity);
-    this.yMax = this.plotData.y!.reduce((a, b) => Math.max(a, b), -Infinity);
+    if (!this.plotData?.x || !this.plotData.y) return;
+    this.vp.setDataRange(this.plotData.x, this.plotData.y);
+    // Re-pick the formatter whenever the span changes class (tiny/huge/normal)
+    // so axis labels stay readable across analyses.
+    this.fmt = autoFormatter(this.vp.spanY, 2);
   }
 
   private mapX(v: number): number {
-    const w = this.canvasWidth || 800;
-    const pw = w - this.margin.left - this.margin.right;
-    const xPad = (this.xMax - this.xMin) * 0.1 || 1;
-    const range = (this.xMax - this.xMin + 2 * xPad);
-    // Zoom relative to plot center, not margin.left
-    const dataX = ((v - this.xMin + xPad) / range) * pw;
-    const centerX = pw / 2;
-    return this.margin.left + centerX + (dataX - centerX) * this.zoomLevel + this.panX;
+    return this.vp.mapX(v);
   }
 
   private mapY(v: number): number {
-    const h = this.canvasHeight || 600;
-    const ph = h - this.margin.top - this.margin.bottom;
-    const yPad = (this.yMax - this.yMin) * 0.1 || 1;
-    const range = (this.yMax - this.yMin + 2 * yPad);
-    // Y-axis: higher data values → higher screen position (lower pixel Y)
-    const dataY = ((v - this.yMin + yPad) / range) * ph;
-    const centerY = ph / 2;
-    return this.margin.top + centerY - (dataY - centerY) * this.zoomLevel + this.panY;
+    return this.vp.mapY(v);
+  }
+
+  private tickLabel(v: number): string {
+    return this.fmt.format(v);
   }
 
   // ─── Rendering ─────────────────────────────────────────────────
@@ -296,10 +364,13 @@ export struct PlotCanvas {
   private _redrawCore(): void {
     if (!this.ctx || !this.plotData) return;
     const ctx = this.ctx;
+    // Guarantee the viewport knows the current plot size even if onAreaChange
+    // has not fired yet (first paint, or a programmatic resize).
+    this.syncPlotSize();
     const w = this.canvasWidth || 800;
     const h = this.canvasHeight || 600;
-    const pw = w - this.margin.left - this.margin.right;
-    const ph = h - this.margin.top - this.margin.bottom;
+    const pw = w - this.vp.margin.left - this.vp.margin.right;
+    const ph = h - this.vp.margin.top - this.vp.margin.bottom;
 
     // Clear
     ctx.clearRect(0, 0, w, h);
@@ -308,16 +379,18 @@ export struct PlotCanvas {
 
     // Draw plot area background
     ctx.fillStyle = this.darkMode ? '#0f3460' : '#FAFBFC';
-    ctx.fillRect(this.margin.left, this.margin.top, pw, ph);
+    ctx.fillRect(this.vp.margin.left, this.vp.margin.top, pw, ph);
 
-    // Grid
+    // Grid — horizontal from the Y ticks, vertical from the X ticks.
     ctx.strokeStyle = this.darkMode ? '#333' : '#E4E7EB';
     ctx.lineWidth = 0.5;
-    for (let i = 0; i <= 5; i++) {
-      const gy = this.margin.top + (ph * i) / 5;
-      ctx.beginPath(); ctx.moveTo(this.margin.left, gy); ctx.lineTo(this.margin.left + pw, gy); ctx.stroke();
-      const gx = this.margin.left + (pw * i) / 5;
-      ctx.beginPath(); ctx.moveTo(gx, this.margin.top); ctx.lineTo(gx, this.margin.top + ph); ctx.stroke();
+    for (const tick of ChartComputator.yTicks(this.vp, PlotCanvas.TICK_DIVISIONS)) {
+      const gy = tick.pixel;
+      ctx.beginPath(); ctx.moveTo(this.vp.margin.left, gy); ctx.lineTo(this.vp.margin.left + pw, gy); ctx.stroke();
+    }
+    for (const tick of ChartComputator.xTicks(this.vp, PlotCanvas.TICK_DIVISIONS)) {
+      const gx = tick.pixel;
+      ctx.beginPath(); ctx.moveTo(gx, this.vp.margin.top); ctx.lineTo(gx, this.vp.margin.top + ph); ctx.stroke();
     }
 
     // Draw by type
@@ -333,34 +406,35 @@ export struct PlotCanvas {
     ctx.strokeStyle = this.darkMode ? '#ccc' : '#2C3E50';
     ctx.lineWidth = 1.5;
     ctx.beginPath();
-    ctx.moveTo(this.margin.left, this.margin.top);
-    ctx.lineTo(this.margin.left, this.margin.top + ph);
-    ctx.lineTo(this.margin.left + pw, this.margin.top + ph);
+    ctx.moveTo(this.vp.margin.left, this.vp.margin.top);
+    ctx.lineTo(this.vp.margin.left, this.vp.margin.top + ph);
+    ctx.lineTo(this.vp.margin.left + pw, this.vp.margin.top + ph);
     ctx.stroke();
 
-    // Tick labels
+    // Tick labels — positions and labels come from ChartComputator so the
+    // Canvas renderer and the SVG exporter cannot drift apart.
     ctx.fillStyle = this.darkMode ? '#aaa' : '#7F8C8D';
     ctx.font = '10px sans-serif';
     ctx.textAlign = 'center';
-    for (let i = 0; i <= 5; i++) {
-      const xVal = this.xMin + ((this.xMax - this.xMin) * i) / 5;
-      const yVal = this.yMin + ((this.yMax - this.yMin) * i) / 5;
-      ctx.fillText(xVal.toFixed(2), this.margin.left + (pw * i) / 5, this.margin.top + ph + 15);
-      ctx.textAlign = 'right';
-      ctx.fillText(yVal.toFixed(2), this.margin.left - 5, this.margin.top + ph - (ph * i) / 5 + 4);
-      ctx.textAlign = 'center';
+    for (const tick of ChartComputator.xTicks(this.vp, PlotCanvas.TICK_DIVISIONS, (v: number) => this.tickLabel(v))) {
+      ctx.fillText(tick.label, tick.pixel, this.vp.margin.top + ph + 15);
     }
+    ctx.textAlign = 'right';
+    for (const tick of ChartComputator.yTicks(this.vp, PlotCanvas.TICK_DIVISIONS, (v: number) => this.tickLabel(v))) {
+      ctx.fillText(tick.label, this.vp.margin.left - 5, tick.pixel + 4);
+    }
+    ctx.textAlign = 'center';
 
     // Axis labels
     if (this.xlabel) {
       ctx.fillStyle = this.darkMode ? '#ccc' : '#7F8C8D';
       ctx.font = '12px sans-serif';
       ctx.textAlign = 'center';
-      ctx.fillText(this.xlabel, this.margin.left + pw / 2, h - 10);
+      ctx.fillText(this.xlabel, this.vp.margin.left + pw / 2, h - 10);
     }
     if (this.ylabel) {
       ctx.save();
-      ctx.translate(15, this.margin.top + ph / 2);
+      ctx.translate(15, this.vp.margin.top + ph / 2);
       ctx.rotate(-Math.PI / 2);
       ctx.textAlign = 'center';
       ctx.fillText(this.ylabel, 0, 0);
@@ -383,13 +457,13 @@ export struct PlotCanvas {
     const n = x.length;
 
     // Zero lines
-    if (this.xMin < 0 && this.xMax > 0) {
+    if (this.vp.minX < 0 && this.vp.maxX > 0) {
       ctx.strokeStyle = '#888'; ctx.lineWidth = 1;
-      ctx.beginPath(); ctx.moveTo(this.mapX(0), this.margin.top); ctx.lineTo(this.mapX(0), this.margin.top + ph); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(this.mapX(0), this.vp.margin.top); ctx.lineTo(this.mapX(0), this.vp.margin.top + ph); ctx.stroke();
     }
-    if (this.yMin < 0 && this.yMax > 0) {
+    if (this.vp.minY < 0 && this.vp.maxY > 0) {
       ctx.strokeStyle = '#888'; ctx.lineWidth = 1;
-      ctx.beginPath(); ctx.moveTo(this.margin.left, this.mapY(0)); ctx.lineTo(this.margin.left + pw, this.mapY(0)); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(this.vp.margin.left, this.mapY(0)); ctx.lineTo(this.vp.margin.left + pw, this.mapY(0)); ctx.stroke();
     }
 
     // ── Batched Path2D rendering for large datasets (N > 1000) ──
@@ -477,12 +551,12 @@ export struct PlotCanvas {
       const uniqueGroups = [...new Set(data.groups)];
       ctx.font = '10px sans-serif';
       for (let i = 0; i < uniqueGroups.length; i++) {
-        const y = this.margin.top + 20 + i * 15;
+        const y = this.vp.margin.top + 20 + i * 15;
         ctx.fillStyle = colors[i % colors.length];
-        ctx.beginPath(); ctx.arc(this.margin.left + pw - 80, y, 5, 0, 2 * Math.PI); ctx.fill();
+        ctx.beginPath(); ctx.arc(this.vp.margin.left + pw - 80, y, 5, 0, 2 * Math.PI); ctx.fill();
         ctx.fillStyle = this.darkMode ? '#ccc' : '#2C3E50';
         ctx.textAlign = 'left';
-        ctx.fillText('Group ' + uniqueGroups[i], this.margin.left + pw - 70, y + 3);
+        ctx.fillText('Group ' + uniqueGroups[i], this.vp.margin.left + pw - 70, y + 3);
       }
     }
   }
@@ -523,21 +597,21 @@ export struct PlotCanvas {
     const colors = ['#3498DB', '#E74C3C', '#27AE60', '#F39C12', '#9B59B6'];
 
     for (let i = 0; i < labels.length; i++) {
-      const x = this.margin.left + (i * (barW + gap)) + gap / 2;
+      const x = this.vp.margin.left + (i * (barW + gap)) + gap / 2;
       const barH = (values[i] / maxVal) * ph;
       ctx.fillStyle = colors[i % colors.length];
       ctx.globalAlpha = 0.8;
-      ctx.fillRect(x, this.margin.top + ph - barH, barW, barH);
+      ctx.fillRect(x, this.vp.margin.top + ph - barH, barW, barH);
       ctx.globalAlpha = 1;
 
       // Value label
       ctx.fillStyle = this.darkMode ? '#ccc' : '#2C3E50';
       ctx.font = '9px sans-serif'; ctx.textAlign = 'center';
-      ctx.fillText(values[i].toFixed(2), x + barW / 2, this.margin.top + ph - barH - 3);
+      ctx.fillText(values[i].toFixed(2), x + barW / 2, this.vp.margin.top + ph - barH - 3);
 
       // X label (rotated)
       ctx.save();
-      ctx.translate(x + barW / 2, this.margin.top + ph + 5);
+      ctx.translate(x + barW / 2, this.vp.margin.top + ph + 5);
       ctx.rotate(-Math.PI / 4);
       ctx.textAlign = 'right';
       ctx.fillText(labels[i], 0, 0);
@@ -552,7 +626,7 @@ export struct PlotCanvas {
     const yMin = allVals.reduce((a, b) => Math.min(a, b), Infinity);
     const yMax = allVals.reduce((a, b) => Math.max(a, b), -Infinity);
     const yPad = (yMax - yMin) * 0.1 || 1;
-    const mapY = (v: number) => this.margin.top + ph - ((v - (yMin - yPad)) / ((yMax + yPad) - (yMin - yPad))) * ph;
+    const mapY = (v: number) => this.vp.margin.top + ph - ((v - (yMin - yPad)) / ((yMax + yPad) - (yMin - yPad))) * ph;
     const boxW = pw / groups.length * 0.6;
     const gap = pw / groups.length * 0.4;
     const colors = ['#3498DB', '#E74C3C', '#27AE60', '#F39C12', '#9B59B6'];
@@ -567,7 +641,7 @@ export struct PlotCanvas {
       const iqr = q3 - q1;
       const wLo = Math.max(sorted[0], q1 - 1.5 * iqr);
       const wHi = Math.min(sorted[n - 1], q3 + 1.5 * iqr);
-      const cx = this.margin.left + (i * (boxW + gap)) + gap / 2 + boxW / 2;
+      const cx = this.vp.margin.left + (i * (boxW + gap)) + gap / 2 + boxW / 2;
 
       ctx.strokeStyle = colors[i % colors.length]; ctx.lineWidth = 1.5;
       ctx.beginPath(); ctx.moveTo(cx, mapY(wLo)); ctx.lineTo(cx, mapY(q1)); ctx.stroke();
@@ -585,7 +659,7 @@ export struct PlotCanvas {
 
       ctx.fillStyle = this.darkMode ? '#ccc' : '#2C3E50';
       ctx.font = '11px sans-serif'; ctx.textAlign = 'center';
-      ctx.fillText(groups[i].label, cx, this.margin.top + ph + 15);
+      ctx.fillText(groups[i].label, cx, this.vp.margin.top + ph + 15);
     }
   }
 
@@ -622,13 +696,13 @@ export struct PlotCanvas {
       const norm = normVals[i][j];
       const r = rChans[i][j], b = bChans[i][j], g = gChans[i][j];
       ctx.fillStyle = 'rgb(' + r + ',' + g + ',' + b + ')';
-      ctx.fillRect(this.margin.left + j * cellW, this.margin.top + i * cellH, cellW - 1, cellH - 1);
+      ctx.fillRect(this.vp.margin.left + j * cellW, this.vp.margin.top + i * cellH, cellW - 1, cellH - 1);
 
       // Value annotation
       if (cellW > 30 && cellH > 20) {
         ctx.fillStyle = norm > 0.5 ? '#fff' : '#2C3E50';
         ctx.font = '9px sans-serif'; ctx.textAlign = 'center';
-        ctx.fillText(matrix[i][j].toFixed(2), this.margin.left + j * cellW + cellW / 2, this.margin.top + i * cellH + cellH / 2 + 3);
+        ctx.fillText(matrix[i][j].toFixed(2), this.vp.margin.left + j * cellW + cellW / 2, this.vp.margin.top + i * cellH + cellH / 2 + 3);
       }
     }
 
@@ -637,11 +711,11 @@ export struct PlotCanvas {
     ctx.font = '9px sans-serif';
     for (let i = 0; i < nRows; i++) {
       ctx.textAlign = 'right';
-      ctx.fillText(rowLabels[i] ?? '', this.margin.left - 5, this.margin.top + i * cellH + cellH / 2 + 3);
+      ctx.fillText(rowLabels[i] ?? '', this.vp.margin.left - 5, this.vp.margin.top + i * cellH + cellH / 2 + 3);
     }
     for (let j = 0; j < nCols; j++) {
       ctx.save();
-      ctx.translate(this.margin.left + j * cellW + cellW / 2, this.margin.top + ph + 5);
+      ctx.translate(this.vp.margin.left + j * cellW + cellW / 2, this.vp.margin.top + ph + 5);
       ctx.rotate(-Math.PI / 4);
       ctx.textAlign = 'right';
       ctx.fillText(colLabels[j] ?? '', 0, 0);
@@ -649,7 +723,7 @@ export struct PlotCanvas {
     }
 
     // Color bar — pre-compute gradient segments
-    const barX = this.margin.left + pw + 10, barW = 15;
+    const barX = this.vp.margin.left + pw + 10, barW = 15;
     const barNormVals: number[] = new Array(Math.ceil(ph));
     const barR: number[] = new Array(barNormVals.length);
     const barB: number[] = new Array(barNormVals.length);
@@ -663,12 +737,12 @@ export struct PlotCanvas {
     }
     for (let i = 0; i < barNormVals.length; i++) {
       ctx.fillStyle = 'rgb(' + barR[i] + ',' + barG[i] + ',' + barB[i] + ')';
-      ctx.fillRect(barX, this.margin.top + i, barW, 1);
+      ctx.fillRect(barX, this.vp.margin.top + i, barW, 1);
     }
     ctx.fillStyle = this.darkMode ? '#ccc' : '#2C3E50';
     ctx.font = '10px sans-serif'; ctx.textAlign = 'left';
-    ctx.fillText(maxV.toFixed(2), barX + barW + 3, this.margin.top + 8);
-    ctx.fillText(minV.toFixed(2), barX + barW + 3, this.margin.top + ph);
+    ctx.fillText(maxV.toFixed(2), barX + barW + 3, this.vp.margin.top + 8);
+    ctx.fillText(minV.toFixed(2), barX + barW + 3, this.vp.margin.top + ph);
   }
 
   // ─── Interaction ───────────────────────────────────────────────
@@ -689,14 +763,10 @@ export struct PlotCanvas {
 
   /** Actual hover logic — called at most once per 16ms. */
   private _doHover(x: number, y: number): void {
-    if (!this.plotData?.x) return;
-    let minDist = Infinity, closest = -1;
-    for (let i = 0; i < this.plotData.x.length; i++) {
-      const dx = x - this.mapX(this.plotData.x[i]);
-      const dy = y - this.mapY(this.plotData.y![i]);
-      const d = Math.sqrt(dx * dx + dy * dy);
-      if (d < minDist && d < 20) { minDist = d; closest = i; }
-    }
+    if (!this.plotData?.x || !this.plotData.y) return;
+    // One shared hit test instead of a scan duplicated per interaction.
+    const closest = ChartHighlighter.nearestIndex(
+      this.vp, this.plotData.x, this.plotData.y, x, y, PlotCanvas.HOVER_RADIUS);
 
     if (closest !== this.hoveredPoint) {
       this.hoveredPoint = closest;
@@ -721,14 +791,9 @@ export struct PlotCanvas {
 
   /** Shared by mouse click and touch tap: toggle selection of nearest point. */
   private _selectAt(x: number, y: number): void {
-    if (!this.plotData?.x) return;
-    let minDist = Infinity, closest = -1;
-    for (let i = 0; i < this.plotData.x.length; i++) {
-      const dx = x - this.mapX(this.plotData.x[i]);
-      const dy = y - this.mapY(this.plotData.y![i]);
-      const d = Math.sqrt(dx * dx + dy * dy);
-      if (d < minDist && d < 20) { minDist = d; closest = i; }
-    }
+    if (!this.plotData?.x || !this.plotData.y) return;
+    const closest = ChartHighlighter.nearestIndex(
+      this.vp, this.plotData.x, this.plotData.y, x, y, PlotCanvas.HOVER_RADIUS);
     if (closest >= 0) {
       if (this.selectedPoints.has(closest)) {
         this.selectedPoints.delete(closest);
@@ -746,16 +811,15 @@ export struct PlotCanvas {
     if (event.type === TouchType.Down) {
       this.touchStartX = t.x;
       this.touchStartY = t.y;
-      this.touchStartPanX = this.panX;
-      this.touchStartPanY = this.panY;
+      this.touchStartPanX = this.vp.panOffsetX;
+      this.touchStartPanY = this.vp.panOffsetY;
       this.touchMoved = false;
     } else if (event.type === TouchType.Move) {
       const dx = t.x - this.touchStartX;
       const dy = t.y - this.touchStartY;
       if (Math.abs(dx) > 3 || Math.abs(dy) > 3) { this.touchMoved = true; }
       if (this.touchMoved) {
-        this.panX = this.touchStartPanX + dx;
-        this.panY = this.touchStartPanY + dy;
+        this.vp.setPan(this.touchStartPanX + dx, this.touchStartPanY + dy);
         this.redraw();
       }
     } else if (event.type === TouchType.Up) {
@@ -807,6 +871,9 @@ export struct PlotCanvas {
    * Pure string builder for the SVG markup (no I/O).
    */
   private buildSVG(): string {
+    // Same viewport as the Canvas renderer — the exporter must not carry its own
+    // copy of the transform (it used to, and the two could disagree).
+    this.syncPlotSize();
     let svg = '<svg width="' + this.canvasWidth + '" height="' + this.canvasHeight + '" xmlns="http://www.w3.org/2000/svg">';
     svg += '<rect width="100%" height="100%" fill="' + (this.darkMode ? '#1a1a2e' : '#FFFFFF') + '"/>';
 
@@ -816,18 +883,20 @@ export struct PlotCanvas {
     }
 
     // Axes
-    const pw = this.canvasWidth - this.margin.left - this.margin.right;
-    const ph = this.canvasHeight - this.margin.top - this.margin.bottom;
-    svg += '<line x1="' + this.margin.left + '" y1="' + this.margin.top + '" x2="' + this.margin.left + '" y2="' + (this.margin.top + ph) + '" stroke="' + (this.darkMode ? '#ccc' : '#2C3E50') + '" stroke-width="1.5"/>';
-    svg += '<line x1="' + this.margin.left + '" y1="' + (this.margin.top + ph) + '" x2="' + (this.margin.left + pw) + '" y2="' + (this.margin.top + ph) + '" stroke="' + (this.darkMode ? '#ccc' : '#2C3E50') + '" stroke-width="1.5"/>';
+    const pw = this.canvasWidth - this.vp.margin.left - this.vp.margin.right;
+    const ph = this.canvasHeight - this.vp.margin.top - this.vp.margin.bottom;
+    svg += '<line x1="' + this.vp.margin.left + '" y1="' + this.vp.margin.top + '" x2="' + this.vp.margin.left + '" y2="' + (this.vp.margin.top + ph) + '" stroke="' + (this.darkMode ? '#ccc' : '#2C3E50') + '" stroke-width="1.5"/>';
+    svg += '<line x1="' + this.vp.margin.left + '" y1="' + (this.vp.margin.top + ph) + '" x2="' + (this.vp.margin.left + pw) + '" y2="' + (this.vp.margin.top + ph) + '" stroke="' + (this.darkMode ? '#ccc' : '#2C3E50') + '" stroke-width="1.5"/>';
 
-    // Grid lines
+    // Grid lines — horizontal from the Y ticks, vertical from the X ticks.
     svg += '<g stroke="' + (this.darkMode ? '#333' : '#E4E7EB') + '" stroke-width="0.5">';
-    for (let i = 0; i <= 5; i++) {
-      const gy = this.margin.top + (ph * i) / 5;
-      svg += '<line x1="' + this.margin.left + '" y1="' + gy + '" x2="' + (this.margin.left + pw) + '" y2="' + gy + '"/>';
-      const gx = this.margin.left + (pw * i) / 5;
-      svg += '<line x1="' + gx + '" y1="' + this.margin.top + '" x2="' + gx + '" y2="' + (this.margin.top + ph) + '"/>';
+    for (const tick of ChartComputator.yTicks(this.vp, PlotCanvas.TICK_DIVISIONS)) {
+      const gy = tick.pixel;
+      svg += '<line x1="' + this.vp.margin.left + '" y1="' + gy + '" x2="' + (this.vp.margin.left + pw) + '" y2="' + gy + '"/>';
+    }
+    for (const tick of ChartComputator.xTicks(this.vp, PlotCanvas.TICK_DIVISIONS)) {
+      const gx = tick.pixel;
+      svg += '<line x1="' + gx + '" y1="' + this.vp.margin.top + '" x2="' + gx + '" y2="' + (this.vp.margin.top + ph) + '"/>';
     }
     svg += '</g>';
 
@@ -862,9 +931,9 @@ export struct PlotCanvas {
             const gap = pw / this.plotData.labels.length * 0.3;
             const barColors = ['#3498DB', '#E74C3C', '#27AE60', '#F39C12', '#9B59B6'];
             for (let i = 0; i < this.plotData.labels.length; i++) {
-              const x = this.margin.left + (i * (barW + gap)) + gap / 2;
+              const x = this.vp.margin.left + (i * (barW + gap)) + gap / 2;
               const barH = (this.plotData.values[i] / maxVal) * ph;
-              svg += '<rect x="' + x + '" y="' + (this.margin.top + ph - barH) + '" width="' + barW + '" height="' + barH + '" fill="' + barColors[i % barColors.length] + '" opacity="0.8"/>';
+              svg += '<rect x="' + x + '" y="' + (this.vp.margin.top + ph - barH) + '" width="' + barW + '" height="' + barH + '" fill="' + barColors[i % barColors.length] + '" opacity="0.8"/>';
             }
           }
           break;

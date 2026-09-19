@@ -1,28 +1,40 @@
 import { AbilityConstant, UIAbility, Want } from '@kit.AbilityKit';
-import { hilog } from '@kit.PerformanceAnalysisKit';
 import { window, display } from '@kit.ArkUI';
 import { Breakpoints } from '../config/Breakpoint';
+import Logger from '../utils/Logger';
+import { PreferenceManager } from '../utils/PreferenceManager';
+import { HistoryRepository } from '../database/HistoryRepository';
 
 export default class EntryAbility extends UIAbility {
   private windowSizeHandler?: (size: window.Size) => void;
   private mainWindow?: window.Window;
 
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
-    hilog.info(0x0000, 'PaleoAST', 'Ability onCreate');
+    Logger.info('Ability onCreate');
+
+    // Settings first: everything else reads its defaults from AppStorage.
+    PreferenceManager.init(this.context);
+    PreferenceManager.loadAllToAppStorage();
+
+    // The history store opens asynchronously; an analysis that runs before it is
+    // ready simply skips persistence (HistoryRepository.isReady() guards it).
+    HistoryRepository.init(this.context)
+      .then(() => { Logger.info('History store ready'); })
+      .catch((err: Error) => { Logger.error('History store unavailable: ' + err.message); });
   }
 
   onDestroy(): void {
-    hilog.info(0x0000, 'PaleoAST', 'Ability onDestroy');
+    Logger.info('Ability onDestroy');
   }
 
   onWindowStageCreate(windowStage: window.WindowStage): void {
-    hilog.info(0x0000, 'PaleoAST', 'Ability onWindowStageCreate');
+    Logger.info('Ability onWindowStageCreate');
     windowStage.loadContent('pages/Splash', (err) => {
       if (err.code) {
-        hilog.error(0x0000, 'PaleoAST', 'Failed to load content: %{public}s', JSON.stringify(err));
+        Logger.error('Failed to load content: ' + JSON.stringify(err));
         return;
       }
-      hilog.info(0x0000, 'PaleoAST', 'Content loaded successfully');
+      Logger.info('Content loaded successfully');
     });
 
     // ─── Foldable / tri-fold adaptation ─────────────────────────────
@@ -31,7 +43,7 @@ export default class EntryAbility extends UIAbility {
     // to vp using the current display density and publishes to AppStorage.
     windowStage.getMainWindow((err, win) => {
       if (err.code) {
-        hilog.error(0x0000, 'PaleoAST', 'getMainWindow failed: %{public}s', JSON.stringify(err));
+        Logger.error('getMainWindow failed: ' + JSON.stringify(err));
         return;
       }
       this.mainWindow = win;
@@ -43,7 +55,7 @@ export default class EntryAbility extends UIAbility {
         };
         win.on('windowSizeChange', this.windowSizeHandler);
       } catch (e) {
-        hilog.error(0x0000, 'PaleoAST', 'windowSizeChange registration failed: %{public}s', String(e));
+        Logger.error('windowSizeChange registration failed: ' + String(e));
       }
     });
   }
@@ -64,7 +76,7 @@ export default class EntryAbility extends UIAbility {
         /* window already destroyed */
       }
     }
-    hilog.info(0x0000, 'PaleoAST', 'Ability onWindowStageDestroy');
+    Logger.info('Ability onWindowStageDestroy');
   }
 
   /**
@@ -76,7 +88,7 @@ export default class EntryAbility extends UIAbility {
     if (widthPx > 0) {
       Breakpoints.updateWindowWidth(widthPx, this.currentDensity());
     }
-    hilog.info(0x0000, 'PaleoAST', 'Configuration updated');
+    Logger.info('Configuration updated');
   }
 
   onForeground(): void {
@@ -90,10 +102,10 @@ export default class EntryAbility extends UIAbility {
         /* window unavailable */
       }
     }
-    hilog.info(0x0000, 'PaleoAST', 'Ability onForeground');
+    Logger.info('Ability onForeground');
   }
 
   onBackground(): void {
-    hilog.info(0x0000, 'PaleoAST', 'Ability onBackground');
+    Logger.info('Ability onBackground');
   }
 }
