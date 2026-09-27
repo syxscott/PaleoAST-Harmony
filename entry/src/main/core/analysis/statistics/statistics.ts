@@ -1421,10 +1421,41 @@ export function computeDistanceMatrix(data: Matrix, metric: Metric = 'euclidean'
       case 'canberra': { let s = 0; for (let k = 0; k < a.length; k++) { const denom = Math.abs(a[k]) + Math.abs(b[k]); s += denom > 0 ? Math.abs(a[k] - b[k]) / denom : 0; } d = s; break; }
       case 'cityblock': { let s = 0; for (let k = 0; k < a.length; k++) s += Math.abs(a[k] - b[k]); d = s; break; }
       case 'hamming': { let s = 0; for (let k = 0; k < a.length; k++) if (a[k] !== b[k]) s++; d = s / a.length; break; }
-      // Chebychev (L-infinity) distance — port of Python distance_metrics.py
-      // 'chebychev' metric: d = max_k |x_ik - x_jk|
-      case 'chebychev': { let mx = 0; for (let k = 0; k < a.length; k++) mx = Math.max(mx, Math.abs(a[k] - b[k])); d = mx; break; }
-      default: { let s = 0; for (let k = 0; k < a.length; k++) s += (a[k] - b[k]) ** 2; d = Math.sqrt(s); }
+      // Pearson correlation distance (1 - r), the standard "correlation" measure
+      // in the multivariate literature. This case did not exist at all before,
+      // so `Metric` advertised 'correlation' but every call silently fell through
+      // to the default and returned the EUCLIDEAN matrix — a PCoA / NMDS /
+      // ANOSIM / PERMANOVA run would produce a plausible-looking ordination of the
+      // wrong geometry with no error anywhere.
+      case 'correlation': {
+        const n = a.length;
+        let ma = 0, mb = 0;
+        for (let k = 0; k < n; k++) { ma += a[k]; mb += b[k]; }
+        ma /= n; mb /= n;
+        let sab = 0, saa = 0, sbb = 0;
+        for (let k = 0; k < n; k++) { const da = a[k] - ma, db = b[k] - mb; sab += da * db; saa += da * da; sbb += db * db; }
+        const den = Math.sqrt(saa * sbb);
+        d = den > 0 ? 1 - sab / den : 0;
+        break;
+      }
+      // Chebyshev (L-infinity) distance — port of Python distance_metrics.py
+      // d = max_k |x_ik - x_jk|
+      //
+      // The case label used to read 'chebychev' (a misspelling that also leaked
+      // into the comment above it). `Metric` declares 'chebyshev', so no call
+      // ever matched and every Chebyshev request silently received the Euclidean
+      // matrix from `default` — the same class of silent substitution as the
+      // missing 'correlation' case.
+      case 'chebyshev': { let mx = 0; for (let k = 0; k < a.length; k++) mx = Math.max(mx, Math.abs(a[k] - b[k])); d = mx; break; }
+      case 'euclidean': { let s = 0; for (let k = 0; k < a.length; k++) s += (a[k] - b[k]) ** 2; d = Math.sqrt(s); break; }
+      default: {
+        // Deliberately loud. A silent `default` is precisely what hid the
+        // 'chebychev' typo and the missing 'correlation' case: an unrecognised or
+        // misspelled metric produced a perfectly well-formed distance matrix of
+        // the wrong kind. An unknown metric must fail, not fall back
+        // (docs/code-style.md: a wrong number is worse than an error).
+        throw new Error('computeDistanceMatrix: unknown metric "' + String(metric) + '"');
+      }
     }
     D.set(i, j, d); D.set(j, i, d);
   }
