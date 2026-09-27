@@ -54,6 +54,19 @@ this.addWidget(name);
 同一个 `recordAnalysis(name, {})` 也在 `try` 之前调用,
 所以这 18 次没发生的运行同样被写进持久化历史和导出的可复现脚本。
 
+## 根因
+
+两处都是同一个奇式:把一个只应在**67b9个 case 中**u751f效的动作,提到了分支之前或之后。
+
+- `requireGroups()` 写在 `switch` 之前。改开头一个 switch 就是最容易的,而位于开头也容易被误认为"marker"。写法上两个函数不一致正是病法:对话盒路径正确地逐 case 内联,快捷路径提到了顶部。
+- 18 个 case 以 `break;` 结尾。换成 `return;` 才能阻止控制流继续下跌,
+  而作者看到的是下一行说的 `break`——它看起来完全正常。
+
+真正的根因是**没有机械导演可以找到这类错误**。当前三个门禁都不能看见它:
+单测只加载 `core/**`,接线检查只扫描标识符名,结构检查只数括号。
+新增的 `etsDispatch` / `etsSyntax` 两个套件补上了这个盲区,
+且它们自己先被验证过(对照 TypeScript parser、对照修复前版本)u3002
+
 ## 修复
 
 1. `runQuickAnalysisCore`:删掉顶部提升的 `const groups = ...`,
