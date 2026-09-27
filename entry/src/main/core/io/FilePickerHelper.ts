@@ -42,8 +42,16 @@ export class FilePickerHelper {
    */
   static async saveBinary(bytes: ArrayBuffer | Uint8Array, suggestedName: string): Promise<string | null> {
     const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+    // `new Uint8Array(arrayBuffer)` is a VIEW, not a copy, and a subarray shares
+    // its parent's buffer -- so `view.buffer` can be larger than the data. The
+    // old code wrote that whole buffer, appending the trailing bytes to the
+    // file: a 3-byte PNG taken as `packed.subarray(0, 3)` out of an 8-byte
+    // buffer wrote 8 bytes. Copy into an exactly-sized buffer instead of
+    // relying on an offset/length overload of fs.writeSync.
+    const exact = new Uint8Array(view.byteLength);
+    exact.set(view);
     return FilePickerHelper.writeViaPicker(
-      (fd: number) => { fs.writeSync(fd, view.buffer); },
+      (fd: number) => { fs.writeSync(fd, exact.buffer); },
       suggestedName,
     );
   }
