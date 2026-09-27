@@ -216,6 +216,15 @@ export class StateManager {
     this._m = false;
     this._u = [];
     this._r = [];
+    // The command-level stacks must go too. They used to survive a clear, so
+    // `canUndoCommand` stayed true after the dataset was discarded and
+    // `undoCommand()` popped a snapshot of a matrix that no longer existed —
+    // it returned null only because the `!this._d` guard caught it, which means
+    // the stale entry was silently consumed and the rest of the stack came back
+    // out of order. setData() already cleared all four; clearData() is the
+    // same operation and now behaves identically.
+    this._cmdUndo = [];
+    this._cmdRedo = [];
   }
 
   markModified(): void { this._m = true; }

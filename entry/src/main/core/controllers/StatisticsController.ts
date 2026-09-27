@@ -72,8 +72,15 @@ export class StatisticsController {
 
   // ─── Multivariate ──────────────────────────────────────────────
 
-  runPCA(nc?: number, method: string = 'covariance') {
-    const result = pca(this.getData(), nc, method as any);
+  runPCA(nc?: number, method: 'covariance' | 'correlation' = 'covariance') {
+    // `pca`'s third parameter is `scale: boolean`, not the method name. This
+    // used to call `pca(this.getData(), nc, method as any)`, so the method
+    // STRING landed in the boolean slot. A non-empty string is always truthy,
+    // so `scale` was permanently true and the real `method` argument (fourth)
+    // was never supplied — every PCA through this controller ran on the
+    // correlation matrix, and the dialog's covariance/correlation selector did
+    // nothing. Pass both positions explicitly.
+    const result = pca(this.getData(), nc, method === 'correlation', method);
     this.state.cacheResult('pca_result', result);
     return result;
   }

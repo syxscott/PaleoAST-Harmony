@@ -1,5 +1,6 @@
 import { Matrix } from "../math/Matrix";
 import * as linalg from "../math/linalg";
+import { createSeededRNG } from "../math/random";
 export type DistanceMetric = "euclidean" | "bray_curtis" | "cosine" | "jaccard" | "canberra" | "cityblock" | "correlation" | "hamming";
 export function pairwiseDistance(a: number[], b: number[], metric: DistanceMetric = "euclidean"): number {
   switch (metric) {
@@ -19,7 +20,52 @@ export function computeDistanceMatrix(X: Matrix, metric: DistanceMetric = "eucli
 }
 export function cdist(X:Matrix,Y:Matrix,metric:DistanceMetric="euclidean"):Matrix {const m=X.rows,n=Y.rows,D=Matrix.zeros(m,n);for(let i=0;i<m;i++)for(let j=0;j<n;j++)D.set(i,j,pairwiseDistance(X.row(i),Y.row(j),metric));return D;}
 export function pdist(X:Matrix,metric:DistanceMetric="euclidean"):number[] {const n=X.rows,r:number[]=[];for(let i=0;i<n;i++)for(let j=i+1;j<n;j++)r.push(pairwiseDistance(X.row(i),X.row(j),metric));return r;}
-export function mantelTest(D1:Matrix,D2:Matrix,nPerm=999):{r:number;pValue:number} {const n=D1.rows;const u1:number[]=[],u2:number[]=[];for(let i=0;i<n;i++)for(let j=i+1;j<n;j++){u1.push(D1.get(i,j));u2.push(D2.get(i,j));}const m=u1.length;const mx=u1.reduce((a,b)=>a+b,0)/m;const my=u2.reduce((a,b)=>a+b,0)/m;let num=0,dx2=0,dy2=0;for(let i=0;i<m;i++){const dx=u1[i]-mx,dy=u2[i]-my;num+=dx*dy;dx2+=dx*dx;dy2+=dy*dy;}const r=Math.sqrt(dx2*dy2)>0?num/Math.sqrt(dx2*dy2):0;let cnt=0;for(let p=0;p<nPerm;p++){const perm=Array.from({length:n},(_,i)=>i);for(let i=n-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[perm[i],perm[j]]=[perm[j],perm[i]];}const u2p:number[]=[];for(let i=0;i<n;i++)for(let j=i+1;j<n;j++)u2p.push(D2.get(perm[i],perm[j]));const myp=u2p.reduce((a,b)=>a+b,0)/m;let np=0,dy2p=0;for(let i=0;i<m;i++){const dx=u1[i]-mx,dy=u2p[i]-myp;np+=dx*dy;dy2p+=dy*dy;}const rp=Math.sqrt(dx2*dy2p)>0?np/Math.sqrt(dx2*dy2p):0;if(rp>=r)cnt++;}return{r,pValue:cnt/nPerm};}
+/**
+ * Mantel test: correlation between two distance matrices, with a permutation
+ * null.
+ *
+ * Two defects used to live in the one-line version of this function:
+ *   1. The permutations were drawn with `Math.random()`. AGENTS.md and
+ *      docs/code-style.md 1.1 make an unseeded RNG a defect in analysis code,
+ *      because the published p-value then cannot be reproduced. The 999
+ *      permutations differed on every call, so the same data gave a different
+ *      p each time.
+ *   2. `pValue = cnt / nPerm` can return exactly 0. The project already applies
+ *      the Phipson & Smyth (2010) correction elsewhere — there is a unit test
+ *      named "phyloANOVA uses the Phipson correction like its sibling tests" —
+ *      so the formula is `(cnt + 1) / (nPerm + 1)`, which keeps p strictly
+ *      positive and never reports an impossible "probability zero".
+ *
+ * @param rngSeed seed for the permutation RNG (default 42, repo convention).
+ */
+export function mantelTest(D1: Matrix, D2: Matrix, nPerm = 999, rngSeed: number = 42): { r: number; pValue: number } {
+  const n = D1.rows;
+  const u1: number[] = [], u2: number[] = [];
+  for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) { u1.push(D1.get(i, j)); u2.push(D2.get(i, j)); }
+  const m = u1.length;
+  if (m === 0) return { r: 0, pValue: 1 };
+  const mx = u1.reduce((a, b) => a + b, 0) / m;
+  let num = 0, dx2 = 0;
+  for (let i = 0; i < m; i++) { const dx = u1[i] - mx, dy = u2[i] - u1.reduce((a, b) => a + b, 0) / m; num += dx * dy; dx2 += dx * dx; }
+  let sy = 0; const my = u2.reduce((a, b) => a + b, 0) / m;
+  for (let i = 0; i < m; i++) { const dy = u2[i] - my; sy += dy * dy; }
+  const r = Math.sqrt(dx2 * sy) > 0 ? num / Math.sqrt(dx2 * sy) : 0;
+
+  const rng = createSeededRNG(rngSeed);
+  let cnt = 0;
+  for (let p = 0; p < nPerm; p++) {
+    const perm = Array.from({ length: n }, (_, i) => i);
+    for (let i = n - 1; i > 0; i--) { const j = Math.floor(rng() * (i + 1));[perm[i], perm[j]] = [perm[j], perm[i]]; }
+    const u2p: number[] = [];
+    for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) u2p.push(D2.get(perm[i], perm[j]));
+    const myp = u2p.reduce((a, b) => a + b, 0) / m;
+    let np = 0, dy2p = 0;
+    for (let i = 0; i < m; i++) { const dx = u1[i] - mx, dy = u2p[i] - myp; np += dx * dy; dy2p += dy * dy; }
+    const rp = Math.sqrt(dx2 * dy2p) > 0 ? np / Math.sqrt(dx2 * dy2p) : 0;
+    if (rp >= r) cnt++;
+  }
+  return { r, pValue: (cnt + 1) / (nPerm + 1) };
+}
 export function normalizeMatrix(X:Matrix):Matrix {const mins=new Float64Array(X.cols),maxs=new Float64Array(X.cols);for(let j=0;j<X.cols;j++){mins[j]=Infinity;maxs[j]=-Infinity;for(let i=0;i<X.rows;i++){mins[j]=Math.min(mins[j],X.get(i,j));maxs[j]=Math.max(maxs[j],X.get(i,j));}}const d=new Float64Array(X.length);for(let i=0;i<X.rows;i++)for(let j=0;j<X.cols;j++)d[i*X.cols+j]=maxs[j]>mins[j]?(X.get(i,j)-mins[j])/(maxs[j]-mins[j]):0;return new Matrix(d,X.rows,X.cols);}
 export function countNaN(X:Matrix):number{let c=0;for(let i=0;i<X.length;i++)if(isNaN(X.data[i]))c++;return c;}
 export function rowSums(X:Matrix):number[]{return X.sumAxis(1).toArray();}

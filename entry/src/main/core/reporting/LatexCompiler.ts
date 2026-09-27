@@ -267,7 +267,7 @@ function formatPValue(p: number): string {
  * a single `\` into `\textbackslash\{\}`. Backslash, tilde and caret also need
  * their macros rather than a prefixed backslash (`\~` and `\^` are accents).
  */
-function escapeLatex(s: string | undefined | null): string {
+export function escapeLatex(s: string | undefined | null): string {
   // `CompileOptions` fields are all optional, so opts.title / caption / label can
   // legitimately arrive undefined. Iterating them threw
   // "TypeError: s is not iterable" and aborted the whole compile.

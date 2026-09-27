@@ -2,7 +2,7 @@
  * Macroevolution analysis — replaces macroevolution/*.py
  */
 import { PhyloNode, pic } from '../phylogenetics/phylogenetics';
-import { seed as seedRng, rand } from '../../math/random';
+import { seed as seedRng, rand, poisson } from '../../math/random';
 
 /**
  * Cohort survivorship analysis (Foote 1999).
@@ -44,28 +44,59 @@ export function cohortSurvivorship(
   };
 
   for (const [tStart, tEnd] of intervals) {
-    // Half-open cohort counting (older boundary tStart exclusive of records
-    // beginning exactly at the boundary of the previous interval):
-    // nBt = backward persistence (in interval, known before)
-    // nBl = backward extinction = originated within the interval
-    // nFt = forward persistence (survived past tEnd)
-    // nFl = forward extinction = last seen within the interval
+    // Time orientation: ages increase into the past, so tStart is the YOUNG
+    // (youngest) boundary and tEnd the OLD one, giving tStart > tEnd. The
+    // positive interval duration below is `dt = tStart - tEnd`, which is why
+    // the record tests are written against that ordering.
+    //
+    // The Python original (macroevolution/cohort.py) uses the mirrored
+    // convention — there t_start < t_end — so its predicates are written
+    // `o > t_end` for "started before" and `L <= t_start` for "ended after".
+    // The previous ArkTS translation flipped the bounds but not the operators,
+    // which made the two boundary-crosser branches unsatisfiable:
+    //   nFB: `o >= tStart && o < tEnd`  — impossible when tStart > tEnd
+    //   nLB: `tStart <= L && L < tEnd`  — likewise impossible
+    // So nFB and nLB were always 0, every taxon that touched the interval was
+    // counted as a survivor, and the whole cohort analysis was degenerate. The
+    // predicates below are the same four cases as the Python, re-expressed for
+    // the young/old ordering this port uses.
+    //
+    //   nSurv  through-timer : existed before, survived past the young boundary
+    //   nLB    backward crosser: existed before, went extinct inside
+    //   nFB    forward crosser : originated inside, survived past
+    //           (both)        : originated and went extinct inside
+    // Taxa lying entirely before or entirely after the interval are not counted.
     let nFB = 0, nLB = 0, nSurv = 0;
     let nBt = 0, nBl = 0, nFt = 0, nFl = 0;
     for (const [o, L] of fossilRecords) {
-      const inInterval = o <= tStart && L >= tEnd;
-      const knownBefore = o < tStart;
-      const survivesAfter = L > tEnd;
-      if (inInterval) {
-        nSurv++;
-        if (knownBefore) nBt++;
-        if (survivesAfter) nFt++;
-        if (!knownBefore) nBl++;
-        if (!survivesAfter) nFl++;
-      } else if (o >= tStart && o < tEnd && L >= tEnd) nFB++;
-      else if (tStart <= L && L < tEnd && o < tStart) nLB++;
+      // The three origin bands must partition, so "before" has to be measured
+      // against the bin's YOUNG boundary (`o > tStart`) and "after" against its
+      // OLD one (`o < tEnd`). Writing `startedBefore = o > tEnd` — as the
+      // previous version did — overlaps the interval itself, so every taxon
+      // born inside the bin was classified as predating it.
+      const startedBefore = o > tStart;
+      const startedIn = o <= tStart && o >= tEnd;
+      const endedAfter = L >= tStart;
+      const endedIn = L < tStart && L >= tEnd;
+      if (startedBefore && endedAfter) {
+        nSurv++; nBt++; nFt++;
+      } else if (startedBefore && endedIn) {
+        nLB++; nBt++; nFl++;
+      } else if (startedIn && endedAfter) {
+        nFB++; nBl++; nFt++;
+      } else if (startedIn && endedIn) {
+        nBl++; nFl++;
+      }
     }
-    const nTotal = nSurv;
+    // The cohort total is every taxon that touched the interval — the
+    // survivors plus BOTH boundary crossers. This line previously read
+    // `const nTotal = nSurv;`, which dropped nFB and nLB and made
+    // `p = nSurv / nTotal` identically 1 for every interval and every input:
+    // survivalRates came out as all 1, originationRates and extinctionRates as
+    // all 0, rateRatio as all NaN, and the Wilson interval collapsed to [1, 1].
+    // The Python original (macroevolution/cohort.py) states it as
+    // `n_total = n_fb + n_lb + n_surv`.
+    const nTotal = nFB + nLB + nSurv;
     results.intervals.push({ tStart, tEnd, nFB, nLB, nSurv });
     results.nBt.push(nBt); results.nBl.push(nBl); results.nFt.push(nFt); results.nFl.push(nFl);
 
@@ -622,8 +653,8 @@ export function simulateNeutral(nTaxa: number, duration: number, specRate = 0.1,
 
   for (let i = 1; i < nSteps; i++) {
     times[i] = i * dt;
-    const births = poisson_sim(specRate * N * dt);
-    const deaths = Math.min(N, poisson_sim(extRate * N * dt));
+    const births = poisson(specRate * N * dt);
+    const deaths = Math.min(N, poisson(extRate * N * dt));
     N = Math.max(0, N + births - deaths);
     richness[i] = N;
     origRates[i] = births / (N * dt + 1e-10);
@@ -631,16 +662,6 @@ export function simulateNeutral(nTaxa: number, duration: number, specRate = 0.1,
   }
 
   return { times, richness, originationRates: origRates, extinctionRates: extRates };
-}
-
-function poisson_sim(lambda: number): number {
-  // Knuth's Poisson sampler driven by the repo's SEEDED generator. It used
-  // Math.random(), so simulateNeutral() produced a different trajectory on
-  // every run and could not be reproduced (or published).
-  const L = Math.exp(-lambda);
-  let k = 0, p = 1;
-  do { k++; p *= rand(); } while (p > L);
-  return k - 1;
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -966,41 +987,66 @@ export function fitOU(
     }
   }
 
-  // Newton-Raphson refinement (3 parameters: alpha, sigma2, theta)
-  const maxIter = options?.maxIter ?? 100;
-  const tol = options?.tol ?? 1e-6;
   let [alpha, sigma2, theta] = bestParams;
 
+  // Local refinement by Nelder-Mead simplex on the 3 free parameters.
+  //
+  // This block used to be labelled "Newton-Raphson refinement" but was a
+  // fixed-step gradient descent: stepSize was hard-coded to 0.001 and the loop
+  // `break`ed unconditionally the first time a step failed to improve, so it
+  // performed at most two iterations no matter what `maxIter` was set to. The
+  // reported fit was therefore just the coarse grid point, with a comment
+  // promising a refinement that never happened.
+  //
+  // Nelder-Mead needs no derivatives, so it is a better fit for a numerically
+  // differenced likelihood than quasi-Newton would be here, and it reports a
+  // real convergence flag.
+  const maxIter = options?.maxIter ?? 200;
+  const tol = options?.tol ?? 1e-8;
+  // Sort the simplex in place, lowest negative-log-likelihood first.
+  const sortSimplex = (): void => {
+    const idx = simplex.map((_, i) => i).sort((a, b) => fv[a] - fv[b]);
+    simplex = idx.map(i => simplex[i]);
+    fv = idx.map(i => fv[i]);
+  };
+  let simplex: number[][] = [
+    [alpha, sigma2, theta],
+    [alpha * 1.1 + 1e-4, sigma2, theta],
+    [alpha, sigma2 * 1.1 + 1e-8, theta],
+    [alpha, sigma2, theta + 1e-4],
+  ].map(p => p.map((v, i) => (i === 0 ? Math.max(1e-6, v) : v)));
+  let fv: number[] = simplex.map(p => negLogLik(p));
+  sortSimplex();
   for (let iter = 0; iter < maxIter; iter++) {
-    // Numerical gradient
-    const eps = 1e-5;
-    const grad: number[] = [];
-    const params = [alpha, sigma2, theta];
-    const baseNLL = negLogLik(params);
-    for (let i = 0; i < 3; i++) {
-      const p = [...params];
-      p[i] += eps;
-      grad.push((negLogLik(p) - baseNLL) / eps);
-    }
-
-    // Simple gradient descent step (Hessian is complex to compute numerically)
-    const stepSize = 0.001;
-    const newParams = params.map((p, i) => Math.max(1e-6, p - stepSize * grad[i]));
-    const newNLL = negLogLik(newParams);
-
-    if (newNLL < baseNLL) {
-      [alpha, sigma2, theta] = newParams;
-      if (Math.abs(newNLL - baseNLL) < tol) break;
+    const centroid = [0, 1, 2].map(j => (simplex[0][j] + simplex[1][j] + simplex[2][j]) / 3);
+    const worst = simplex[3];
+    const reflect = centroid.map((c, j) => c + 1.0 * (c - worst[j]));
+    const fr = negLogLik(reflect);
+    if (fv[0] <= fr && fr < fv[2]) {
+      simplex[3] = reflect; fv[3] = fr;
+    } else if (fr < fv[0]) {
+      const expand = centroid.map((c, j) => c + 2.0 * (c - worst[j]));
+      const fe = negLogLik(expand);
+      if (fe < fr) { simplex[3] = expand; fv[3] = fe; }
+      else { simplex[3] = reflect; fv[3] = fr; }
     } else {
-      // Try smaller step
-      const smallStep = newParams.map((p, i) => params[i] + 0.1 * (p - params[i]));
-      const smallerNLL = negLogLik(smallStep);
-      if (smallerNLL < baseNLL) {
-        [alpha, sigma2, theta] = smallStep;
+      const contract = fr < fv[3]
+        ? centroid.map((c, j) => c + 0.5 * (c - worst[j]))
+        : centroid.map((c, j) => c - 0.5 * (c - worst[j]));
+      const fc = negLogLik(contract);
+      if (fc < Math.min(fr, fv[3])) { simplex[3] = contract; fv[3] = fc; }
+      else {
+        for (let i = 1; i < 4; i++) {
+          simplex[i] = simplex[i].map((v, j) => simplex[0][j] + 0.5 * (v - simplex[0][j]));
+          fv[i] = negLogLik(simplex[i]);
+        }
       }
-      break;
     }
+    if (Math.abs(fv[3] - fv[0]) <= tol * (Math.abs(fv[0]) + tol)) break;
+    sortSimplex();
   }
+  sortSimplex();
+  [alpha, sigma2, theta] = simplex[0];
 
   const finalNLL = negLogLik([alpha, sigma2, theta]);
   const k = 3; // number of parameters

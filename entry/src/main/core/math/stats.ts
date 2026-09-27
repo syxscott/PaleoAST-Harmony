@@ -214,6 +214,20 @@ export function gammainc(s: number, x: number): number {
     return sum * Math.exp(-x + s * Math.log(x) - lgamma(s));
   }
   // Continued fraction (Lentz's method) — computes Q(s, x); P = 1 - Q
+  //
+  // NR3 Sec 6.2 `gcf` sets `an = -i * (i - a)` (equivalently `i * (a - i)`).
+  // That sign is easy to get backwards, so note it: for (s, x) = (2, 3) the i=1
+  // coefficient is +1, and the accumulated h must come out 0.44444 so that
+  // Q(2,3) = h·exp(−x + s·ln x − Γ(s)) = 0.19915.
+  //
+  // The real defect here was the convergence factor: it read `delta = d * h`,
+  // i.e. the accumulator squared, so the loop ran to the iteration cap and
+  // returned garbage. NR3 Eq. 6.2.14 uses `del = d * c`. With `d * h` the
+  // result collapsed to ~1 for every x above the series/CF crossover, which
+  // silently destroyed every chi-square p-value (Kruskal-Wallis reported
+  // p = 0 exactly; Pagel lambda's LRT reported 1).
+  //
+  // c starts at 1/FPMIN (1e300), NOT FPMIN: the first `an / c` must be ~0.
   let b = x + 1 - s, c = 1e300, d = 1 / b, h = d;
   for (let i = 1; i < 200; i++) {
     const an = -i * (i - s);
@@ -221,7 +235,7 @@ export function gammainc(s: number, x: number): number {
     d = an * d + b; if (Math.abs(d) < 1e-300) d = 1e-300;
     c = b + an / c; if (Math.abs(c) < 1e-300) c = 1e-300;
     d = 1 / d;
-    const delta = d * h;
+    const delta = d * c;
     h *= delta;
     if (Math.abs(delta - 1) < 1e-15) break;
   }
@@ -271,15 +285,47 @@ export function pF(f: number, d1: number, d2: number): number {
 function betaincRegularized(a: number, b: number, x: number): number {
   if (x <= 0) return 0;
   if (x >= 1) return 1;
-  const lbeta_val = lgamma(a) + lgamma(b) - lgamma(a + b);
-  const front = Math.exp(a * Math.log(x) + b * Math.log(1 - x) - lbeta_val) / a;
-  let term = 1, sum = 1;
-  for (let i = 1; i < 200; i++) {
-    term *= (a + i - 1) * x / (i * (a + i));
-    sum += term;
-    if (term < 1e-15 * sum) break;
+  const front = Math.exp(lgamma(a + b) - lgamma(a) - lgamma(b)
+    + a * Math.log(x) + b * Math.log(1 - x));
+  // NR3 Eq. 6.4.7: evaluate the continued fraction on whichever side of
+  // x = (a+1)/(a+b+2) converges, and reflect when x is on the far side.
+  //
+  // The previous version applied one small-x POWER SERIES unconditionally. That
+  // series is only convergent below the crossover, so above it the `exp(b·ln(1−x))`
+  // prefactor collapsed toward zero and the result DECREASED as x increased —
+  // the exact opposite of I_x, which rises to 1. Measured against scipy for
+  // (a,b) = (1.5, 6): I_0.1 was 0.2094 instead of 0.0047, and I_0.5 was
+  // 0.0882 instead of 0.9654. Because pF() and pchisq() both funnel through
+  // here, this made ANOVA report p = 0.99999 with `significant: false` for
+  // three perfectly separated groups (scipy: p = 9.47e-07), and made
+  // Kruskal-Wallis report p = 0 exactly (scipy: 0.00193).
+  if (x < (a + 1) / (a + b + 2)) {
+    return betacf(a, b, x) * front / a;
   }
-  return Math.min(1, Math.max(0, front * sum));
+  return 1 - betacf(b, a, 1 - x) * front / b;
+}
+
+/** Continued fraction for the incomplete beta (Lentz's method, NR3 Sec 6.4). */
+function betacf(a: number, b: number, x: number): number {
+  const qab = a + b, qap = a + 1, qam = a - 1;
+  let c = 1, d = 1 - qab * x / qap;
+  if (Math.abs(d) < 1e-30) d = 1e-30;
+  d = 1 / d;
+  let h = d;
+  for (let m = 1; m <= 200; m++) {
+    const m2 = 2 * m;
+    let aa = m * (b - m) * x / ((qam + m2) * (a + m2));
+    d = 1 + aa * d; if (Math.abs(d) < 1e-30) d = 1e-30; d = 1 / d;
+    c = 1 + aa / c; if (Math.abs(c) < 1e-30) c = 1e-30;
+    h *= d * c;
+    aa = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2));
+    d = 1 + aa * d; if (Math.abs(d) < 1e-30) d = 1e-30; d = 1 / d;
+    c = 1 + aa / c; if (Math.abs(c) < 1e-30) c = 1e-30;
+    const delta = d * c;
+    h *= delta;
+    if (Math.abs(delta - 1) < 1e-14) break;
+  }
+  return h;
 }
 
 /**

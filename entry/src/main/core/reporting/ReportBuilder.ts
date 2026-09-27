@@ -3,6 +3,7 @@
  * Generates reports in Markdown/LaTeX/HTML formats.
  */
 import { LATEX_PREAMBLE } from './latexPreamble';
+import { escapeLatex } from './LatexCompiler';
 
 export enum SectionType {
   TITLE = 'title',
@@ -374,11 +375,30 @@ export class ReportBuilder {
   }
 
   private _escapeHTML(s: string): string {
-    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
 
+  /**
+   * LaTeX escaping.
+   *
+   * This used to be a single regex: `s.replace(/[\\$%&_{}#^~]/g, c => '\\' + c)`.
+   * That is wrong for the three characters LaTeX treats as commands rather than
+   * literals, and the damage is silent because the document still compiles:
+   *   `\` -> `\\`  becomes a LINE BREAK, so a title containing a path is split
+   *   `~` -> `\~`  becomes a non-breaking-space ACCENT over the next letter
+   *   `^` -> `\^`  becomes a circumflex ACCENT over the next letter
+   * Confirmed by compiling both variants with pdflatex and reading the PDF back
+   * with pdftotext: the repository version rendered "tilde~here" as
+   * "tildeh̃ere" and "caret^up" as "caretûp".
+   *
+   * The correct escapes are \textbackslash{}, \textasciitilde{} and
+   * \textasciicircum{}. LatexCompiler.escapeLatex already did this properly, so
+   * per docs/code-style.md 1.4 both call sites now share that one function
+   * instead of keeping two copies that drifted apart.
+   */
   private _escapeLaTeX(s: string): string {
-    return s.replace(/[\\$%&_{}#^~]/g, c => `\\${c}`);
+    return escapeLatex(s);
   }
 
   // ─── Table helpers ────────────────────────────────────────────────────────────

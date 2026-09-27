@@ -280,6 +280,12 @@ export class PhyloNode {
     for (let s = 0; s < nSites; s++) {
       const states: Record<string, string> = {};
       for (const name of taxa) states[name] = sequences[name][s];
+      // Fitch down-pass; the step is charged at the union (see the comment on
+      // the free function `fitchParsimony` below for why an upward pass against
+      // the parent's set can never register a change). `treeLength` used to come
+      // out 0 for every input, which pinned the consistency and retention
+      // indices to 1 through their `treeLength === 0` guards.
+      let changes = 0;
       const nodeStates = new Map<PhyloNode, Set<string>>();
 
       const fitchDown = (node: PhyloNode): Set<string> => {
@@ -287,26 +293,13 @@ export class PhyloNode {
         const childSets = node.children.map(c => fitchDown(c));
         let intersection = new Set(childSets[0]);
         for (let i = 1; i < childSets.length; i++) { const ni = new Set<string>(); for (const x of intersection) if (childSets[i].has(x)) ni.add(x); intersection = ni; }
-        const result = intersection.size > 0 ? intersection : new Set(childSets.flatMap(s => [...s]));
+        if (intersection.size > 0) { nodeStates.set(node, intersection); return intersection; }
+        changes++;                                   // one union == one step
+        const result = new Set(childSets.flatMap(s => [...s]));
         nodeStates.set(node, result);
         return result;
       };
       fitchDown(this);
-
-      let changes = 0;
-      const countChanges = (node: PhyloNode) => {
-        for (const child of node.children) {
-          const ps = nodeStates.get(node)!, cs = nodeStates.get(child)!;
-          let overlap = false;
-          for (const x of cs) if (ps.has(x)) { overlap = true; break; }
-          if (!overlap) {
-            // Count elements in childSet not in parentSet
-            for (const x of cs) if (!ps.has(x)) changes++;
-          }
-          countChanges(child);
-        }
-      };
-      countChanges(this);
       siteScores.push(changes);
     }
     return { treeLength: siteScores.reduce((a, b) => a + b, 0), siteScores };
@@ -454,7 +447,21 @@ export function fitchParsimony(
       states[name] = gapAsMissing && missingChars.has(raw) ? '?' : raw;
     }
 
-    // Fitch down-pass
+    // Fitch down-pass. The step counter is incremented HERE, at the point where
+    // the children's sets fail to intersect — that union is the one event
+    // Fitch charges for.
+    //
+    // The score used to be tallied in a separate upward pass that compared each
+    // child's set against its parent's. That comparison can never fire: a
+    // parent's set is by construction either the intersection of its children's
+    // (so a subset of each child) or, when that is empty, the union (so a
+    // superset of each child). Either way the parent set always contains the
+    // child's non-empty set, so `overlap` was true on every edge and
+    // `treeLength` came out 0 for EVERY input. Verified: 0/1/0/1 and 0/1/2/3 on
+    // ((A,B),(C,D)) both returned treeLength 0 where the true Fitch score is 2,
+    // and the consistency / retention indices were pinned to 1 by their
+    // `treeLength === 0` guards.
+    let changes = 0;
     const nodeStates = new Map<PhyloNode, Set<string>>();
     function fitchDown(node: PhyloNode): Set<string> {
       if (node.isLeaf) {
@@ -469,25 +476,17 @@ export function fitchParsimony(
         for (const st of intersection) if (childSets[i].has(st)) newInter.add(st);
         intersection = newInter;
       }
-      const result = intersection.size > 0 ? intersection : new Set(childSets.flatMap(st => [...st]));
+      if (intersection.size > 0) {
+        nodeStates.set(node, intersection);
+        return intersection;
+      }
+      changes++;                                   // one union == one step
+      const result = new Set(childSets.flatMap(st => [...st]));
       nodeStates.set(node, result);
       return result;
     }
     fitchDown(tree);
 
-    // Count changes
-    let changes = 0;
-    function countChanges(node: PhyloNode): void {
-      for (const child of node.children) {
-        const parentStates = nodeStates.get(node)!;
-        const childStates = nodeStates.get(child)!;
-        let hasOverlap = false;
-        for (const st of childStates) if (parentStates.has(st)) { hasOverlap = true; break; }
-        if (!hasOverlap) changes++;
-        countChanges(child);
-      }
-    }
-    countChanges(tree);
     siteScores.push(changes);
 
     // Ancestral state reconstruction: assign each internal node a state set,
