@@ -23,7 +23,7 @@ export struct PhyloSignalDialog {
   build() {
     Column() {
       Text("Phylo Signal").fontSize(18).fontWeight(FontWeight.Bold).margin({ bottom: 16 })
-      Row() { Text("Permutations:").width(140).fontSize(13); TextInput({ text: String(this.n_randomizations) }).width(100).type(InputType.Number).onChange((v: string) => { this.n_randomizations = parseInt(v) || 999; }) }.width("100%").margin({ bottom: 8 })
+      Row() { Text("Permutations:").width(140).fontSize(13); TextInput({ text: String(this.n_randomizations) }).width(100).type(InputType.Number).onChange((v: string) => { this.n_randomizations = Math.max(99, Math.min(9999, parseInt(v) || 999)); }) }.width("100%").margin({ bottom: 8 })
             Row() { Text("[+] Tips").fontSize(11).fontColor("#3498DB").onClick(() => { this.showTips = !this.showTips; }) }.width("100%").margin({ bottom: 8 })
       if (this.showTips) { Column() {
           Text("K ~ 1: BM").fontSize(10).fontColor("#7F8C8D").margin({ bottom: 2 })

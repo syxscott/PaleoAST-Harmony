@@ -18,6 +18,7 @@ import './ets2026.test.ts';
 import './etsSyntax.test.ts';
 import './etsDispatch.test.ts';
 import './componentCount2026.test.ts';
+import './permutationCount2026.test.ts';
 import './history2026.test.ts';
 
 const ok = await runAll();

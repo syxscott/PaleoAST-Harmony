@@ -602,15 +602,18 @@ export function anosim(distMatrix: Matrix, groups: number[], nPermutations: numb
   requireUsableGroups(groups, n, 'anosim');
   const R_obs = computeR(distMatrix, groups, n);
 
+  // A negative count would skip the loop and make (count + 1) / (n + 1)
+  // report a p-value for a test that never ran.
+  const nPerm = Math.max(1, Math.floor(nPermutations));
   let count = 0;
-  for (let perm = 0; perm < nPermutations; perm++) {
+  for (let perm = 0; perm < nPerm; perm++) {
     const shuffled = [...groups];
     for (let i = n - 1; i > 0; i--) { const j = randint(0, i + 1); [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]]; }
     const R_perm = computeR(distMatrix, shuffled, n);
     if (R_perm >= R_obs) count++;
   }
 
-  return { statistic: R_obs, pValue: (count + 1) / (nPermutations + 1), nPermutations };
+  return { statistic: R_obs, pValue: (count + 1) / (nPerm + 1), nPermutations: nPerm };
 }
 
 function computeR(D: Matrix, groups: number[], n: number): number {
@@ -1129,8 +1132,9 @@ export function permanova(distMatrix: Matrix, groups: number[], nPermutations: n
   };
 
   const F_obs = computeF(groups);
+  const nPerm = Math.max(1, Math.floor(nPermutations));
   let count = 0;
-  for (let perm = 0; perm < nPermutations; perm++) {
+  for (let perm = 0; perm < nPerm; perm++) {
     const shuffled = [...groups];
     for (let i = n - 1; i > 0; i--) { const j = randint(0, i + 1); [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]]; }
     if (computeF(shuffled) >= F_obs) count++;
@@ -1149,9 +1153,9 @@ export function permanova(distMatrix: Matrix, groups: number[], nPermutations: n
   }
 
   return {
-    fStatistic: F_obs, pValue: (count + 1) / (nPermutations + 1),
+    fStatistic: F_obs, pValue: (count + 1) / (nPerm + 1),
     ssBetween: ssTotal - ssWithin, ssWithin, dfBetween: k - 1, dfWithin: n - k,
-    nPermutations,
+    nPermutations: nPerm,
   };
 }
 
@@ -1775,9 +1779,11 @@ export function phylogeneticSignal(root: any, traitValues: Record<string, number
   const K = blombergKFromVCV(y, V);
 
   // Permutation test: shuffle the trait values across tips (groups/VCV fixed)
+  // Without the floor, nRandomizations = -3 gave pValue = 1 / -2 = -0.5.
+  const nRand = Math.max(1, Math.floor(nRandomizations));
   let count = 0;
   const permKs: number[] = [];
-  for (let perm = 0; perm < nRandomizations; perm++) {
+  for (let perm = 0; perm < nRand; perm++) {
     const shuffled = [...y];
     rngShuffle(shuffled);
     const permK = blombergKFromVCV(shuffled, V);
@@ -1790,7 +1796,7 @@ export function phylogeneticSignal(root: any, traitValues: Record<string, number
   const z = stdPK > 0 ? (K - meanPK) / stdPK : 0;
 
   return {
-    k: K, z, pValue: (count + 1) / (nRandomizations + 1), nRandomizations,
+    k: K, z, pValue: (count + 1) / (nRand + 1), nRandomizations: nRand,
     tipNames, vcvMatrix: V.map(row => [...row]),
   };
 }
@@ -2122,10 +2128,11 @@ export function phyloANOVA(root: any, traitValues: Record<string, number>, group
 
   // Permutation test: shuffle trait values across tips, keep groups fixed;
   // identical labelling rule + identical F formula as the observed statistic.
+  const nPerm = Math.max(1, Math.floor(nPermutations));
   let count = 0;
   let nValidPerms = 0;
   const tipArray = tipNamesList.map(nm => traitValues[nm] ?? NaN);
-  for (let perm = 0; perm < nPermutations; perm++) {
+  for (let perm = 0; perm < nPerm; perm++) {
     const shuffled = [...tipArray];
     rngShuffle(shuffled);
     const permDict: Record<string, number> = {};
@@ -2145,7 +2152,7 @@ export function phyloANOVA(root: any, traitValues: Record<string, number>, group
   const pValue = nValidPerms > 0 ? (count + 1) / (nValidPerms + 1) : 1.0;
 
   return {
-    fStatistic: F, pValue, ssBetween, ssWithin, nPermutations,
+    fStatistic: F, pValue, ssBetween, ssWithin, nPermutations: nPerm,
     groups, nGroups, nTips: tipNamesList.length,
     msBetween, msWithin, contrastValues: icValues, groupLabels: tipsWithGroups,
   };
