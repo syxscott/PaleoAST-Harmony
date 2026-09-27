@@ -1,5 +1,5 @@
 ﻿/**
- * DAT file parser �� replaces parsers/dat_parser.py
+ * DAT file parser — replaces parsers/dat_parser.py
  * Handles various delimiters and formats.
  */
 

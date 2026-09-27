@@ -1,5 +1,5 @@
 /**
- * Theme manager �� replaces app_infrastructure/theme/manager.py
+ * Theme manager — replaces app_infrastructure/theme/manager.py
  * Manages dark/light theme switching and propagation.
  */
 

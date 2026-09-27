@@ -1,5 +1,5 @@
 /**
- * 3D TPS �� replaces morpho3d/tps3d.py
+ * 3D TPS — replaces morpho3d/tps3d.py
  *
  * Thin-plate spline interpolation/deformation of 3D point sets.
  *

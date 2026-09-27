@@ -1,5 +1,5 @@
 ﻿/**
- * TPS file parser �� replaces parsers/tps_parser.py
+ * TPS file parser — replaces parsers/tps_parser.py
  * Handles LM, ID, IMAGE, CURVES, COMMENTS fields.
  */
 

@@ -1,5 +1,5 @@
 /**
- * Quaternion operations �� replaces morpho3d/quaternion.py
+ * Quaternion operations — replaces morpho3d/quaternion.py
  * Used for 3D rotations in GPA and TPS.
  *
  * Mathematical foundation (see Python source):

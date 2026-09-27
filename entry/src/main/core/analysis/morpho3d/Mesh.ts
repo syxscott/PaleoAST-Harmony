@@ -1,5 +1,5 @@
 /**
- * 3D Mesh �� replaces morpho3d/mesh.py
+ * 3D Mesh — replaces morpho3d/mesh.py
  */
 
 import { rand } from '../../math/random';
