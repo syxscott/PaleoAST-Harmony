@@ -397,12 +397,21 @@ function isotonicRegression(target: number[], weights: number[]): number[] {
   }
 
   // ── Step 3: expand block means back to unique groups, then to indices ──
+  // Two independent cursors are required: `b` indexes the BLOCK arrays (there
+  // are blockSize.length of them) while `g` walks the unique-group axis (there
+  // are m of them, and a block may cover several). Advancing a single cursor by
+  // the block size read blockSums[2] where only 2 blocks exist, so every block
+  // after an initial block spanning more than one group was filled with
+  // `undefined` -> NaN. That silently poisoned the NMDS disparities: stress
+  // became NaN on the first iteration, no configuration was ever recorded, and
+  // the function returned stress = Infinity with coordinates = null.
   const groupFitted = new Array<number>(m);
-  let b = 0;
-  for (const size of blockSize) {
+  let g = 0;
+  for (let b = 0; b < blockSize.length; b++) {
+    const size = blockSize[b];
     const blockMean = blockSums[b] / blockCounts[b];
-    for (let k = 0; k < size; k++) groupFitted[b + k] = blockMean;
-    b += size;
+    for (let k = 0; k < size; k++) groupFitted[g + k] = blockMean;
+    g += size;
   }
 
   const result = new Array<number>(n);
@@ -443,9 +452,14 @@ export function univariateSummary(data: Matrix, colNames: string[]): ColumnStats
     // 95% CI via the t quantile (Python uses sp_stats.t.ppf(0.975, n-1));
     // the normal approximation (1.96) is only asymptotically correct.
     const tCrit = qt(0.975, Math.max(vals.length - 1, 1));
+    // Reduce in a loop: `Math.min(...vals)` passes one argument per element, so
+    // a column longer than the engine's argument limit threw
+    // "Maximum call stack size exceeded" -- reproduced at 200000 values.
+    let vmin = Infinity, vmax = -Infinity;
+    for (const x of vals) { if (x < vmin) vmin = x; if (x > vmax) vmax = x; }
     results.push({
       name: colNames[j] || `Var${j}`, n: vals.length,
-      mean: m, std: s, variance: v, min: Math.min(...vals), max: Math.max(...vals),
+      mean: m, std: s, variance: v, min: vmin, max: vmax,
       median: med, skewness: skew_val, kurtosis: kurt_val, se: se_val,
       ci95: [m - tCrit * se_val, m + tCrit * se_val],
     });
@@ -515,19 +529,6 @@ export function tTest(group1: number[], group2: number[], paired: boolean = fals
   return { statistic: t, pValue: p, df, meanDiff: m1 - m2, testType: 'independent', n1, n2, mean1: m1, mean2: m2 };
 }
 
-function normCDF_approx(x: number): number {
-  return 0.5 * (1 + erf_approx(x / Math.SQRT2));
-}
-
-function erf_approx(x: number): number {
-  const a1 = 0.254829592, a2 = -0.284496736, a3 = 1.421413741, a4 = -1.453152027, a5 = 1.061405429;
-  const p = 0.3275911;
-  const sign = x >= 0 ? 1 : -1;
-  x = Math.abs(x);
-  const t = 1 / (1 + p * x);
-  return sign * (1 - ((((a5 * t + a4) * t + a3) * t + a2) * t + a1) * t * Math.exp(-x * x));
-}
-
 /**
  * ANOVA (one-way).
  */
@@ -584,37 +585,6 @@ export function anova(groups: number[][], tukey: boolean = true): ANOVAResult {
     fStatistic: f, pValue: p, dfBetween: dfb, dfWithin: dfw, ssBetween: ssb, ssWithin: ssw,
     msBetween: msb, msWithin: msw, nGroups: k, significant: p < 0.05, tukeyResults,
   };
-}
-
-function fCDF_approx(x: number, d1: number, d2: number): number {
-  if (x <= 0) return 0;
-  const a = d1 / 2, b = d2 / 2;
-  const z = d1 * x / (d1 * x + d2);
-  // Approximate incomplete beta
-  return betainc_approx(a, b, z);
-}
-
-function betainc_approx(a: number, b: number, x: number): number {
-  if (x <= 0) return 0; if (x >= 1) return 1;
-  // Simple series expansion
-  let sum = 0, term = 1;
-  for (let n = 0; n < 100; n++) {
-    if (n > 0) term *= (a + n - 1) * x / (a + b + n - 1);
-    const coeff = term / (a + n);
-    sum += coeff;
-    if (Math.abs(coeff) < 1e-12) break;
-  }
-  const lbeta = lgamma_approx(a) + lgamma_approx(b) - lgamma_approx(a + b);
-  return sum * Math.exp(a * Math.log(x) + b * Math.log(1 - x) - lbeta);
-}
-
-function lgamma_approx(x: number): number {
-  const g = 7;
-  const c = [0.99999999999980993, 676.5203681218851, -1259.1392167224028, 771.32342877765313, -176.61502916214059, 12.507343278686905, -0.13857109526572012, 9.9843695780195716e-6, 1.5056327351493116e-7];
-  if (x < 0.5) return Math.log(Math.PI / Math.sin(Math.PI * x)) - lgamma_approx(1 - x);
-  x -= 1; let a = c[0]; const t = x + g + 0.5;
-  for (let i = 1; i < g + 2; i++) a += c[i] / (x + i);
-  return 0.5 * Math.log(2 * Math.PI) + (x + 0.5) * Math.log(t) - t + Math.log(a);
 }
 
 /**
@@ -1049,11 +1019,16 @@ export function cca(
     // Row-normalize then weight by inverse sqrt of column margins
     const rowNorm = Matrix.zeros(n, p);
     for (let i = 0; i < n; i++) for (let j = 0; j < p; j++) {
-      const ri = rowTotals[i] > 0 ? 1 / rowTotals[i] : 0;
+      // `rowTotals` is an n x 1 Matrix and `colTotals` a 1 x p Matrix: they must
+      // be read with get(), not with `[]`. Bracket access on a Matrix yields
+      // undefined, so `rowTotals[i] > 0` was always false, the whole chi-square
+      // matrix collapsed to zeros, and every CCA run reported 0% explained
+      // variance with no error anywhere.
+      const ri = rowTotals.get(i, 0) > 0 ? 1 / rowTotals.get(i, 0) : 0;
       rowNorm.set(i, j, Y.get(i, j) * ri);
     }
     for (let j = 0; j < p; j++) {
-      const sqrtCol = Math.sqrt(colTotals[j] / grandTotal);
+      const sqrtCol = Math.sqrt(colTotals.get(0, j) / grandTotal);
       for (let i = 0; i < n; i++) rowNorm.set(i, j, rowNorm.get(i, j) / (sqrtCol > 0 ? sqrtCol : 1));
     }
     const Ychi = rowNorm;
@@ -1382,27 +1357,6 @@ export function kruskalWallis(groups: number[][]): KruskalResult {
   return { statistic: H, pValue: p, df };
 }
 
-function chi2CDF_local(x: number, k: number): number {
-  if (x <= 0) return 0;
-  return gammainc_local(k / 2, x / 2);
-}
-
-function gammainc_local(a: number, x: number): number {
-  if (x <= 0) return 0;
-  let sum = 1 / a, term = 1 / a;
-  for (let n = 1; n < 200; n++) { term *= x / (a + n); sum += term; if (Math.abs(term) < 1e-14 * Math.abs(sum)) break; }
-  return sum * Math.exp(-x + a * Math.log(x) - lgamma_local(a));
-}
-
-function lgamma_local(x: number): number {
-  const g = 7;
-  const c = [0.99999999999980993, 676.5203681218851, -1259.1392167224028, 771.32342877765313, -176.61502916214059, 12.507343278686905, -0.13857109526572012, 9.9843695780195716e-6, 1.5056327351493116e-7];
-  if (x < 0.5) return Math.log(Math.PI / Math.sin(Math.PI * x)) - lgamma_local(1 - x);
-  x -= 1; let a = c[0]; const t = x + g + 0.5;
-  for (let i = 1; i < g + 2; i++) a += c[i] / (x + i);
-  return 0.5 * Math.log(2 * Math.PI) + (x + 0.5) * Math.log(t) - t + Math.log(a);
-}
-
 // ═══════════════════════════════════════════════════════════════════
 // Distance Matrix (full implementation)
 // ═══════════════════════════════════════════════════════════════════
@@ -1664,66 +1618,45 @@ function pearsonCorr(x: number[], y: number[]): number {
  */
 function fclusterFromLinkage(linkage: number[][], nClusters: number): number[] {
   const n = linkage.length + 1;
+  if (nClusters < 1) {
+    throw new Error(`fcluster: nClusters must be at least 1 (got ${nClusters})`);
+  }
   if (nClusters >= n) return Array.from({ length: n }, (_, i) => i);
-  // scipy.cluster.hierarchy.fcluster: cut dendrogram so we get exactly nClusters.
-  // We process merges from smallest height to largest; after (n-1 - nClusters) merges
-  // we have nClusters clusters remaining.
+  // Cut after (n - nClusters) merges, so nClusters components remain.
   const nMergesBeforeCut = n - nClusters;
-  const cutHeight = nMergesBeforeCut > 0 ? linkage[nMergesBeforeCut - 1][2] : 0;
 
-  // Build cluster membership: clusterId -> Set of original observation indices
-  // Original observations: 0..n-1, internal nodes: n..n+(n-2)
-  const members: Map<number, Set<number>> = new Map();
-  for (let i = 0; i < n; i++) members.set(i, new Set([i]));
-
-  for (let m = 0; m < nMergesBeforeCut; m++) {
-    const [id1, id2, h] = linkage[m];
-    const set1 = members.get(id1) ?? new Set();
-    const set2 = members.get(id2) ?? new Set();
-    const merged = new Set([...set1, ...set2]);
-    // Create new internal node with the merged set
-    const newId = n + m;
-    members.set(newId, merged);
-  }
-
-  // The root of the remaining clusters is at linkage[nMergesBeforeCut - 1] (or last merge if cut at root)
-  // The nClusters clusters correspond to the members of the "active" nodes after nMergesBeforeCut merges.
-  // These are: for each merge m >= nMergesBeforeCut, the two children of that merge
-  // (if they weren't already merged in a later step).
-  // Actually simpler: find all "top-level" clusters after stopping.
-  const activeNodes = new Set<number>();
-  for (let m = nMergesBeforeCut - 1; m >= 0; m--) {
-    const [id1, id2] = linkage[m];
-    if (m === nMergesBeforeCut - 1) {
-      activeNodes.add(id1);
-      activeNodes.add(id2);
-    }
-  }
-
-  // Actually the simplest fcluster algorithm: after applying nMergesBeforeCut unions,
-  // the remaining clusters are the equivalence classes of original observations.
-  // Use union-find with full parent array (size 2n-1 to handle internal node IDs)
-  const parent = new Array(2 * n - 1).fill(0);
-  for (let i = 0; i < parent.length; i++) parent[i] = i;
-  function find(x: number): number {
-    if (parent[x] !== x) parent[x] = find(parent[x]);
-    return parent[x];
-  }
-
+  // The linkage rows reference CLUSTER slots (leaves 0..n-1 plus one new slot
+  // per merge, numbered n, n+1, ...), not observations. A plain union-find over
+  // those ids unites a representative with a representative and leaves the
+  // observations underneath them in separate components, so cutting to 1, 2 or
+  // 3 clusters on 7 points returned 5 clusters every time. Membership has to be
+  // propagated explicitly: merge the two member lists, then re-label the
+  // leaves by the merged set they ended up in.
+  const members = new Map<number, number[]>();
+  for (let i = 0; i < n; i++) members.set(i, [i]);
   for (let m = 0; m < nMergesBeforeCut; m++) {
     const [id1, id2] = linkage[m];
-    const r1 = find(id1), r2 = find(id2);
-    if (r1 !== r2) parent[r1] = r2;
+    const s1 = members.get(id1);
+    const s2 = members.get(id2);
+    if (!s1 || !s2) continue;
+    members.set(n + m, s1.concat(s2));
   }
 
-  // Assign cluster labels based on final equivalence classes
-  const labels = new Array(n).fill(0);
-  const rootMap = new Map<number, number>();
+  // Label each leaf by the first merged set that contains it.
+  const labelOf = new Map<number, number>();
+  const labels = new Array<number>(n);
   let labelIdx = 0;
+  for (let m = nMergesBeforeCut - 1; m >= 0; m--) {
+    const set = members.get(n + m);
+    if (!set) continue;
+    if (labelOf.has(set[0])) continue;
+    for (const leaf of set) {
+      if (!labelOf.has(leaf)) { labelOf.set(leaf, labelIdx); labels[leaf] = labelIdx; }
+    }
+    labelIdx++;
+  }
   for (let i = 0; i < n; i++) {
-    const root = find(i);
-    if (!rootMap.has(root)) rootMap.set(root, labelIdx++);
-    labels[i] = rootMap.get(root)!;
+    if (!labelOf.has(i)) { labelOf.set(i, labelIdx); labels[i] = labelIdx; labelIdx++; }
   }
   return labels;
 }
@@ -2281,24 +2214,16 @@ export function mannWhitneyU(group1: number[], group2: number[]): MannWhitneyRes
   let tieCorr = 0;
   for (const t of tieSizes) tieCorr += (t ** 3 - t) / (N * (N - 1));
   const sigmaU = Math.sqrt(Math.max(n1 * n2 / 12 * ((N + 1) - tieCorr), 1e-12));
+  // ONE z, used for both the reported statistic and the p-value. Reporting the
+  // uncorrected (|U - mu|)/sigma while computing the p-value from the
+  // continuity-corrected (|U - mu| - 0.5)/sigma meant the two fields
+  // disagreed: 2*(1 - Phi(|zScore|)) came out 20-46% away from pValue on the
+  // same result, and pValue saturated at 1 while zScore still read -0.22.
   const z = sigmaU > 0 ? (Math.abs(U - muU) - 0.5) / sigmaU : 0;
   // Exact normal CDF from math/stats (replaces the local erf approximation)
   const p = 2 * (1 - pnorm(Math.abs(z)));
 
-  return { uStatistic: U, pValue: p, zScore: (U - muU) / sigmaU };
-}
-
-function normCDF_mw(x: number): number {
-  return 0.5 * (1 + erf_mw(x / Math.SQRT2));
-}
-
-function erf_mw(x: number): number {
-  const a1 = 0.254829592, a2 = -0.284496736, a3 = 1.421413741, a4 = -1.453152027, a5 = 1.061405429;
-  const p = 0.3275911;
-  const sign = x >= 0 ? 1 : -1;
-  x = Math.abs(x);
-  const t = 1 / (1 + p * x);
-  return sign * (1 - ((((a5 * t + a4) * t + a3) * t + a2) * t + a1) * t * Math.exp(-x * x));
+  return { uStatistic: U, pValue: p, zScore: z };
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -2639,26 +2564,47 @@ export interface PLSResult {
 
 export function plsAnalysis(blockA: Matrix, blockB: Matrix, nComponents?: number): PLSResult {
   const n = blockA.rows;
-  const nc = Math.min(nComponents ?? Math.min(blockA.cols, blockB.cols), n - 1);
+  if (blockA.rows !== blockB.rows) throw new Error('plsAnalysis: blockA and blockB must have the same number of rows');
+  if (n < 2) throw new Error(`plsAnalysis needs at least 2 specimens (got ${n})`);
+  const nc = Math.max(1, Math.min(nComponents ?? Math.min(blockA.cols, blockB.cols), n - 1));
+
+  // PLS is defined on the CENTRED blocks: the cross-block covariance, the
+  // latent-variable scores and the Escoufier RV coefficient are all functions
+  // of the deviations from the block means. Working on the raw blocks made RV
+  // depend on where the data happen to sit -- shifting block B by +1000 moved
+  // RV by 2.2e-02 and shifting block A by -500 moved it by 7.4e-02 on the same
+  // data -- so two copies of the same specimen set scored differently purely
+  // because of their units. The sibling `plsIntegration` in
+  // morphometrics/Integration.ts already centred both blocks.
+  const Ac = blockA.sub(blockA.meanAxis(0));
+  const Bc = blockB.sub(blockB.meanAxis(0));
 
   // Cross-block covariance
-  const C = blockA.transpose().matmul(blockB).div(n - 1);
+  const C = Ac.transpose().matmul(Bc).div(n - 1);
 
   // SVD of cross-covariance
   const { U, S, Vt } = svd(C);
   const eigTop = S.slice(0, nc);
-  const totalCov = S.reduce((a, b) => a + b, 0);
-  const covExplained = eigTop.map(s => totalCov > 0 ? s / totalCov * 100 : 0);
+  // The axes' inertias are the squared singular values, so the explained share
+  // is s^2 / sum(s^2). Using s / sum(s) (the "covarianceExplained" the
+  // interface promises) reported 95.5/4.5 where the true split is 99.8/0.2,
+  // and always printed 100% for a single component. plsIntegration, given the
+  // same SVD, already squares.
+  const totalCov = S.reduce((a, b) => a + b * b, 0);
+  const covExplained = eigTop.map(s => totalCov > 0 ? s * s / totalCov * 100 : 0);
 
-  // PLS scores
-  const xScores = blockA.matmul(U.sliceCols(0, nc));
-  const yScores = blockB.matmul(Vt.sliceCols(0, nc).transpose());
+  // PLS scores. `Vt` is already q x k (the right singular vectors), so it is
+  // used as-is. The extra `.transpose()` made the product q x k -> k x q,
+  // which only happened to be conformable when nc equalled q; asking for
+  // fewer components than the block has variables threw "matmul shape".
+  const xScores = Ac.matmul(U.sliceCols(0, nc));
+  const yScores = Bc.matmul(Vt.sliceCols(0, nc));
 
   // RV coefficient (Escoufier 1973)
   const C2 = C.mul(C);
   const normC = Math.sqrt(C2.sum());
-  const A2 = blockA.transpose().matmul(blockA).div(n - 1);
-  const B2 = blockB.transpose().matmul(blockB).div(n - 1);
+  const A2 = Ac.transpose().matmul(Ac).div(n - 1);
+  const B2 = Bc.transpose().matmul(Bc).div(n - 1);
   const normA = Math.sqrt(A2.mul(A2).sum());
   const normB = Math.sqrt(B2.mul(B2).sum());
   const rv = (normA > 0 && normB > 0) ? (normC * normC) / (normA * normB) : 0;
@@ -2923,8 +2869,10 @@ export function dca(
   const Ydata = new Float64Array(n * p);
   for (let i = 0; i < n; i++) {
     for (let j = 0; j < p; j++) {
-      const ri = rowTotals[i] > 0 ? 1 / rowTotals[i] : 0;
-      const sqrtCol = Math.sqrt(colTotals[j] / grandTotal);
+      // get(), not []: rowTotals is n x 1 and colTotals is 1 x p, so bracket
+      // access returned undefined and the chi-square matrix was all zeros.
+      const ri = rowTotals.get(i, 0) > 0 ? 1 / rowTotals.get(i, 0) : 0;
+      const sqrtCol = Math.sqrt(colTotals.get(0, j) / grandTotal);
       Ydata[i * p + j] = (speciesAbundance.get(i, j) * ri) / (sqrtCol > 0 ? sqrtCol : 1);
     }
   }
@@ -3039,7 +2987,10 @@ export function hellinger(Y: Matrix): Matrix {
   const rowSums = Y.sumAxis(1);
   const result = new Float64Array(n * p);
   for (let i = 0; i < n; i++) {
-    const rs = rowSums[i];
+    // `rowSums` is an n x 1 Matrix: `rowSums[i]` was undefined, the
+    // `rs <= 0` guard never fired, and every cell became sqrt(x/undefined) =
+    // NaN. The whole Hellinger transform returned NaN.
+    const rs = rowSums.get(i, 0);
     if (rs <= 0) continue; // Guard against zero row sums
     for (let j = 0; j < p; j++) {
       result[i * p + j] = Math.sqrt(Y.get(i, j) / rs);
@@ -3132,9 +3083,10 @@ export function confidenceEllipse(
 
   // Chi-squared critical value for 2 df at confidence level
   // Ref: Johnson & Wichern (2007), Eq. 4.42: ellipse equation uses χ²_{2,α}
-  // Uses the verified chi-square quantile from math/stats (Newton iteration
-  // on the regularized gamma CDF); the local bisection approximation
-  // chi2Inverse_approx is retained below but no longer on the p-value path.
+  // Uses the verified chi-square quantile from math/stats (Newton iteration on
+  // the regularized gamma CDF). The module's own bisection copy of this
+  // quantile had no remaining callers and was removed rather than left behind
+  // as a second, unverified way to compute the same number.
   const chi2Crit = qchisq(level, 2);
 
   const semiMajor = a0 * Math.sqrt(chi2Crit);
@@ -3148,28 +3100,6 @@ export function confidenceEllipse(
     chi2Critical: chi2Crit,
     level,
   };
-}
-
-/**
- * Inverse chi-squared CDF (lower-tail) via regularized incomplete gamma.
- * Uses binary search on the gamma CDF for accuracy.
- */
-function chi2Inverse_approx(p: number, df: number): number {
-  // Newton-bisection hybrid to solve gammainc(df/2, x/2) = p * Gamma(df/2)
-  // We instead use the closed-form inverse for df=2 and bisection otherwise.
-  const a = df / 2;
-  let lo = 0.001, hi = 1000;
-  if (df === 2) {
-    // Closed form: x = -2 * ln(1 - p)
-    return -2 * Math.log(1 - Math.min(0.9999, Math.max(0.0001, p)));
-  }
-  for (let iter = 0; iter < 100; iter++) {
-    const mid = (lo + hi) / 2;
-    const cdf = gammainc_local(a, mid / 2);
-    if (Math.abs(cdf - p) < 1e-10 || (hi - lo) < 1e-12) break;
-    if (cdf < p) lo = mid; else hi = mid;
-  }
-  return (lo + hi) / 2;
 }
 
 // ─── Re-exports of new sub-modules (Ripley K, Normality test) ─────────────────

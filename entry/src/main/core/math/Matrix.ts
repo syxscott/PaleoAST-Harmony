@@ -90,36 +90,81 @@ export class Matrix {
     return new Matrix(d, this.rows, nc);
   }
 
-  add(o: Matrix | number): Matrix {
-    const d = new Float64Array(this.data);
-    if (typeof o === 'number') { for (let i = 0; i < d.length; i++) d[i] += o; }
-    else { for (let i = 0; i < d.length; i++) d[i] += o.data[i]; }
-    return new Matrix(d, this.rows, this.cols);
-  }
-  sub(o: Matrix | number): Matrix {
-    const d = new Float64Array(this.data);
-    if (typeof o === 'number') { for (let i = 0; i < d.length; i++) d[i] -= o; }
-    else { for (let i = 0; i < d.length; i++) d[i] -= o.data[i]; }
-    return new Matrix(d, this.rows, this.cols);
-  }
-  mul(o: Matrix | number): Matrix {
-    const d = new Float64Array(this.data);
-    if (typeof o === 'number') { for (let i = 0; i < d.length; i++) d[i] *= o; }
-    else { for (let i = 0; i < d.length; i++) d[i] *= o.data[i]; }
-    return new Matrix(d, this.rows, this.cols);
-  }
-  div(o: Matrix | number): Matrix {
+  /**
+   * Shared kernel for the element-wise operators (add / sub / mul / div /
+   * maximum).
+   *
+   * NumPy-style broadcasting, restricted to the two forms this repo actually
+   * uses -- a (1 x p) row vector broadcast down the rows and a (r x 1) column
+   * vector broadcast across the columns -- plus the exact same-shape case.
+   *
+   * The previous version indexed `o.data[i]` blindly over `this.length`. When
+   * `o` was a 1 x p matrix (the return shape of `meanAxis(0)` / `sumAxis(0)`)
+   * every index from p onwards read `undefined`, so the operator returned NaN
+   * from the second row onward instead of the centered values its callers
+   * expected. That silently poisoned `cov`, `covMatrix`, `cca` (both the rda
+   * and cca branches), `plsIntegration`, `relativeWarps`, the allometry
+   * fit and `DataController.transformZScore`. Shapes that are neither equal
+   * nor broadcastable now throw instead of degrading to NaN.
+   */
+  private elementwise(
+    o: Matrix | number,
+    op: string,
+    fn: (a: number, b: number) => number,
+  ): Matrix {
     const d = new Float64Array(this.data);
     if (typeof o === 'number') {
-      if (o === 0) throw new Error('Division by zero');
-      for (let i = 0; i < d.length; i++) d[i] /= o;
-    } else {
-      for (let i = 0; i < d.length; i++) {
-        if (o.data[i] === 0) throw new Error('Division by zero');
-        d[i] /= o.data[i];
+      for (let i = 0; i < d.length; i++) d[i] = fn(d[i], o);
+      return new Matrix(d, this.rows, this.cols);
+    }
+    const sameShape = o.rows === this.rows && o.cols === this.cols;
+    const rowVec = o.rows === 1 && o.cols === this.cols;
+    const colVec = o.cols === 1 && o.rows === this.rows;
+    if (sameShape) {
+      const od = o.data;
+      for (let i = 0; i < d.length; i++) d[i] = fn(d[i], od[i]);
+    } else if (rowVec) {
+      const od = o.data, c = this.cols;
+      for (let i = 0; i < this.rows; i++) {
+        const base = i * c;
+        for (let j = 0; j < c; j++) d[base + j] = fn(d[base + j], od[j]);
       }
+    } else if (colVec) {
+      const od = o.data, c = this.cols;
+      for (let i = 0; i < this.rows; i++) {
+        const base = i * c, v = od[i];
+        for (let j = 0; j < c; j++) d[base + j] = fn(d[base + j], v);
+      }
+    } else {
+      throw new Error(
+        `${op}: cannot broadcast ${this.rows}x${this.cols} with ${o.rows}x${o.cols}`,
+      );
     }
     return new Matrix(d, this.rows, this.cols);
+  }
+
+  add(o: Matrix | number): Matrix { return this.elementwise(o, 'add', (a, b) => a + b); }
+  sub(o: Matrix | number): Matrix { return this.elementwise(o, 'sub', (a, b) => a - b); }
+  mul(o: Matrix | number): Matrix { return this.elementwise(o, 'mul', (a, b) => a * b); }
+  div(o: Matrix | number): Matrix {
+    if (typeof o === 'number') {
+      if (o === 0) throw new Error('Division by zero');
+      return this.elementwise(o, 'div', (a, b) => a / b);
+    }
+    // Reject zero divisors before mutating anything, so a failure part-way
+    // through a broadcast cannot leave a half-divided result behind.
+    const sameShape = o.rows === this.rows && o.cols === this.cols;
+    const rowVec = o.rows === 1 && o.cols === this.cols;
+    const colVec = o.cols === 1 && o.rows === this.rows;
+    if (!sameShape && !rowVec && !colVec) {
+      throw new Error(
+        `div: cannot broadcast ${this.rows}x${this.cols} with ${o.rows}x${o.cols}`,
+      );
+    }
+    for (let k = 0; k < o.data.length; k++) {
+      if (o.data[k] === 0) throw new Error('Division by zero');
+    }
+    return this.elementwise(o, 'div', (a, b) => a / b);
   }
   /**
    * Matrix multiplication with cache-optimized loop ordering.
@@ -192,9 +237,7 @@ export class Matrix {
   clip(lo: number, hi: number): Matrix { return this.map(x => Math.max(lo, Math.min(hi, x))); }
   maximum(o: Matrix | number): Matrix {
     if (typeof o === 'number') return this.map(x => Math.max(x, o));
-    const d = new Float64Array(this.length);
-    for (let i = 0; i < this.length; i++) d[i] = Math.max(this.data[i], o.data[i]);
-    return new Matrix(d, this.rows, this.cols);
+    return this.elementwise(o, 'maximum', (a, b) => Math.max(a, b));
   }
 
   /**
