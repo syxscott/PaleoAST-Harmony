@@ -36,6 +36,7 @@
 
 | 日期 | 标题 | 类型 |
 |---|---|---|
+| 2026-09-27 | [ProcessPool.execute 泄漏超时定时器:每次成功调用都悬住事件循环](2026-09-27-processpool-timeout-timer-leak.md) | 缺陷修复 |
 | 2026-09-27 | [DFA.minimize() 改写了自己:每调一次多一个 DEAD 状态](2026-09-27-dfa-minimize-mutated-receiver.md) | 缺陷修复 |
 | 2026-09-27 | [BCa 在退化分布上静默返回 NaN 区间;同时锁住 normInv/normCDF/BCa 公式](2026-09-27-bootstrap-bca-degenerate-nan.md) | 缺陷修复 / 数值变更 |
 | 2026-09-27 | [Bray-Curtis 分母漏了绝对值:两个不同的样本被报成距离 0](2026-09-27-bray-curtis-denominator-missing-abs.md) | 缺陷修复 / 数值变更 |

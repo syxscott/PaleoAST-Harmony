@@ -43,13 +43,22 @@ export class ProcessPool {
 
   async execute<T>(fn: () => T, timeoutMs: number = 30000): Promise<TaskResult<T>> {
     const start = Date.now();
+    // The timer used to be left running when fn resolved first, so every
+    // successful call held the event loop open for up to timeoutMs.
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       const result = await Promise.race([
         Promise.resolve(fn()),
-        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Timeout')), timeoutMs)),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error('Timeout')), timeoutMs);
+        }),
       ]);
       return { result, error: null, duration: Date.now() - start };
-    } catch (e) { return { result: null, error: String(e), duration: Date.now() - start }; }
+    } catch (e) {
+      return { result: null, error: String(e), duration: Date.now() - start };
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
   }
 
   getMaxWorkers(): number { return this.maxWorkers; }
