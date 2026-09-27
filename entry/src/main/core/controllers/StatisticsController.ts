@@ -340,13 +340,26 @@ export class StatisticsController {
     return result;
   }
 
+  /**
+   * EFA on the first specimen's contour.
+   *
+   * `nPoints` (the resampling resolution, collected by EFADialog and passed by
+   * Index.ets) was dropped: `efa(contour, nh)` omitted the third argument even
+   * though `efa` has always taken `nPoints`, so the number the user typed had
+   * no effect on the computation while the exported "reproducible analysis
+   * script" recorded it as if it did.
+   *
+   * The dialog says the layout is [x1..xN, y1..yN] and that the first row is
+   * the contour specimen, so using row 0 is intentional -- it is documented in
+   * the dialog rather than guessed here.
+   */
   runEFA(nh?: number, np?: number) {
     const dm = this.getDM();
     const row = dm.data.row(0);
     const n = row.length / 2;
     const contour: number[][] = [];
     for (let i = 0; i < n; i++) contour.push([row[i], row[n + i]]);
-    const result = efa(contour, nh);
+    const result = efa(contour, nh, np);
     this.state.cacheResult('efa_result', result);
     return result;
   }
@@ -609,9 +622,16 @@ export class StatisticsController {
     return { temperatureC: computePaleotemperatureKimONeil(delta18OSw, delta18Oc) };
   }
 
-  /** Broken-stick significance for CONISS zones (coniss.py). */
-  runBrokenStick(row?: number, nPermutations = 999) {
-    void row;
+  /**
+   * Broken-stick significance for CONISS zones (coniss.py).
+   *
+   * The previous `row` parameter was never used (`void row`) — it selected a
+   * specimen, but the broken-stick test needs the CONISS merge heights, which
+   * come from the whole matrix. Nothing in the repo called it with a row, so the
+   * misleading parameter is gone rather than left to imply a filter that does
+   * not happen.
+   */
+  runBrokenStick(nPermutations = 999) {
     const c = this.runCONISS(4);
     const bd = (c as { linkageMatrix?: number[][] }).linkageMatrix?.map(r => r[2]) ?? [];
     return brokenStickTest(bd, nPermutations);

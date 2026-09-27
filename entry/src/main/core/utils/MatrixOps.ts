@@ -124,18 +124,37 @@ export function standardizeMatrix(X: Matrix, axis: number = 0, ddof: number = 1)
   return r;
 }
 
+/**
+ * Covariance matrix, NumPy `np.cov` semantics.
+ *
+ *   rowvar = true  -> each ROW is an observation, result is nCols x nCols
+ *   rowvar = false -> each COLUMN is an observation, result is nRows x nRows
+ *
+ * The previous implementation got BOTH the centring axis and the divisor
+ * wrong. It transposed unconditionally, then called `centerMatrix(data, 0)`,
+ * which removes each observation's across-variable mean (an observation effect)
+ * rather than each variable's across-observation mean, and divided by
+ * `nVars - ddof` instead of `nObs - ddof`. For a 5 x 3 input with rowvar=true it
+ * returned a 5 x 5 matrix whose 3 x 3 leading block read
+ * [1.00, -0.50, -0.50; ...] where the true covariance is
+ * [2.50, 0.875, 1.50; ...].
+ *
+ * The rowvar=false result is therefore NOT "wrong shaped" -- it is what np.cov
+ * would give. The bug is the values, and `correlationMatrix` below, which wants
+ * a variable x variable matrix and so must ask for `rowvar=true`.
+ */
 export function covarianceMatrix(X: Matrix, rowvar: boolean = false, ddof: number = 1): Matrix {
-  // When rowvar=false (default), each column is a variable and each row an observation.
+  // Rowvar=false means the observations are the COLUMNS, so transpose first and
+  // then let linalg.cov (the verified, numpy-matched implementation) do the work
+  // on a rows-are-observations matrix.
   const data = rowvar ? X : X.transpose();
-  const n = data.rows;
-  const c = centerMatrix(data, 0);
-  // C = (c.T @ c) / (n - ddof)
-  const ct = c.transpose();
-  const num = (ct).matmul(c);
-  const d = new Float64Array(num.rows * num.cols);
-  const denom = Math.max(1, n - ddof);
-  for (let i = 0; i < d.length; i++) d[i] = num.data[i] / denom;
-  return new Matrix(d, num.rows, num.cols);
+  const nObs = data.rows;
+  if (nObs - ddof <= 0) {
+    throw new Error(`covarianceMatrix: need nObs > ddof (got nObs=${nObs}, ddof=${ddof})`);
+  }
+  // linalg.cov always divides by (nObs - 1); rescale to the requested ddof.
+  const scale = (nObs - 1) / (nObs - ddof);
+  return scale === 1 ? linalg.cov(data) : linalg.cov(data).map(v => v * scale);
 }
 
 export function correlationMatrix(X: Matrix, method: 'pearson' | 'spearman' = 'pearson'): Matrix {
@@ -161,7 +180,12 @@ export function correlationMatrix(X: Matrix, method: 'pearson' | 'spearman' = 'p
     }
     data = ranked;
   }
-  const cov = covarianceMatrix(data, false, 1);
+  // Each COLUMN of X is a variable and the result is variable x variable, so
+  // `covarianceMatrix` must be asked for rowvar=true. It used to ask for
+  // rowvar=false, which by np.cov convention makes the COLUMNS the observations
+  // and returns an nRows x nRows observation-by-observation matrix -- so for a
+  // 5 x 3 table `correlationMatrix` handed back a 5 x 5 "correlation" matrix.
+  const cov = covarianceMatrix(data, true, 1);
   const d = new Float64Array(cov.length);
   const std = new Float64Array(cov.rows);
   for (let i = 0; i < cov.rows; i++) std[i] = Math.sqrt(Math.max(cov.get(i, i), 1e-300));

@@ -1,4 +1,5 @@
 import { Matrix } from '../math/Matrix';
+import type { DistanceMetric } from './MatrixOps';
 import { ValidationError, MatrixDimensionError } from './Exceptions';
 
 export function validateDataArray(data: unknown, allowNaN = false, name = 'data'): Matrix {
@@ -130,11 +131,21 @@ export function validateRowLabels(labels: string[]): void {
   }
 }
 
-/** Validate that a distance metric name is supported. */
+/**
+ * Validate a distance metric name against what the implementation ACTUALLY
+ * accepts.
+ *
+ * The list used to advertise `braycurtis`, `manhattan`, `chebychev` and
+ * `chebyshev`, none of which are in the `DistanceMetric` union -- so this
+ * validator passed a name that `pairwiseDistance` then rejected with
+ * "Unknown metric". A validator that approves something the code refuses is
+ * worse than no validator: the failure surfaces far from its cause.
+ */
 export function validateDistanceMetric(metric: string): void {
-  const supported = ['euclidean', 'bray_curtis', 'braycurtis', 'cosine', 'jaccard',
-    'canberra', 'cityblock', 'manhattan', 'correlation', 'hamming', 'chebychev', 'chebyshev'];
-  if (!supported.includes(metric)) {
+  const supported: DistanceMetric[] = [
+    'euclidean', 'bray_curtis', 'cosine', 'jaccard', 'canberra', 'cityblock', 'correlation', 'hamming',
+  ];
+  if (!(supported as string[]).includes(metric)) {
     throw new ValidationError(`Unknown distance metric '${metric}'. Supported: ${supported.join(', ')}`);
   }
 }
