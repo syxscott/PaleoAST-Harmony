@@ -79,7 +79,11 @@ struct Index {
   @State plotTitle: string = '';
   @State plotType: string = 'scatter';
   @State isLoading: boolean = false;
-  @State progress: number = 0;
+  // No `progress` percentage state: analyses run synchronously on the UI thread
+  // (see runAnalysisWithParams), so a determinate bar could only ever sit at 0%
+  // or jump straight to 100. It was declared and bound but never assigned
+  // anywhere, which is why the loading bar stayed empty throughout every
+  // analysis. LoadingView now shows an indeterminate spinner plus this status line.
   @State loadError: string = ''; // 页面四态之一：error（HarmoneyOpenEye 模式）
 
   // 鸿蒙特有：AppStorage 持久化暗色模式
@@ -178,8 +182,7 @@ struct Index {
         Column() {
           if (this.isLoading) {
             LoadingView({
-              statusText: $statusText,
-              progress: $progress
+              statusText: $statusText
             })
           } else if (this.loadError.length > 0) {
             // 错误态：可重试（HarmoneyOpenEye 四态容器模式）
@@ -247,8 +250,12 @@ struct Index {
 
       // ─── 浮动工具栏 ───
       FloatingToolbar({ onAction: (action: string) => { this.handleAction(action); } })
-        .position({ x: '80%', y: '80%' })
-    }
+        // No .position() here on purpose: FloatingToolbar positions itself with
+        // `.position({ x: this.positionX, y: this.positionY })`. Applying a
+        // percentage offset to the component as well stacked a SECOND offset on
+        // top, so the toolbar sat at 80%/80% of the workspace instead of at its
+        // own coordinates, and every drag was measured from that anchor.
+      }
     .width('100%')
     .height('100%')
     .backgroundColor(this.darkMode ? '#1a1a2e' : '#FFFFFF')

@@ -1,6 +1,6 @@
 @Component
 export struct BiostratDialog {
-  @Link visible: boolean;
+  @Link @Watch('onVisibleChange') visible: boolean;
   // The "Method" selector (ua / rasc) is gone. `unitaryAssociations` — the only
   // function this dialog dispatches to — has no method parameter, and the value
   // was dropped by Index.ets, so choosing "rasc" silently ran unitary
@@ -10,6 +10,21 @@ export struct BiostratDialog {
   @State min_occurrence: number = 2;
   @State showTips: boolean = false;
   onConfirm: (params: Record<string, Object>) => void = () => {};
+
+  /**
+   * Reset every parameter when the dialog is reopened.
+   *
+   * ArkUI keeps @State values across a visibility toggle, so before this the
+   * numbers typed in an earlier session silently reappeared the next time the
+   * dialog was opened — and a user who forgets they changed something reads the
+   * stale value as the default. For a research tool that means silently wrong
+   * results, so the state is restored to its declared defaults on every open.
+   */
+  onVisibleChange(): void {
+    if (!this.visible) return;
+    this.min_occurrence = 2;
+    this.showTips = false;
+  }
 
   build() {
     Column() {

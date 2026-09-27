@@ -4,7 +4,7 @@
  */
 @Component
 export struct NMDSDialog {
-  @Link visible: boolean;
+  @Link @Watch('onVisibleChange') visible: boolean;
   @State n_dimensions: number = 2;
   @State n_restarts: number = 10;
   @State max_iterations: number = 300;
@@ -13,6 +13,25 @@ export struct NMDSDialog {
   @State showAdvanced: boolean = false;
   metricOpts: string[] = ['bray_curtis', 'euclidean', 'jaccard'];
   onConfirm: (params: Record<string, Object>) => void = () => {};
+
+  /**
+   * Reset every parameter when the dialog is reopened.
+   *
+   * ArkUI keeps @State values across a visibility toggle, so before this the
+   * numbers typed in an earlier session silently reappeared the next time the
+   * dialog was opened — and a user who forgets they changed something reads the
+   * stale value as the default. For a research tool that means silently wrong
+   * results, so the state is restored to its declared defaults on every open.
+   */
+  onVisibleChange(): void {
+    if (!this.visible) return;
+    this.n_dimensions = 2;
+    this.n_restarts = 10;
+    this.max_iterations = 300;
+    this.metricIdx = 0;
+    this.errorMsg = '';
+    this.showAdvanced = false;
+  }
 
   build() {
     Column() {

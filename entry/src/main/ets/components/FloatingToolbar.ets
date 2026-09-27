@@ -7,7 +7,20 @@ export struct FloatingToolbar {
   @State visible: boolean = true;
   @State positionX: number = 100;
   @State positionY: number = 100;
-  @State isDragging: boolean = false;
+  // `isDragging` was written by the pan's start/end callbacks and read by
+  // nothing, so it never affected rendering; the gesture now only needs the
+  // delta, and the dead state plus the three uncalled show()/hide()/toggle()
+  // methods are gone.
+  //
+  // NOTE for the caller: the toolbar positions ITSELF with `.position()` (see
+  // build()). Applying a `.position()` to the component from outside stacks a
+  // second offset on top, which is why the toolbar used to sit at 80%/80% and
+  // drag from there rather than from its own coordinates.
+  //
+  // Known limitation: the drag is not clamped, so the toolbar can be pulled
+  // out of reach. Clamping needs the window size, and the only way to get it is
+  // a device-only @kit display call that cannot be exercised in the Node test
+  // harness — left for a device-tested pass rather than shipping untested.
 
   onAction: (action: string) => void = () => {};
 
@@ -35,23 +48,17 @@ export struct FloatingToolbar {
       .border({ width: 1, color: '#E4E7EB' })
       .shadow({ radius: 8, color: '#00000020', offsetY: 2 })
       .position({ x: this.positionX, y: this.positionY })
+      // GestureMask: PARALLEL lets the pan and the child buttons both receive
+      // the touch. Without it the pan gesture competes with the button clicks,
+      // so dragging the toolbar could swallow taps on [Undo] / [Export] / etc.
       .gesture(
         PanGesture()
-          .onActionStart(() => {
-            this.isDragging = true;
-          })
+          .gestureMask(GestureMask.PARALLEL)
           .onActionUpdate((event: GestureEvent) => {
             this.positionX += event.deltaX;
             this.positionY += event.deltaY;
           })
-          .onActionEnd(() => {
-            this.isDragging = false;
-          })
       )
     }
   }
-
-  show(): void { this.visible = true; }
-  hide(): void { this.visible = false; }
-  toggle(): void { this.visible = !this.visible; }
 }

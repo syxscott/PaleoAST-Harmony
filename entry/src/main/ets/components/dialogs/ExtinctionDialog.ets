@@ -4,7 +4,7 @@
  */
 @Component
 export struct ExtinctionDialog {
-  @Link visible: boolean;
+  @Link @Watch('onVisibleChange') visible: boolean;
   @State methodIdx: number = 0;
   @State confidence_level: number = 0.95;
   @State showAdvanced: boolean = false;
@@ -14,6 +14,22 @@ export struct ExtinctionDialog {
     'Strauss-Sadler (1989): assumes uniform fossil distribution',
   ];
   onConfirm: (params: Record<string, Object>) => void = () => {};
+
+  /**
+   * Reset every parameter when the dialog is reopened.
+   *
+   * ArkUI keeps @State values across a visibility toggle, so before this the
+   * numbers typed in an earlier session silently reappeared the next time the
+   * dialog was opened — and a user who forgets they changed something reads the
+   * stale value as the default. For a research tool that means silently wrong
+   * results, so the state is restored to its declared defaults on every open.
+   */
+  onVisibleChange(): void {
+    if (!this.visible) return;
+    this.methodIdx = 0;
+    this.confidence_level = 0.95;
+    this.showAdvanced = false;
+  }
 
   build() {
     Column() {

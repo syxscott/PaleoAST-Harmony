@@ -1,9 +1,24 @@
 @Component
 export struct LDADialog {
-  @Link visible: boolean;
+  @Link @Watch('onVisibleChange') visible: boolean;
   @State n_components: number = 2;
   @State showTips: boolean = false;
   onConfirm: (params: Record<string, Object>) => void = () => {};
+
+  /**
+   * Reset every parameter when the dialog is reopened.
+   *
+   * ArkUI keeps @State values across a visibility toggle, so before this the
+   * numbers typed in an earlier session silently reappeared the next time the
+   * dialog was opened — and a user who forgets they changed something reads the
+   * stale value as the default. For a research tool that means silently wrong
+   * results, so the state is restored to its declared defaults on every open.
+   */
+  onVisibleChange(): void {
+    if (!this.visible) return;
+    this.n_components = 2;
+    this.showTips = false;
+  }
 
   build() {
     Column() {

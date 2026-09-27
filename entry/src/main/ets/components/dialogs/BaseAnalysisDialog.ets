@@ -10,7 +10,7 @@
  */
 @Component
 export struct BaseAnalysisDialog {
-  @Link visible: boolean;
+  @Link @Watch('onVisibleChange') visible: boolean;
   @State title: string = '';
   @State description: string = '';
   @State params: Record<string, Object> = {};
@@ -18,6 +18,24 @@ export struct BaseAnalysisDialog {
   @State showTips: boolean = false;
   validationRules: Array<(params: Record<string, Object>) => string | null> = [];
   onConfirm: (params: Record<string, Object>) => void = () => {};
+
+  /**
+   * Reset every parameter when the dialog is reopened.
+   *
+   * ArkUI keeps @State values across a visibility toggle, so before this the
+   * numbers typed in an earlier session silently reappeared the next time the
+   * dialog was opened — and a user who forgets they changed something reads the
+   * stale value as the default. For a research tool that means silently wrong
+   * results, so the state is restored to its declared defaults on every open.
+   */
+  onVisibleChange(): void {
+    if (!this.visible) return;
+    this.title = '';
+    this.description = '';
+    this.params = {};
+    this.validationError = '';
+    this.showTips = false;
+  }
   onCancel: () => void = () => {};
 
   /**

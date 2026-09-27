@@ -1,6 +1,6 @@
 @Component
 export struct GPADialog {
-  @Link visible: boolean;
+  @Link @Watch('onVisibleChange') visible: boolean;
   // No "max iterations" field any more. Generalised Procrustes is a closed-form
   // least-squares solution — it has no iteration to bound — and the control was
   // never forwarded to gpa() anyway, so the exported analysis script recorded a
@@ -8,6 +8,20 @@ export struct GPADialog {
   // not exist.
   @State showTips: boolean = false;
   onConfirm: (params: Record<string, Object>) => void = () => {};
+
+  /**
+   * Reset every parameter when the dialog is reopened.
+   *
+   * ArkUI keeps @State values across a visibility toggle, so before this the
+   * numbers typed in an earlier session silently reappeared the next time the
+   * dialog was opened — and a user who forgets they changed something reads the
+   * stale value as the default. For a research tool that means silently wrong
+   * results, so the state is restored to its declared defaults on every open.
+   */
+  onVisibleChange(): void {
+    if (!this.visible) return;
+    this.showTips = false;
+  }
 
   build() {
     Column() {

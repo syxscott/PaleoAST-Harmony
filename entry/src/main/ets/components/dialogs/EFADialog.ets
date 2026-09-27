@@ -4,12 +4,29 @@
  */
 @Component
 export struct EFADialog {
-  @Link visible: boolean;
+  @Link @Watch('onVisibleChange') visible: boolean;
   @State n_harmonics: number = 10;
   @State n_points: number = 200;
   @State errorMsg: string = '';
   @State showAdvanced: boolean = false;
   onConfirm: (params: Record<string, Object>) => void = () => {};
+
+  /**
+   * Reset every parameter when the dialog is reopened.
+   *
+   * ArkUI keeps @State values across a visibility toggle, so before this the
+   * numbers typed in an earlier session silently reappeared the next time the
+   * dialog was opened — and a user who forgets they changed something reads the
+   * stale value as the default. For a research tool that means silently wrong
+   * results, so the state is restored to its declared defaults on every open.
+   */
+  onVisibleChange(): void {
+    if (!this.visible) return;
+    this.n_harmonics = 10;
+    this.n_points = 200;
+    this.errorMsg = '';
+    this.showAdvanced = false;
+  }
 
   build() {
     Column() {

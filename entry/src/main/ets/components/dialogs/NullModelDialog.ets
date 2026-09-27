@@ -4,7 +4,7 @@
  */
 @Component
 export struct NullModelDialog {
-  @Link visible: boolean;
+  @Link @Watch('onVisibleChange') visible: boolean;
   @State metricIdx: number = 0;
   @State n_permutations: number = 999;
   // No "Parallel workers" field. `nullModel(presenceMatrix, metric, nPermutations)`
@@ -20,6 +20,22 @@ export struct NullModelDialog {
     'Checkerboard: counts perfect checkerboard pairs',
   ];
   onConfirm: (params: Record<string, Object>) => void = () => {};
+
+  /**
+   * Reset every parameter when the dialog is reopened.
+   *
+   * ArkUI keeps @State values across a visibility toggle, so before this the
+   * numbers typed in an earlier session silently reappeared the next time the
+   * dialog was opened — and a user who forgets they changed something reads the
+   * stale value as the default. For a research tool that means silently wrong
+   * results, so the state is restored to its declared defaults on every open.
+   */
+  onVisibleChange(): void {
+    if (!this.visible) return;
+    this.metricIdx = 0;
+    this.n_permutations = 999;
+    this.showAdvanced = false;
+  }
 
   build() {
     Column() {
