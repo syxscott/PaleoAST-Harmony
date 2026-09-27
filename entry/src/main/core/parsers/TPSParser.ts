@@ -21,6 +21,9 @@ export function parseTPS(text: string): TPSRecord[] {
   let curves: number[][][] = [];
   let currentCurve: number[][] = [];
   let collectingCurve = false;
+  // TPS distinguishes 2-D (`LM=`) from 3-D (`LM3=`) landmark blocks, so the
+  // coordinate reader below knows how many components to keep.
+  let is3D = false;
 
   function flush(): void {
     if (current && landmarks.length > 0) {
@@ -33,6 +36,7 @@ export function parseTPS(text: string): TPSRecord[] {
     curves = [];
     collectingLM = false;
     collectingCurve = false;
+    is3D = false;
   }
 
   for (const line of lines) {
@@ -42,6 +46,7 @@ export function parseTPS(text: string): TPSRecord[] {
     if (t.startsWith('LM=') || t.startsWith('lm=')) {
       flush();
       lmCount = parseInt(t.split('=')[1]) || 0;
+      is3D = false;
       current = current ?? { id: String(records.length + 1), landmarks: [], comment: '' };
       collectingLM = true;
       collectingCurve = false;
@@ -50,6 +55,7 @@ export function parseTPS(text: string): TPSRecord[] {
     if (t.startsWith('LM3=')) {
       flush();
       lmCount = parseInt(t.split('=')[1]) || 0;
+      is3D = true;
       current = current ?? { id: String(records.length + 1), landmarks: [], comment: '' };
       collectingLM = true;
       collectingCurve = false;
@@ -80,8 +86,12 @@ export function parseTPS(text: string): TPSRecord[] {
     // Landmark data
     if (collectingLM && lmCount > 0) {
       const parts = t.split(/[\s,]+/).map(Number);
-      if (parts.length >= 2 && !isNaN(parts[0])) {
-        landmarks.push([parts[0], parts[1]]);
+      const need = is3D ? 3 : 2;
+        if (parts.length >= need && parts.slice(0, need).every(v => !isNaN(v))) {
+          // An LM3 block carries x y z. Pushing only [x, y] silently reduced
+          // every 3-D landmark configuration to 2-D, so a 3-D morphometric run
+          // produced plausible-looking output from half the data.
+          landmarks.push(is3D ? [parts[0], parts[1], parts[2]] : [parts[0], parts[1]]);
         if (landmarks.length >= lmCount) collectingLM = false;
       }
       continue;

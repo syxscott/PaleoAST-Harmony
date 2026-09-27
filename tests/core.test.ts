@@ -31,6 +31,7 @@ import { extrapolation } from '../entry/src/main/core/analysis/ecology/CoverageR
 import { fossilCountDistribution } from '../entry/src/main/core/analysis/macroevolution/index.ts';
 import { ReportBuilder, TableGenerator, compileLaTeX } from '../entry/src/main/core/reporting/index.ts';
 import { parseExcel } from '../entry/src/main/core/parsers/ExcelParser.ts';
+import { parseExcelText, excelToDataMatrix } from '../entry/src/main/core/parsers/ExcelParser.ts';
 import { ViewPortHandler } from '../entry/src/main/ets/components/plot/ViewPortHandler.ts';
 import { ChartHighlighter } from '../entry/src/main/ets/components/plot/ChartHighlighter.ts';
 import { ChartComputator } from '../entry/src/main/ets/components/plot/ChartComputator.ts';
@@ -790,18 +791,47 @@ describe('review fixes: data integrity', () => {
   });
 
   it('xlsx import keeps the first data row and resolves cell types', () => {
-    // Two separate pre-fix defects, both on the xlsx path:
+    // Three pre-fix defects, all on the xlsx path:
     //  1. `data.shift()` after the header was already skipped dropped row 1.
     //  2. the cell `t` attribute was read from the element's INNER content, so
     //     it never matched: shared strings became their index, text became 0.
+    //  3. the header loop pushed an '' placeholder for the row-label column, so
+    //     colLabels came out one longer than the data. This test used to ASSERT
+    //     that broken length ("['', 'Count', 'Flag']" for 2 data columns), which
+    //     locked the bug in place — and because DataMatrix swaps the whole array
+    //     for Var_1..Var_N when the lengths disagree, every real xlsx import
+    //     silently lost all of its column names.
     const r = parseExcel(buildMinimalXlsx(), { hasHeader: true, hasRowLabels: true });
     const s = r.sheets[0];
     expect(s.data.length).toBe(3);              // was 2
     expect(s.data[0][0]).toBe(11);              // first data row survived
-    expect(s.colLabels).toEqual(['', 'Count', 'Flag']);
+    // One label per DATA column: the row-label column gets no slot.
+    expect(s.colLabels).toEqual(['Count', 'Flag']);
+    expect(s.colLabels.length).toBe(s.data[0].length);
     expect(s.rowLabels).toEqual(['Sp.A', 'Sp.B', 'Sp.C']);
     expect(s.data[0][1]).toBe(1);               // boolean true
     expect(s.data[1][1]).toBe(0);               // boolean false
+  });
+
+  it('an imported xlsx keeps its real column names end to end (they were all lost to Var_N)', () => {
+    // The user-visible symptom: DataMatrix replaces colLabels wholesale when the
+    // length does not match the data, so a one-element overshoot silently threw
+    // away every header the file actually contained.
+    const r = parseExcel(buildMinimalXlsx(), { hasHeader: true, hasRowLabels: true });
+    const dm = excelToDataMatrix(r, 0, { hasHeader: true, hasRowLabels: true });
+    expect(dm.colLabels).toEqual(['Count', 'Flag']);
+    expect(dm.colLabels.length).toBe(dm.data.cols);
+    expect(dm.rowLabels).toEqual(['Sp.A', 'Sp.B', 'Sp.C']);
+  });
+
+  it('the delimited fallback also keeps one label per data column', () => {
+    // parseDelimited had the same placeholder; it backs the TSV/CSV fallback
+    // used when a workbook is not a real xlsx container.
+    const r = parseExcelText('Sp.A\tCount\tFlag\nSp.A\t11\t1\nSp.B\t12\t0\n');
+    const s = r.sheets[0];
+    expect(s.colLabels).toEqual(['Count', 'Flag']);
+    expect(s.colLabels.length).toBe(s.data[0].length);
+    expect(s.rowLabels).toEqual(['Sp.A', 'Sp.B']);
   });
 });
 

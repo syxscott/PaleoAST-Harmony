@@ -598,13 +598,15 @@ function parseSheetXml(xml: string, sharedStrings: string[], opts: Required<Pars
   const colLabels: string[] = [];
   if (opts.hasHeader && rows.has(0)) {
     const headerRow = rows.get(0)!;
-    for (let j = 0; j <= maxCol; j++) {
-      if (opts.hasRowLabels && j === 0) {
-        colLabels.push('');
-      } else {
-        const cell = headerRow.get(j);
-        colLabels.push(cell?.toString() || `Col_${j + 1}`);
-      }
+    // Column 0 is the ROW-LABEL column when hasRowLabels is set, so it must not
+    // occupy a column-label slot. Pushing an '' placeholder for it made
+    // colLabels one element longer than the data, and DataMatrix's constructor
+    // replaces the whole array with Var_1..Var_N whenever the lengths disagree
+    // -- so importing any xlsx with row labels silently discarded every real
+    // column name. The no-header branch below already started at column 1.
+    for (let j = opts.hasRowLabels ? 1 : 0; j <= maxCol; j++) {
+      const cell = headerRow.get(j);
+      colLabels.push(cell?.toString() || `Col_${j + 1}`);
     }
   } else {
     for (let j = opts.hasRowLabels ? 1 : 0; j <= maxCol; j++) {
@@ -737,9 +739,6 @@ function parseDelimited(text: string, opts: Required<ParseExcelOptions>): ExcelD
   const colLabels: string[] = [];
   if (opts.hasHeader && rows.length > 0) {
     const header = rows[0];
-    if (opts.hasRowLabels && header.length > 0) {
-      colLabels.push('');
-    }
     for (let j = opts.hasRowLabels ? 1 : 0; j < header.length; j++) {
       colLabels.push(header[j] || `Col_${j + 1}`);
     }
