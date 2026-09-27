@@ -84,6 +84,40 @@ SIMPER,**那些结果需要重跑**。
 门禁:`tests/test.mjs` **246 passed, 0 failed**;`node test/device/run.mjs` 19/19;
 `structure_check.py` 175 文件 0 问题。
 
+## 追加:把其余六个度量也一起对照了
+
+只查一个度量是不够的 —— 如果 Bray-Curtis 能在"看起来对"的情况下错,
+其它五个也可能。于是把 `computeDistanceMatrix` 的全部度量对着
+scipy 1.15.3 机械核了一遍:**7 个度量 x 120 组向量对**,
+覆盖全非负、含负数、恰好抵消、全负、零向量、极小(1e-8)与极大(1e8)。
+
+修复后全部吻合,最差相对误差 2.2e-16(即机器精度,出现在 cosine 与
+correlation,只是浮点求和顺序差异,不是公式差异):
+
+| 度量 | 最差相对误差 | 对照组数 |
+|---|---|---|
+| euclidean | 0 | 120 |
+| bray_curtis | 0 | 120 |
+| canberra | 0 | 120 |
+| cityblock | 0 | 120 |
+| chebyshev | 0 | 120 |
+| cosine | 2.22e-16 | 111 |
+| correlation | 2.22e-16 | 106 |
+
+`jaccard` / `hamming` 不在表内,原因见上一节(本仓按坐标定义,
+scipy 按集合/布尔定义,数字不可比)。
+
+**这次核对的另一个收获**:`correlation` 和 `cosine` 对**共线**向量返回 0
+是**正确行为**(0 表示 r=1 / 同方向,不表示"同一个点")。
+我第一版测试把它们也算进"两个不同向量必须距离 > 0",结果测试失败 ——
+查下来是**我的断言错了,代码是对的**。已拆成两条测试:
+非共线向量要求距离 > 0;共线向量明确断言 cosine/correlation 为 0 并说明原因。
+
+新增 `tests/metricsVsScipy.test.ts`:7 个度量 x 74 组用例的参考表
+**全部由 scipy 1.15.3 生成**,不是手推。每组还检查距离矩阵的对称性与对角线为 0。
+
+门禁随之更新:`tests/test.mjs` **262 passed, 0 failed**。
+
 ## 顺带记录:同名但并非 scipy 语义的两个度量
 
 `jaccard` 与 `hamming` 在本仓是按坐标定义的(相等位比例 / 不等位比例),
