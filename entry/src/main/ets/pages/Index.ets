@@ -3,6 +3,7 @@ import { StatisticsController } from '../../core/controllers/StatisticsControlle
 import { StateManager } from '../../core/models/index';
 import { Matrix } from '../../core/math/Matrix';
 import { parseCSV } from '../../core/parsers/CSVParser';
+import { ReportBuilder, compileLaTeX } from '../../core/reporting/index';
 import { EventBus } from '../../core/utils/EventBus';
 import { FilePickerHelper } from '../../core/io/FilePickerHelper';
 import { DialogManager } from '../components/DialogManager';
@@ -360,6 +361,10 @@ struct Index {
         .catch((e: Error) => { this.statusText = 'Script export error: ' + String(e).substring(0, 80); });
       return;
     }
+    if (format.startsWith('Report')) {
+      this.exportReport(format);
+      return;
+    }
     try {
       const content = this.dataCtrl.exportCSV(format === 'TSV' ? '\t' : ',');
       const ext = format === 'TSV' ? 'tsv' : 'csv';
@@ -372,6 +377,69 @@ struct Index {
           this.statusText = 'Export error: ' + String(e).substring(0, 80);
         });
     } catch (e) { this.statusText = 'Export error: ' + e; }
+  }
+
+  /**
+   * Export a formatted report (Markdown / HTML / LaTeX).
+   *
+   * `core/reporting` — ReportBuilder, LatexCompiler, TableGenerator,
+   * MatrixConverter, FigureHandler, ~1250 lines — was completely unreachable:
+   * ExportDialog offered only CSV / TSV / Script, so a palaeontologist had no
+   * way to get a manuscript-ready table out of the app. This wires it up.
+   *
+   * The LaTeX escaping fixes from the 2026-09-27 audit (backslash / tilde /
+   * caret) live in LatexCompiler.escapeLatex and are shared by all three
+   * ReportBuilder._escapeLaTeX and FigureHandler._escape call sites.
+   */
+  private exportReport(format: string): void {
+    const dm = this.stateMgr?.dataMatrix;
+    if (!dm) { this.statusText = 'No data loaded'; return; }
+    let content: string, ext: string, label: string;
+    try {
+      const rb = new ReportBuilder();
+      rb.setTitle('PaleoAST export');
+      rb.setAbstract('Data: ' + dm.nSamples + ' samples x ' + dm.nVariables + ' variables'
+        + (dm.currentFile ? ' (' + dm.currentFile + ')' : ''));
+      rb.addSection('Data', 'Exported from the PaleoAST-Harmony workspace.', 1);
+      // `addTable` expects a table FRAGMENT (the `tabular` plus rules) — both
+      // ReportBuilder.toLaTeX() and LatexCompiler.renderTable wrap it in
+      // \begin{table}…\end{table} themselves. Passing TableGenerator.latex(),
+      // which already emits a complete table environment, produced a nested
+      // float and a hard "Not in outer par mode" error from pdflatex.
+      const headers = dm.colLabels.length > 0 ? dm.colLabels
+        : Array.from({ length: dm.nVariables }, (_, j) => 'V' + (j + 1));
+      const rows: number[][] = [];
+      for (let i = 0; i < dm.nSamples; i++) rows.push(dm.data.row(i));
+      rb.addTable(ReportBuilder.tableFromMatrix(headers, rows), 'Exported data');
+      // Append the analyses the user actually ran, so the report is a record of
+      // the session rather than just a dump of the matrix.
+      if (this.analysisHistory.length > 0) {
+        rb.addSection('Analyses run', this.analysisHistory
+          .map((h, i) => (i + 1) + '. ' + h.analysis).join('\n'), 1);
+      }
+      if (format === 'Report (Markdown)') { content = rb.toMarkdown(); ext = 'md'; label = 'Report (Markdown)'; }
+      else if (format === 'Report (HTML)') { content = rb.toHTML(); ext = 'html'; label = 'Report (HTML)'; }
+      else {
+        // LaTeX goes through compileLaTeX so the preamble and the document
+        // wrapper are emitted — rb.toLaTeX() is a fragment stream only.
+        const compiled = compileLaTeX(rb, {
+          documentClass: 'article', fontSize: 11, paperSize: 'a4paper',
+          margin: '1in', packages: ['booktabs'], bibliography: false,
+        });
+        content = compiled.texContent;
+        ext = 'tex';
+        label = 'Report (LaTeX)';
+        if (!content) { this.statusText = 'LaTeX report produced no output'; return; }
+      }
+    } catch (e) {
+      this.statusText = 'Report error: ' + String(e).substring(0, 100);
+      return;
+    }
+    FilePickerHelper.saveFile(content, 'paleoast_report.' + ext)
+      .then((uri: string | null) => {
+        this.statusText = uri ? label + ' saved to ' + uri : label + ' export cancelled';
+      })
+      .catch((e: Error) => { this.statusText = 'Report export error: ' + String(e).substring(0, 80); });
   }
 
   /**
@@ -1160,3 +1228,5 @@ struct Index {
     this.statusText = 'Exported ' + format;
   }
 }
+
+

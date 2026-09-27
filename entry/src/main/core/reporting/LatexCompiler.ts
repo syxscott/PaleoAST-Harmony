@@ -17,7 +17,14 @@ export interface CompileOptions {
   bibliography?: string[];    // BibTeX keys
   packages?: string[];       // additional LaTeX packages
   fontSize?: number;         // default 11
-  paperSize?: string;        // default 'a4paper'
+  /**
+   * Paper size. Typed as a union because the value is interpolated straight
+   * into `\documentclass[...]{...}` and `\geometry{...}`, and both reject
+   * anything that is not a real class option: passing `'a4'` produced
+   * `! Package keyval Error: a4 undefined.` and NO pdf at all. It was an
+   * unconstrained `string`, so nothing caught the bad value until pdflatex.
+   */
+  paperSize?: 'a4paper' | 'letterpaper' | 'legalpaper' | 'executivepaper' | 'a5paper' | 'b5paper';
   margin?: string;           // default '1in'
 }
 
@@ -38,8 +45,24 @@ export function compileLaTeX(builder: ReportBuilder, opts: CompileOptions): Comp
   try {
     const docClass = opts.documentClass ?? 'article';
     const fontSize = opts.fontSize ?? 11;
-    const paperSize = opts.paperSize ?? 'a4paper';
     const margin = opts.margin ?? '1in';
+
+    // Normalise the paper size even though the type is now a union: ArkUI
+    // payloads arrive as untyped objects, so a caller can still hand over the
+    // bare string 'a4'. Both \documentclass and \geometry need the '*paper'
+    // spelling, and a wrong value fails at compile time with
+    // "Package keyval Error", long after the caller thought it had succeeded.
+    const PAPER_SIZES = ['a4paper', 'letterpaper', 'legalpaper', 'executivepaper', 'a5paper', 'b5paper'];
+    const rawPaper = String(opts.paperSize ?? 'a4paper').trim().toLowerCase();
+    let paperSize = PAPER_SIZES.indexOf(rawPaper) >= 0 ? rawPaper : 'a4paper';
+    if (paperSize !== rawPaper) {
+      // Accept the obvious short forms rather than silently falling back.
+      if (/^a4$/.test(rawPaper)) paperSize = 'a4paper';
+      else if (/^letter$/.test(rawPaper)) paperSize = 'letterpaper';
+      else if (/^legal$/.test(rawPaper)) paperSize = 'legalpaper';
+      else if (/^a5$/.test(rawPaper)) paperSize = 'a5paper';
+      else errors.push('paperSize "' + String(opts.paperSize) + '" is not a LaTeX paper option; using a4paper');
+    }
 
     // Build packages
     const standardPackages = [

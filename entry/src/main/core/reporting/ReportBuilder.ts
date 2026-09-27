@@ -187,6 +187,50 @@ export class ReportBuilder {
       lines.push('');
     }
 
+    // Tables, figures, statistical results and references used to be dropped
+    // here: addTable()/addFigure()/addStatisticalResult()/addReference() all
+    // recorded their content, but toMarkdown() only emitted title, authors,
+    // date, abstract and sections — so a table added to a report simply vanished
+    // from the Markdown and HTML output while still appearing in the LaTeX one.
+    for (const tbl of this._tables) {
+      // `content` is a LaTeX fragment for LaTeX consumers; Markdown and HTML
+      // get the caption plus a pointer rather than raw \begin{tabular}, which
+      // would render as noise.
+      lines.push(`**${tbl.caption || 'Table'}**`);
+      lines.push('');
+      if (tbl.content) {
+        lines.push('```latex');
+        lines.push(tbl.content);
+        lines.push('```');
+        lines.push('');
+      }
+    }
+
+    for (const fig of this._figures) {
+      lines.push(`![${fig.caption}](${fig.path})`);
+      lines.push('');
+    }
+
+    for (const sr of this._statisticalResults) {
+      const bits: string[] = [];
+      if (sr.statistic !== undefined) bits.push(`statistic = ${sr.statistic}`);
+      if (sr.df !== undefined) bits.push(`df = ${sr.df}`);
+      if (sr.pValue !== undefined) bits.push(`p = ${sr.pValue}`);
+      if (sr.effectSize !== undefined) bits.push(`effect size = ${sr.effectSize}`);
+      if (sr.ciLower !== undefined || sr.ciUpper !== undefined) {
+        bits.push(`95% CI = [${sr.ciLower ?? '--'}, ${sr.ciUpper ?? '--'}]`);
+      }
+      lines.push(`- **${sr.testName}**${bits.length ? ': ' + bits.join(', ') : ''}`);
+    }
+    if (this._statisticalResults.length) lines.push('');
+
+    if (this._references.length) {
+      lines.push('## References');
+      lines.push('');
+      for (const r of this._references) lines.push('- ' + r);
+      lines.push('');
+    }
+
     return lines.join('\n');
   }
 
@@ -220,6 +264,44 @@ export class ReportBuilder {
       const level = Math.min(section.level, 6);
       lines.push(`<h${level}>${this._escapeHTML(section.title)}</h${level}>`);
       lines.push(`<p>${this._escapeHTML(section.content).replace(/\n/g, '<br>')}</p>`);
+    }
+
+    // Same omission as in toMarkdown(): tables, figures, statistical results
+    // and references were recorded but never emitted. The stylesheet above even
+    // declares `table` / `td` / `th` rules that nothing could ever match.
+    for (const fig of this._figures) {
+      lines.push(`<figure><img src="${this._escapeHTML(fig.path)}" alt="${this._escapeHTML(fig.caption)}"/>`);
+      lines.push(`<figcaption>${this._escapeHTML(fig.caption)}</figcaption></figure>`);
+    }
+
+    for (const tbl of this._tables) {
+      lines.push(`<h3>${this._escapeHTML(tbl.caption || 'Table')}</h3>`);
+      // `content` is a LaTeX fragment by contract. Translating LaTeX tabular to
+      // HTML here would be a second, untested implementation of the same
+      // table — so the caption is emitted and the fragment is shown verbatim
+      // in a <pre>, which is honest about what it is.
+      lines.push(`<pre>${this._escapeHTML(tbl.content || '')}</pre>`);
+    }
+
+    if (this._statisticalResults.length) {
+      lines.push('<h2>Statistical results</h2>');
+      lines.push('<table><tr><th>Analysis</th><th>Statistic</th><th>df</th><th>p</th><th>Effect size</th></tr>');
+      for (const sr of this._statisticalResults) {
+        lines.push('<tr>'
+          + `<td>${this._escapeHTML(sr.testName)}</td>`
+          + `<td>${sr.statistic === undefined ? '--' : this._escapeHTML(String(sr.statistic))}</td>`
+          + `<td>${sr.df === undefined ? '--' : this._escapeHTML(String(sr.df))}</td>`
+          + `<td>${sr.pValue === undefined ? '--' : this._escapeHTML(String(sr.pValue))}</td>`
+          + `<td>${sr.effectSize === undefined ? '--' : this._escapeHTML(String(sr.effectSize))}</td>`
+          + '</tr>');
+      }
+      lines.push('</table>');
+    }
+
+    if (this._references.length) {
+      lines.push('<h2>References</h2><ul>');
+      for (const r of this._references) lines.push(`<li>${this._escapeHTML(r)}</li>`);
+      lines.push('</ul>');
     }
 
     lines.push('</body></html>');
@@ -408,10 +490,14 @@ export class ReportBuilder {
     const lines: string[] = [];
     lines.push(`\\begin{tabular}{${colSpec}}`);
     lines.push('\\toprule');
-    lines.push(headers.map(h => `\\textbf{${h}}`).join(' & ') + ' \\\\');
+    // Header cells MUST be escaped. Column names come straight from the data
+    // file, and an unescaped `_` puts LaTeX into math mode: a dataset with a
+    // column called "Length_mm" produced `! Missing $ inserted` at
+    // `\textbf{Length_mm}` and the document would not compile at all.
+    lines.push(headers.map(h => `\\textbf{${escapeLatex(h)}}`).join(' & ') + ' \\\\');
     lines.push('\\midrule');
     for (const row of rows) {
-      lines.push(row.map(v => typeof v === 'number' ? v.toFixed(digits) : String(v)).join(' & ') + ' \\\\');
+      lines.push(row.map(v => typeof v === 'number' ? v.toFixed(digits) : escapeLatex(String(v))).join(' & ') + ' \\\\');
     }
     lines.push('\\bottomrule');
     lines.push('\\end{tabular}');
