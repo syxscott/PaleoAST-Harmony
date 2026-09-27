@@ -24,7 +24,10 @@ export function rowDistance(a: number[], b: number[], metric: DistanceMetric): n
     }
     case 'braycurtis': {
       let num = 0, den = 0;
-      for (let k = 0; k < a.length; k++) { num += Math.abs(a[k] - b[k]); den += a[k] + b[k]; }
+      // scipy: sum|u_i - v_i| / sum|u_i + v_i| -- the abs belongs around
+      // the SUM. Without it a vector pair that sums to <= 0 falls into
+      // the guard below and two different samples get distance 0.
+      for (let k = 0; k < a.length; k++) { num += Math.abs(a[k] - b[k]); den += Math.abs(a[k] + b[k]); }
       return den > 0 ? num / den : 0;
     }
     case 'cosine': {

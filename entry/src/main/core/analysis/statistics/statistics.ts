@@ -1409,7 +1409,7 @@ export function computeDistanceMatrix(data: Matrix, metric: Metric = 'euclidean'
     let d: number;
     const a = data.row(i), b = data.row(j);
     switch (metric) {
-      case 'bray_curtis': { let num = 0, den = 0; for (let k = 0; k < a.length; k++) { num += Math.abs(a[k] - b[k]); den += a[k] + b[k]; } d = den > 0 ? num / den : 0; break; }
+      case 'bray_curtis': { let num = 0, den = 0; for (let k = 0; k < a.length; k++) { num += Math.abs(a[k] - b[k]); den += Math.abs(a[k] + b[k]); } d = den > 0 ? num / den : 0; break; }
       case 'cosine': { let dot = 0, na = 0, nb = 0; for (let k = 0; k < a.length; k++) { dot += a[k] * b[k]; na += a[k] ** 2; nb += b[k] ** 2; } d = (na > 0 && nb > 0) ? 1 - dot / (Math.sqrt(na) * Math.sqrt(nb)) : 1; break; }
       case 'jaccard': { let num = 0, den = 0; for (let k = 0; k < a.length; k++) { if (a[k] !== 0 || b[k] !== 0) { den++; if (a[k] !== b[k]) num++; } } d = den > 0 ? num / den : 0; break; }
       case 'canberra': { let s = 0; for (let k = 0; k < a.length; k++) { const denom = Math.abs(a[k]) + Math.abs(b[k]); s += denom > 0 ? Math.abs(a[k] - b[k]) / denom : 0; } d = s; break; }
