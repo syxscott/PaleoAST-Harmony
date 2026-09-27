@@ -986,10 +986,7 @@ struct Index {
     const steps = this.analysisHistory.map((h, i) =>
       JSON.stringify({ step: i + 1, analysis: h.analysis, params: h.params }, null, 2)
     );
-    return header.join('
-') + '
-' + (steps.length > 0 ? steps.join(',
-') : '[]');
+    return header.join('\n') + '\n' + (steps.length > 0 ? '[' + steps.join(',\n') + ']' : '[]');
   }
 
   private async runAnalysisWithParams(name: string, params: Record<string, Object>): Promise<void> {
