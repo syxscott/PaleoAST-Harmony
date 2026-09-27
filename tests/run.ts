@@ -22,6 +22,7 @@ import './permutationCount2026.test.ts';
 import './binaryExport2026.test.ts';
 import './brayCurtis2026.test.ts';
 import './metricsVsScipy.test.ts';
+import './bootstrapNumerics2026.test.ts';
 import './history2026.test.ts';
 
 const ok = await runAll();

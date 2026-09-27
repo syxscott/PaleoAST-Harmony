@@ -223,7 +223,16 @@ export function bootstrap<T>(
       // Ref: Efron (1987) Eq. (10); Efron & Tibshirani (1993) Eq. (14.14)-(14.17)
       // z₀ = Φ⁻¹( #{θ* < θ̂} / B )
       const below = bootstrapEstimates.filter(v => v < (estimate as number)).length;
-      const z0 = normInv(below / nResamples);
+      // A degenerate distribution (every resample equals the point estimate,
+      // e.g. a constant sample or statistic = min) gives below = 0, so
+      // normInv(0) = -Infinity and the adjusted quantiles below become NaN --
+      // an interval of NaN, NaN returned in silence. scipy warns here
+      // (DegenerateDataWarning); this project fails louder, so the bias
+      // fraction is kept strictly inside (0, 1) and the uncorrected
+      // percentiles are used when there is no bias to correct.
+      const degenerate = below === 0 || below === nResamples;
+      const frac = degenerate ? 0.5 : below / nResamples;
+      const z0 = degenerate ? 0 : normInv(frac);
 
       // Acceleration a (jackknife)
       const a = jackknifeAccelerate(jackknifeEstimates);
