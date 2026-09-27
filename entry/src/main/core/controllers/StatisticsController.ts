@@ -165,7 +165,15 @@ export class StatisticsController {
     return betaDiversityDecomposition(this.getDM().data.to2D(), metric as any);
   }
 
-  runNullModel(metric = 'c_score', nPerm = 999, nWorkers?: number) {
+  /**
+   * Co-occurrence null model.
+   *
+   * The `nWorkers` parameter is gone. It was accepted here and never forwarded
+   * to `nullModel(presenceMatrix, metric, nPermutations)`, which has no such
+   * argument, so callers could set it and see no change. The dialog that
+   * collected it has been trimmed to match.
+   */
+  runNullModel(metric = 'c_score', nPerm = 999) {
     return nullModel(this.getDM().data.to2D(), metric as any, nPerm);
   }
 
@@ -216,8 +224,28 @@ export class StatisticsController {
     return isotopeAnalysis(dm.data.col(dc), dm.data.col(vc));
   }
 
-  runWavelet() {
-    return waveletTransform(this.getData().col(0));
+  /**
+   * Wavelet transform (Morlet) of the first column.
+   *
+   * The dialog collected `min_scale` / `max_scale` and neither was used: this
+   * method took no arguments and `waveletTransform` fell back to its built-in
+   * 30-scale logarithmic ladder, so the scale range the user picked was recorded
+   * in the analysis script while the computation ignored it. `waveletTransform`
+   * expects an explicit `scales` array, so the two bounds are expanded into a
+   * logarithmic ladder over [minScale, maxScale] with the same 0.125 step the
+   * default ladder uses (Torrence & Compo 1998).
+   */
+  runWavelet(minScale?: number, maxScale?: number) {
+    let scales: number[] | undefined;
+    if (minScale !== undefined && maxScale !== undefined && isFinite(minScale) && isFinite(maxScale)) {
+      const lo = Math.max(1, Math.min(minScale, maxScale));
+      const hi = Math.max(lo, Math.max(minScale, maxScale));
+      const dj = 0.125;
+      const jMax = Math.max(0, Math.floor(Math.log2(hi / lo) / dj));
+      scales = [];
+      for (let j = 0; j <= jMax; j++) scales.push(lo * Math.pow(2, j * dj));
+    }
+    return waveletTransform(this.getData().col(0), scales);
   }
 
   runStratCorr(sections: { name: string; heights: number[]; values: number[] }[]) {
@@ -430,8 +458,21 @@ export class StatisticsController {
     return tpsWarpGrid(result as any, rows, cols);
   }
 
-  runUnitaryAssociations(fad: number[][], lad: number[][], sectionNames?: string[], eventNames?: string[]) {
-    return unitaryAssociations(fad, lad, sectionNames, eventNames);
+  /**
+   * Unitary associations between FAD and LAD matrices.
+   *
+   * `minSectionOccurrence` used to be dropped: the dialog collected
+   * `min_occurrence`, Index never passed it, and this method never forwarded it
+   * to `unitaryAssociations` even though that function has had the parameter
+   * (default 2) all along. The exported "reproducible analysis script" therefore
+   * recorded a section-occurrence threshold that had no effect on the result.
+   */
+  runUnitaryAssociations(
+    fad: number[][], lad: number[][],
+    sectionNames?: string[], eventNames?: string[],
+    minSectionOccurrence: number = 2,
+  ) {
+    return unitaryAssociations(fad, lad, sectionNames, eventNames, Math.max(1, Math.floor(minSectionOccurrence)));
   }
 
   runRASC(distMatrix: number[][], eventNames?: string[], nIter: number = 100) {
@@ -520,12 +561,28 @@ export class StatisticsController {
 
   /** Ancestral state reconstruction (pcm.py reconstruct_ancestral_states). */
   runAncestralStates(model: string = 'bm') {
-    const result = reconstructAncestralStates(this.runGetRootTree(), this._numericColumn(0), model);
+    const result = reconstructAncestralStates(this.requireParsedTree(), this._numericColumn(0), model);
     this.state.cacheResult('asr_result', result);
     return result;
   }
 
-  private runGetRootTree(): PhyloNode {
+  /**
+   * The tree parsed from an imported Newick file, or a clear error.
+   *
+   * Public because the phylogenetic analyses in the UI need it directly. They
+   * used to fabricate `new PhyloNode('root', 0, false)` — a root with no
+   * children — so `getLeaves()` returned a single tip and Blomberg K, Pagel
+   * lambda and phyloANOVA were computed on a degenerate one-taxon "phylogeny",
+   * returning numbers that looked like real statistics. A loud failure is the
+   * correct behaviour here (docs/code-style.md: silently wrong numbers are
+   * worse than a crash).
+   *
+   * Note: nothing in the repo writes the `parsed_tree` cache key yet, so this
+   * currently always throws. That is deliberate — it is honest about the fact
+   * that no Newick import path exists yet, instead of hiding it behind a stub
+   * tree. Wiring the key is tracked as a follow-up.
+   */
+  requireParsedTree(): PhyloNode {
     const cached = this.state.getCachedResult<{ tree: PhyloNode }>('parsed_tree');
     if (cached?.tree) return cached.tree;
     throw new Error('No tree parsed. Import a Newick tree first.');

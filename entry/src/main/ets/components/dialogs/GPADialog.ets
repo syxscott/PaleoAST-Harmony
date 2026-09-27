@@ -1,22 +1,25 @@
 @Component
 export struct GPADialog {
   @Link visible: boolean;
-  @State max_iterations: number = 100;
+  // No "max iterations" field any more. Generalised Procrustes is a closed-form
+  // least-squares solution — it has no iteration to bound — and the control was
+  // never forwarded to gpa() anyway, so the exported analysis script recorded a
+  // limit that could not affect the result. Offering it implied a knob that does
+  // not exist.
   @State showTips: boolean = false;
   onConfirm: (params: Record<string, Object>) => void = () => {};
 
   build() {
     Column() {
       Text("GPA").fontSize(18).fontWeight(FontWeight.Bold).margin({ bottom: 16 })
-      Row() { Text("Max iterations:").width(140).fontSize(13); TextInput({ text: String(this.max_iterations) }).width(100).type(InputType.Number).onChange((v: string) => { this.max_iterations = Math.max(10, Math.min(1000, parseInt(v) || 100)); }) }.width("100%").margin({ bottom: 8 })
             Row() { Text("[+] Tips").fontSize(11).fontColor("#3498DB").onClick(() => { this.showTips = !this.showTips; }) }.width("100%").margin({ bottom: 8 })
       if (this.showTips) { Column() {
-          Text("Dist < 0.1: converged").fontSize(10).fontColor("#7F8C8D").margin({ bottom: 2 })
+          Text("Procrustes alignment is solved in closed form; there is nothing to iterate.").fontSize(10).fontColor("#7F8C8D").margin({ bottom: 2 })
       }.margin({ bottom: 8 }) }
       Divider().margin({ top: 8, bottom: 12 })
       Row() {
         Button("Cancel").backgroundColor("#95A5A6").fontColor("#FFFFFF").onClick(() => { this.visible = false; }).margin({ right: 12 })
-        Button("Run Analysis").type(ButtonType.Capsule).backgroundColor("#3498DB").fontColor("#FFFFFF").onClick(() => { this.onConfirm({'max_iterations': this.max_iterations}); this.visible = false; })
+        Button("Run Analysis").type(ButtonType.Capsule).backgroundColor("#3498DB").fontColor("#FFFFFF").onClick(() => { this.onConfirm({}); this.visible = false; })
       }.width("100%").justifyContent(FlexAlign.End)
     }.padding(24).width('92%').constraintSize({ maxWidth: 450 }).borderRadius(12)
   }

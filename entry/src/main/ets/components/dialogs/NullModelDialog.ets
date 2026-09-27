@@ -7,7 +7,12 @@ export struct NullModelDialog {
   @Link visible: boolean;
   @State metricIdx: number = 0;
   @State n_permutations: number = 999;
-  @State n_workers: number = 4;
+  // No "Parallel workers" field. `nullModel(presenceMatrix, metric, nPermutations)`
+  // has no worker parameter, and the only parallel helper in the tree
+  // (core/hpc/ProcessPool) has no caller, so the spinner could never have had an
+  // effect. It was dropped at two levels — the dialog payload was never read and
+  // StatisticsController.runNullModel's own `nWorkers` argument was never
+  // forwarded — while still being written into the analysis script.
   @State showAdvanced: boolean = false;
   metricOpts: string[] = ['c_score', 'checkerboard', 'combo'];
   metricDesc: string[] = [
@@ -25,7 +30,6 @@ export struct NullModelDialog {
       Text(this.metricDesc[this.metricIdx]).fontSize(10).fontColor('#95A5A6').margin({ bottom: 8 })
 
       Row() { Text('Permutations:').width(160).fontSize(13); TextInput({ text: String(this.n_permutations) }).width(80).type(InputType.Number).onChange((v: string) => { this.n_permutations = Math.max(99, Math.min(9999, parseInt(v) || 999)); }) }.width('100%').margin({ bottom: 8 })
-      Row() { Text('Parallel workers:').width(160).fontSize(13); TextInput({ text: String(this.n_workers) }).width(80).type(InputType.Number).onChange((v: string) => { this.n_workers = Math.max(1, Math.min(8, parseInt(v) || 4)); }) }.width('100%').margin({ bottom: 8 })
 
       Row() { Text(this.showAdvanced ? '[-] Interpretation guide' : '[+] Interpretation guide').fontSize(11).fontColor('#3498DB').onClick(() => { this.showAdvanced = !this.showAdvanced; }) }.width('100%').margin({ bottom: 8 })
       if (this.showAdvanced) {
@@ -40,7 +44,7 @@ export struct NullModelDialog {
       Divider().margin({ top: 8, bottom: 12 })
       Row() {
         Button('Cancel').backgroundColor('#95A5A6').fontColor('#FFFFFF').onClick(() => { this.visible = false; }).margin({ right: 12 })
-        Button('Run Analysis').type(ButtonType.Capsule).backgroundColor('#3498DB').fontColor('#FFFFFF').onClick(() => { this.onConfirm({ metric: this.metricOpts[this.metricIdx], n_permutations: this.n_permutations, n_workers: this.n_workers }); this.visible = false; })
+        Button('Run Analysis').type(ButtonType.Capsule).backgroundColor('#3498DB').fontColor('#FFFFFF').onClick(() => { this.onConfirm({ metric: this.metricOpts[this.metricIdx], n_permutations: this.n_permutations }); this.visible = false; })
       }.width('100%').justifyContent(FlexAlign.End)
     }.padding(24).width('92%').constraintSize({ maxWidth: 480 }).borderRadius(12)
   }

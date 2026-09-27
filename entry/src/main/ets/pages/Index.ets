@@ -3,7 +3,6 @@ import { StatisticsController } from '../../core/controllers/StatisticsControlle
 import { StateManager } from '../../core/models/index';
 import { Matrix } from '../../core/math/Matrix';
 import { parseCSV } from '../../core/parsers/CSVParser';
-import { PhyloNode } from '../../core/analysis/phylogenetics/index';
 import { EventBus } from '../../core/utils/EventBus';
 import { FilePickerHelper } from '../../core/io/FilePickerHelper';
 import { DialogManager } from '../components/DialogManager';
@@ -511,7 +510,13 @@ struct Index {
           this.stateMgr.dataMatrix.getGroups() ?? [],
           params['metric'] as string ?? 'bray_curtis');
       case 'LDA':
-        return this.statCtrl.runLDA(this.stateMgr.dataMatrix.getGroups() ?? []);
+        // n_components used to be collected by the dialog and then dropped here,
+        // even though runLDA has always accepted it — so the analysis script
+        // claimed a component count that never reached the model.
+        return this.statCtrl.runLDA(
+          this.stateMgr.dataMatrix.getGroups() ?? [],
+          params['n_components'] as number
+        );
       case 'ANOSIM':
         return this.statCtrl.runANOSIM(
           this.stateMgr.dataMatrix.getGroups() ?? [],
@@ -519,7 +524,13 @@ struct Index {
           params['n_permutations'] as number ?? 999
         );
       case 'PERMANOVA':
-        return this.statCtrl.runPERMANOVA(this.stateMgr.dataMatrix.getGroups() ?? []);
+        // Both the metric and the permutation count were collected and dropped.
+        // ANOSIM right above already reads both; this case simply omitted them.
+        return this.statCtrl.runPERMANOVA(
+          this.stateMgr.dataMatrix.getGroups() ?? [],
+          params['metric'] as string ?? 'bray_curtis',
+          params['n_permutations'] as number ?? 999
+        );
       case 'CCA': {
         // Y = response (species) block, X = constraining (environment) block.
         // Passing the SAME matrix as both (the old behaviour) makes the fitted
@@ -557,36 +568,59 @@ struct Index {
           this.stateMgr.dataMatrix.data.col(Math.min(1, this.stateMgr.dataMatrix.data.cols - 1))
         );
       case 'Biostratigraphy':
+        // min_occurrence was collected and dropped; unitaryAssociations has had
+        // the `minSectionOccurrence` parameter all along (default 2).
         return this.statCtrl.runUnitaryAssociations(
-          this.stateMgr.dataMatrix.data.to2D(), this.stateMgr.dataMatrix.data.to2D()
+          this.stateMgr.dataMatrix.data.to2D(), this.stateMgr.dataMatrix.data.to2D(),
+          undefined, undefined,
+          params['min_occurrence'] as number ?? 2
         );
       case 'Paleo-Environment':
         return this.statCtrl.runPaleoEnv();
       case 'Wavelet':
-        return this.statCtrl.runWavelet();
+        // min_scale / max_scale were collected and dropped, so the transform
+        // always used the built-in 30-scale ladder regardless of what the user
+        // picked. runWavelet now expands the pair into a logarithmic ladder.
+        return this.statCtrl.runWavelet(
+          params['min_scale'] as number,
+          params['max_scale'] as number
+        );
       case 'PIC': {
         const traits: Record<string, number> = {};
         const labels = this.stateMgr.dataMatrix.rowLabels;
         const vals = this.stateMgr.dataMatrix.data.col(0);
         for (let i = 0; i < labels.length; i++) traits[labels[i]] = vals[i] ?? 0;
-        return this.statCtrl.runPIC(new PhyloNode('root', 0, false), traits);
+        return this.statCtrl.runPIC(this.statCtrl.requireParsedTree(), traits);
       }
       case 'Phylo Signal': {
         const traits: Record<string, number> = {};
         const labels = this.stateMgr.dataMatrix.rowLabels;
         const vals = this.stateMgr.dataMatrix.data.col(0);
         for (let i = 0; i < labels.length; i++) traits[labels[i]] = vals[i] ?? 0;
-        return this.statCtrl.runPhylogeneticSignalUnified(new PhyloNode('root', 0, false), traits);
+        // The randomisation count was collected and dropped. The tree is no
+        // longer a fabricated childless root — that made the analysis run on a
+        // single tip and return a plausible-looking K / lambda.
+        return this.statCtrl.runPhylogeneticSignalUnified(
+          this.statCtrl.requireParsedTree(), traits,
+          params['n_randomizations'] as number
+        );
       }
       case 'Phylo ANOVA': {
         const traits: Record<string, number> = {};
         const labels = this.stateMgr.dataMatrix.rowLabels;
         const vals = this.stateMgr.dataMatrix.data.col(0);
         for (let i = 0; i < labels.length; i++) traits[labels[i]] = vals[i] ?? 0;
-        return this.statCtrl.runPhyloANOVA(new PhyloNode('root', 0, false), traits, {});
+        // Same two fixes as 'Phylo Signal': real tree, and the collected
+        // permutation count actually forwarded.
+        return this.statCtrl.runPhyloANOVA(
+          this.statCtrl.requireParsedTree(), traits, {},
+          params['n_permutations'] as number
+        );
       }
       case 'Beta Diversity':
-        return this.statCtrl.runBetaDiv();
+        // The metric was collected and dropped; runBetaDiv has accepted it all
+        // along (default 'jaccard').
+        return this.statCtrl.runBetaDiv(params['metric'] as string ?? 'jaccard');
       case 'TPS Grid':
         return this.statCtrl.runTPSAnalyze(
           this.stateMgr.dataMatrix.data.to2D(), this.stateMgr.dataMatrix.data.to2D()
@@ -648,22 +682,22 @@ struct Index {
       case 'Fitch Parsimony': {
         const seqs: Record<string, string> = {};
         for (let i = 0; i < dm.rowLabels.length; i++) seqs[dm.rowLabels[i]] = String(Math.round(safeCol(0)[i] ?? 0));
-        return this.statCtrl.runFitch(new PhyloNode('root', 0, false), seqs);
+        return this.statCtrl.runFitch(this.statCtrl.requireParsedTree(), seqs);
       }
       case 'PIC': {
         const traits: Record<string, number> = {};
         for (let i = 0; i < dm.rowLabels.length; i++) traits[dm.rowLabels[i]] = safeCol(0)[i] ?? 0;
-        return this.statCtrl.runPIC(new PhyloNode('root', 0, false), traits);
+        return this.statCtrl.runPIC(this.statCtrl.requireParsedTree(), traits);
       }
       case 'Phylo Signal': {
         const traits: Record<string, number> = {};
         for (let i = 0; i < dm.rowLabels.length; i++) traits[dm.rowLabels[i]] = safeCol(0)[i] ?? 0;
-        return this.statCtrl.runPhylogeneticSignalUnified(new PhyloNode('root', 0, false), traits);
+        return this.statCtrl.runPhylogeneticSignalUnified(this.statCtrl.requireParsedTree(), traits);
       }
       case 'Phylo ANOVA': {
         const traits: Record<string, number> = {};
         for (let i = 0; i < dm.rowLabels.length; i++) traits[dm.rowLabels[i]] = safeCol(0)[i] ?? 0;
-        return this.statCtrl.runPhyloANOVA(new PhyloNode('root', 0, false), traits, {});
+        return this.statCtrl.runPhyloANOVA(this.statCtrl.requireParsedTree(), traits, {});
       }
       case 'Cohort Survival': {
         const records: [number, number][] = [];
