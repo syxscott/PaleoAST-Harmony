@@ -1,5 +1,14 @@
 export type ColumnDataType="numeric"|"categorical"|"ordinal"|"binary";
-export interface ColumnMeta{name:string;type:ColumnDataType;unit?:string;min?:number;max?:number;mean?:number;missingCount?:number;}
+
+/**
+ * Per-variable metadata. The `group` / `color` / `weight` / `excluded` fields
+ * are only populated on a matrix produced by `DataMatrix.transpose()`, where a
+ * former *specimen* became a column: without somewhere to put them, a transpose
+ * silently threw away every specimen's group, plot colour, regression weight
+ * and excluded flag. They are declared optional so existing producers are
+ * unaffected.
+ */
+export interface ColumnMeta{name:string;type:ColumnDataType;unit?:string;min?:number;max?:number;mean?:number;missingCount?:number;group?:string;color?:string;weight?:number;excluded?:boolean;}
 export class ColumnMetadata{
   private _m:Map<number,ColumnMeta>=new Map();
   get(i:number):ColumnMeta|undefined{return this._m.get(i);}

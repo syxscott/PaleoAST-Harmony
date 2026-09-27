@@ -71,7 +71,22 @@ export struct WorkspaceView {
             if (widget === 'spreadsheet') {
               if (this.dataMatrix) {
                 Column() {
-                  Spreadsheet({ dataMatrix: this.dataMatrix!, darkMode: this.darkMode })
+                  Spreadsheet({
+                    dataMatrix: this.dataMatrix!,
+                    darkMode: this.darkMode,
+                    // The Spreadsheet keeps group NAMES in its own @State array
+                    // and only publishes them through this hook. It was never
+                    // supplied, so the default no-op swallowed every group
+                    // assignment: DataMatrix.rowMeta stayed empty,
+                    // getGroups() returned null, and the group-based analyses
+                    // (ANOSIM / PERMANOVA / SIMPER / LDA) were handed an empty
+                    // vector and reported "no significant difference" on data
+                    // the user had just separated into groups. Writing them
+                    // into the DataMatrix is what closes that loop.
+                    onGroupChanged: (groups: string[]) => {
+                      this.dataMatrix?.setGroups(groups);
+                    }
+                  })
                     .width('100%')
                     .height('100%');
                 }

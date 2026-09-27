@@ -599,6 +599,7 @@ export interface ANOSIMResult {
 export function anosim(distMatrix: Matrix, groups: number[], nPermutations: number = 999, rngSeed?: number): ANOSIMResult {
   if (rngSeed !== undefined) seed(rngSeed);
   const n = distMatrix.rows;
+  requireUsableGroups(groups, n, 'anosim');
   const R_obs = computeR(distMatrix, groups, n);
 
   let count = 0;
@@ -799,6 +800,7 @@ function ldaPredict1LD(sampleLD: number[], centroidsLD: Matrix, k: number, nc: n
  */
 export function lda(data: Matrix, groups: number[], nComponents?: number, cvFolds: number = 0): LDAResult {
   const n = data.rows, p = data.cols;
+  requireUsableGroups(groups, n, 'lda');
   const uniqueGroups = [...new Set(groups)].sort((a, b) => a - b);
   const k = uniqueGroups.length;
   const nc = Math.min(nComponents ?? k - 1, k - 1, p);
@@ -1068,9 +1070,42 @@ export interface PERMANOVAResult {
   nPermutations: number;
 }
 
+/**
+ * Reject a group vector a between-group test cannot use, instead of silently
+ * analysing a fiction.
+ *
+ * All four of these used to accept whatever they were handed and return a
+ * plausible-looking "no significant difference": `simper` returned an empty
+ * result with dissimilarity 0, `permanova` returned F = 0 and p = 1 with a
+ * NEGATIVE `dfBetween` of -1, `anosim` returned a negative R and p = 1, and
+ * `lda` blew up much later with "eigh:A[0] is not finite: NaN".
+ *
+ * That mattered because the UI fed them `dataMatrix.getGroups() ?? []`, and
+ * getGroups() could not produce a usable vector: the spreadsheet keeps group
+ * NAMES while the statistics take integer codes, and the old getGroups()
+ * `parseInt`-ed the name, so "Amniote" and "Reptile" both became 0.
+ */
+function requireUsableGroups(groups: number[], nSamples: number, who: string): void {
+  if (!Array.isArray(groups) || groups.length === 0) {
+    throw new Error(`${who}: no groups supplied. Assign every specimen to a named group first.`);
+  }
+  if (groups.length !== nSamples) {
+    throw new Error(`${who}: got ${groups.length} group labels for ${nSamples} specimens`);
+  }
+  const distinct = new Set(groups);
+  if (distinct.size < 2) {
+    throw new Error(
+      `${who}: need at least 2 distinct groups, got ${distinct.size} ` +
+      `(${JSON.stringify([...distinct].slice(0, 4))}). A between-group test on a single ` +
+      `group is undefined, not "no significant difference".`,
+    );
+  }
+}
+
 export function permanova(distMatrix: Matrix, groups: number[], nPermutations: number = 999, rngSeed?: number): PERMANOVAResult {
   if (rngSeed !== undefined) seed(rngSeed);
   const n = distMatrix.rows;
+  requireUsableGroups(groups, n, 'permanova');
   const uniqueGroups = [...new Set(groups)];
   const k = uniqueGroups.length;
   const D2 = distMatrix.mul(distMatrix);
@@ -1192,10 +1227,11 @@ export function simper(
 ): SIMPERResult {
   const nVars = data.cols;
   const names = variableNames ?? Array.from({ length: nVars }, (_, i) => `Var_${i + 1}`);
+  requireUsableGroups(groups, data.rows, 'simper');
   const uniqueGroups = [...new Set(groups)].sort((a, b) => a - b);
   const nGroups = uniqueGroups.length;
   if (nGroups < 2) {
-    return { overallDissimilarity: 0, contributions: [], groupPairResults: [], metric, nGroups, nVariables: nVars };
+    throw new Error(`simper: need at least 2 groups (got ${nGroups})`);
   }
 
   const groupPairResults: SIMPERPairResult[] = [];

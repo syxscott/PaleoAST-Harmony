@@ -168,15 +168,6 @@ export class StateManager {
   get dataMatrix(): DataMatrix | null { return this._d; }
   get isModified(): boolean { return this._m; }
 
-  // Estimate memory usage of undo stack (rough approximation)
-  private estimateMemory(): number {
-    let bytes = 0;
-    for (const state of this._u) {
-      bytes += state.deltas.length * 24; // Approx size per delta
-    }
-    return bytes;
-  }
-
   // Push a cell change for undo tracking
   pushUndo(row: number, col: number, oldVal: number, newVal: number): void {
     // Start new undo state if needed

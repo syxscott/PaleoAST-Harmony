@@ -582,19 +582,19 @@ struct Index {
           params['n_points'] as number ?? 50);
       case 'SIMPER':
         return this.statCtrl.runSIMPER(
-          this.stateMgr.dataMatrix.getGroups() ?? [],
+          this.requireGroups(),
           params['metric'] as string ?? 'bray_curtis');
       case 'LDA':
         // n_components used to be collected by the dialog and then dropped here,
         // even though runLDA has always accepted it — so the analysis script
         // claimed a component count that never reached the model.
         return this.statCtrl.runLDA(
-          this.stateMgr.dataMatrix.getGroups() ?? [],
+          this.requireGroups(),
           params['n_components'] as number
         );
       case 'ANOSIM':
         return this.statCtrl.runANOSIM(
-          this.stateMgr.dataMatrix.getGroups() ?? [],
+          this.requireGroups(),
           params['metric'] as string ?? 'bray_curtis',
           params['n_permutations'] as number ?? 999
         );
@@ -602,7 +602,7 @@ struct Index {
         // Both the metric and the permutation count were collected and dropped.
         // ANOSIM right above already reads both; this case simply omitted them.
         return this.statCtrl.runPERMANOVA(
-          this.stateMgr.dataMatrix.getGroups() ?? [],
+          this.requireGroups(),
           params['metric'] as string ?? 'bray_curtis',
           params['n_permutations'] as number ?? 999
         );
@@ -705,10 +705,29 @@ struct Index {
     }
   }
 
+  /**
+   * Group codes for the between-group statistics, or a clear failure.
+   *
+   * `getGroups()` returns null when the specimen groups are missing, partly
+   * unassigned, or fewer than two are in use. That null used to become `[]`
+   * here, and each of ANOSIM / PERMANOVA / SIMPER / LDA happily analysed the
+   * empty vector and reported "no significant difference" -- so a user who
+   * grouped their data and ran PERMANOVA got p = 1 with no indication that
+   * the grouping never reached the model.
+   */
+  private requireGroups(): number[] {
+    const g = this.stateMgr.dataMatrix?.getGroups();
+    if (!g) {
+      throw new Error('No usable groups: assign every specimen to a named group, ' +
+        'using at least two different groups, before running this analysis');
+    }
+    return g;
+  }
+
   private runQuickAnalysisCore(name: string): any {
     if (!this.stateMgr?.dataMatrix) { return null; }
     const data = this.stateMgr.dataMatrix.data;
-    const groups = this.stateMgr.dataMatrix.getGroups();
+    const groups = this.requireGroups();
     const dm = this.stateMgr.dataMatrix;
 
     // Helper to check empty columns
@@ -718,7 +737,7 @@ struct Index {
     };
 
     switch (name) {
-      case 'LDA': return this.statCtrl.runLDA(groups ?? []);
+      case 'LDA': return this.statCtrl.runLDA(groups);
       case 'CCA': return this.statCtrl.runCCA(data, data);
       case 'Summary': return this.statCtrl.runSummary();
       case 'Normality': return this.statCtrl.runNormalityTest(0);
@@ -731,9 +750,9 @@ struct Index {
         return this.statCtrl.runRarefaction(data.row(0));
       case 'SHE Analysis': return this.statCtrl.runSHE();
       case 'Clustering': return this.statCtrl.runClustering(3);
-      case 'ANOSIM': return this.statCtrl.runANOSIM(groups ?? []);
-      case 'PERMANOVA': return this.statCtrl.runPERMANOVA(groups ?? []);
-      case 'SIMPER': return this.statCtrl.runSIMPER(groups ?? []);
+      case 'ANOSIM': return this.statCtrl.runANOSIM(groups);
+      case 'PERMANOVA': return this.statCtrl.runPERMANOVA(groups);
+      case 'SIMPER': return this.statCtrl.runSIMPER(groups);
       case 'GPA': return this.statCtrl.runGPA();
       case 'TPS Grid': return this.statCtrl.runTPSAnalyze(data.to2D(), data.to2D());
       case 'Allometry': return this.statCtrl.runAllometry();

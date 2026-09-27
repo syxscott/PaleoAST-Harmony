@@ -12,6 +12,7 @@ import './distmetrics2026.test.ts';
 import './parsers2026.test.ts';
 import './statistics2026.test.ts';
 import './morphometrics2026.test.ts';
+import './models2026.test.ts';
 
 const ok = await runAll();
 process.exit(ok ? 0 : 1);

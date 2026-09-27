@@ -41,9 +41,27 @@ export class DataMatrix{
   getRowByLabel(n:string):number[]|null{const i=this.rowLabels.indexOf(n);return i>=0?this.data.row(i):null;}
   transpose():DataMatrix{
     const out=new DataMatrix(this.data.transpose(),[...this.colLabels],[...this.rowLabels]);
-    // carry metadata across the row↔col swap where indices exist
-    for(let i=0;i<Math.min(this.nSamples,out.nVariables);i++){const m=this.rowMeta.get(i);if(m)out.colMeta.set(i,{name:out.colLabels[i],type:'numeric'});}
-    for(let j=0;j<Math.min(this.nVariables,out.nSamples);j++){const g=this.colMeta.getName(j);if(g!==undefined)out.rowMeta.setGroup(j,g);}
+    // A transpose swaps what a row and a column MEAN: specimen i becomes
+    // column i, variable j becomes row j. Both metadata maps therefore have to
+    // cross over, which is why ColumnMeta grew group/color/weight/excluded and
+    // RowMeta grew type.
+    //
+    // What this used to do was worse than doing nothing:
+    //   * it REPLACED any existing column metadata with a fabricated
+    //     {name, type:'numeric'} stub, so a specimen's group, plot colour,
+    //     weight and excluded flag were destroyed (and so were a variable's
+    //     unit/min/max/mean/missingCount, because variables are rows now);
+    //   * it copied each old column's NAME into the new row's GROUP slot, so
+    //     every row ended up "in group Var_3" and getGroups() then parsed that
+    //     name to 0. A column name is not a group.
+    for(let i=0;i<this.nSamples;i++){
+      const rm=this.rowMeta.get(i);
+      if(rm) out.colMeta.set(i,{name:out.colLabels[i],type:'numeric',group:rm.group,color:rm.color,weight:rm.weight,excluded:rm.excluded});
+    }
+    for(let j=0;j<this.nVariables;j++){
+      const cm=this.colMeta.get(j);
+      if(cm) out.rowMeta.set(j,{type:cm.type});
+    }
     return out;
   }
   /** Subset by index lists; non-continuous indices are handled correctly. */
@@ -154,6 +172,55 @@ export class DataMatrix{
     return dm;
   }
 
-  getGroups():number[]|null{const g:number[]=[];let has=false;for(let i=0;i<this.nSamples;i++){const gr=this.rowMeta.getGroup(i);if(gr!==undefined){g.push(parseInt(gr)||0);has=true;}else g.push(0);}return has?g:null;}
+  /**
+   * Integer group codes, one per specimen, for the group-based statistics
+   * (ANOSIM / PERMANOVA / SIMPER / LDA).
+   *
+   * `rowMeta.group` holds a NAME -- that is what the spreadsheet's group
+   * cycling produces (Group_A, Group_B, ..., "Ungrouped") -- so the names are
+   * mapped to codes in first-appearance order. The previous implementation ran
+   * `parseInt(name) || 0` instead, which for any non-numeric name is NaN and
+   * therefore 0: assigning specimens to "Amniote" and "Reptile" produced
+   * `[0,0,0,0,0,0]`, i.e. ONE group, and PERMANOVA on maximally separated data
+   * reported F = 0.000000 and p = 1 -- "no difference between groups".
+   *
+   * A row counts as unassigned when it has no group, an empty group, or the
+   * literal "Ungrouped" (the spreadsheet's default for every fresh row). If ANY
+   * specimen is unassigned, or fewer than two distinct groups exist, this
+   * returns null so the caller can refuse instead of analysing a fiction.
+   */
+  getGroups():number[]|null{
+    const codes=new Map<string,number>();
+    const g:number[]=new Array(this.nSamples);
+    for(let i=0;i<this.nSamples;i++){
+      const raw=this.rowMeta.getGroup(i);
+      const name=raw===undefined?'':raw.trim();
+      if(name===''||name.toLowerCase()==='ungrouped')return null;
+      let c=codes.get(name);
+      if(c===undefined){c=codes.size;codes.set(name,c);}
+      g[i]=c;
+    }
+    return codes.size>=2?g:null;
+  }
+  /** Distinct group names currently assigned, in first-appearance order. */
+  getGroupNames():string[]{
+    const seen:string[]=[];
+    for(let i=0;i<this.nSamples;i++){
+      const raw=this.rowMeta.getGroup(i);
+      if(raw!==undefined&&raw.trim()!==''&&!seen.includes(raw))seen.push(raw);
+    }
+    return seen;
+  }
+  /**
+   * Store one group name per specimen. Names that are empty or "Ungrouped"
+   * clear the row, matching getGroups()'s notion of unassigned.
+   */
+  setGroups(groups:string[]):void{
+    for(let i=0;i<this.nSamples;i++){
+      const name=(groups[i]??'').trim();
+      if(name===''||name.toLowerCase()==='ungrouped')this.rowMeta.unset(i);
+      else this.rowMeta.setGroup(i,name);
+    }
+  }
   summary():string{return"DataMatrix("+this.nSamples+"x"+this.nVariables+")";}
 }
