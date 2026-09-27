@@ -29,10 +29,20 @@ export function tpsKernel3D(r: number): number {
 
 /**
  * Build the TPS kernel matrix K_ij = U(||s_i - s_j||).
- * @param source  landmarks (n × d)
- * @param dim     2 for 2D, 3 for 3D
+ *
+ * @param source  landmarks (n x d)
+ * @param dim     2 for the planar r^2 log r kernel. Passing 3 throws: the 3D
+ *                kernel is -|r| (a different function, not a different metric),
+ *                so this builder used to hand back a planar-kernel matrix for
+ *                3D input without a word. Use `buildKernelMatrix3D`.
  */
 export function buildKernelMatrix(source: number[][], dim: 2 | 3): Matrix {
+  if (dim !== 2) {
+    throw new Error(
+      `buildKernelMatrix: dim must be 2 (the r^2 log r kernel). ` +
+      `For 3D use buildKernelMatrix3D, which applies the -|r| kernel.`,
+    );
+  }
   const n = source.length;
   const K = Matrix.zeros(n, n);
   for (let i = 0; i < n; i++) {

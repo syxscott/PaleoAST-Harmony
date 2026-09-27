@@ -148,6 +148,15 @@ export function tpsWarpGrid(
   gridCols: number = 20
 ): { warpedPoints: number[][][]; grid: number[][] } {
   const src = result.source;
+  if (result.nDims !== 2) {
+    // The lattice below is built in 2D. Warping those points with a 3D TPS
+    // reads p[2], which is undefined, and every warped coordinate came back
+    // NaN -- so refuse rather than hand back a grid of NaN.
+    throw new MorphometricsError('tpsWarpGrid only supports 2D configurations (the lattice is planar)');
+  }
+  if (gridRows < 2 || gridCols < 2) {
+    throw new MorphometricsError(`tpsWarpGrid needs at least 2 rows and 2 columns (got ${gridRows}x${gridCols})`);
+  }
   let xMin = Infinity, xMax = -Infinity, yMin = Infinity, yMax = -Infinity;
   for (const p of src) {
     if (p[0] < xMin) xMin = p[0]; if (p[0] > xMax) xMax = p[0];

@@ -37,6 +37,7 @@
 | 日期 | 标题 | 类型 |
 |---|---|---|
 | 2026-09-27 | [statistics 第二轮审查:9 处缺陷,含 1 处全模块级 NaN](2026-09-27-statistics-matrix-nan-fixes.md) | 缺陷修复 |
+| 2026-09-27 | [morphometrics 第二轮审查:5 处缺陷,其中 3 处让统计检验完全失效](2026-09-27-morphometrics-eigensolver-and-tests.md) | 缺陷修复 / 重构 |
 | 2026-09-27 | [3D 形态测量数值验证:修 2 处缺陷,并把"未接入"写进文档](2026-09-27-morpho3d-validation.md) | 缺陷修复 / 文档 |
 | 2026-09-27 | [全仓审查：p 值失效、输出静默损坏、可复现性](2026-09-27-full-repo-audit-fixes.md) | 缺陷修复 |
 | 2026-09-19 | [全仓审查与修复 + 参照项目借鉴](2026-09-19-review-and-borrowing.md) | 缺陷修复 / 重构 / 工程 |

@@ -1,8 +1,8 @@
 import { Matrix } from '../../math/Matrix';
-import { svd } from '../../math/linalg';
+import { svd, eigh } from '../../math/linalg';
 import { rand, createSeededRNG } from '../../math/random';
 import { tCDF } from '../../math/special';
-import { percentile } from '../../math/stats';
+import { percentile, pF } from '../../math/stats';
 import { tpsKernel2D } from './tpsKernel';
 import { MorphometricsError } from '../../utils/Exceptions';
 
@@ -653,7 +653,15 @@ export function allometry(configurations: Matrix, nComponents?: number, nDims: n
   let nVarsUsed = p;
   if (nComponents !== undefined && nComponents > 0 && nComponents < p) {
     const cov = centered.transpose().matmul(centered).div(Math.max(1, n - 1));
-    const eig = eigh_local(cov); // sorted descending
+    // The verified Jacobi solver from math/linalg (numpy-matched, and the
+    // only one carrying the atan2 sign fix). The module used a second,
+    // unfixed copy here: on a 30x6 random covariance it returned
+    // eigenvalues [30.59, 12.35, 10.20] where eigh gives
+    // [37.98, 10.51, 9.36], and eigenvectors that were nearly orthogonal
+    // to the true ones (1 - |<v,v'>| = 0.97). The PCA basis it chose is
+    // the regression's whole design matrix, so R2, F and the isometry
+    // p-value were all computed on a bogus basis.
+    const eig = eigh(cov); // sorted descending
     basis = eig.eigenvectors.sliceCols(0, nComponents);
     shapeUsed = centered.matmul(basis);
     nVarsUsed = nComponents;
@@ -688,7 +696,13 @@ export function allometry(configurations: Matrix, nComponents?: number, nDims: n
   const dfModel = nVarsUsed;      // number of shape variables (Python df1)
   const dfRes = n - 2;            // residual df
   const F = ssRes > 0 && dfRes > 0 ? ((ssNull - ssRes) / dfModel) / (ssRes / dfRes) : 0;
-  const pVal = ssRes > 0 && dfRes > 0 ? 1 - fCDF_local(F, dfModel, dfRes) : 1.0;
+  // The verified F CDF from math/stats. The module's own copy went through a
+  // local `betainc_local` that summed the ASCENDING hypergeometric series,
+  // which converges to the COMPLEMENTARY incomplete beta (it decreases in x)
+  // rather than to I_x(a,b). The extra `1 -` then cancelled that inversion,
+  // so the isometry test never rejected anything: a strongly allometric
+  // dataset (R2 = 0.966, F = 67.2) came back with p = 1.0.
+  const pVal = ssRes > 0 && dfRes > 0 ? 1 - pF(F, dfModel, dfRes) : 1.0;
 
   // Back-transform predictions to the full shape space
   const predictedFull = basis ? predicted.matmul(basis.transpose()).add(meanShape) : predicted.add(meanShape);
@@ -737,33 +751,6 @@ function inv_general(A: Matrix): Matrix {
     for (let j = 0; j < n; j++)
       result.set(i, j, aug.get(i, n + j));
   return result;
-}
-
-function fCDF_local(x: number, d1: number, d2: number): number {
-  if (x <= 0) return 0;
-  const z = d1 * x / (d1 * x + d2);
-  return betainc_local(d1 / 2, d2 / 2, z);
-}
-
-function betainc_local(a: number, b: number, x: number): number {
-  if (x <= 0) return 0; if (x >= 1) return 1;
-  let sum = 0, term = 1;
-  for (let n = 0; n < 100; n++) {
-    if (n > 0) term *= (a + n - 1) * x / (a + b + n - 1);
-    sum += term / (a + n);
-    if (Math.abs(term / (a + n)) < 1e-12) break;
-  }
-  const lbeta = lgamma_m(a) + lgamma_m(b) - lgamma_m(a + b);
-  return sum * Math.exp(a * Math.log(x) + b * Math.log(1 - x) - lbeta);
-}
-
-function lgamma_m(x: number): number {
-  const g = 7;
-  const c = [0.99999999999980993, 676.5203681218851, -1259.1392167224028, 771.32342877765313, -176.61502916214059, 12.507343278686905, -0.13857109526572012, 9.9843695780195716e-6, 1.5056327351493116e-7];
-  if (x < 0.5) return Math.log(Math.PI / Math.sin(Math.PI * x)) - lgamma_m(1 - x);
-  x -= 1; let a = c[0]; const t = x + g + 0.5;
-  for (let i = 1; i < g + 2; i++) a += c[i] / (x + i);
-  return 0.5 * Math.log(2 * Math.PI) + (x + 0.5) * Math.log(t) - t + Math.log(a);
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1198,7 +1185,7 @@ export function relativeWarps(alignedConfigs: Matrix, nComponents?: number): Rel
   const mean = alignedConfigs.meanAxis(0);
   const centered = alignedConfigs.sub(mean);
   const cov = centered.transpose().matmul(centered).div(n - 1);
-  const { eigenvalues, eigenvectors } = eigh_local(cov);
+  const { eigenvalues, eigenvectors } = eigh(cov);
 
   const eigTop = eigenvalues.slice(0, nc);
   const totalVar = eigenvalues.reduce((a, b) => a + b, 0);
@@ -1257,49 +1244,6 @@ export function getShapeAtWarp(
     out[j] = meanShape.get(0, j) + eigenvectors.get(j, warpIndex) * t * stdDev;
   }
   return new Matrix(out, 1, p);
-}
-
-function eigh_local(A: Matrix): { eigenvalues: number[]; eigenvectors: Matrix } {
-  const n = A.rows; let T = A.clone(), Q = eye_local(n);
-  for (let iter = 0; iter < 100 * n; iter++) {
-    let maxOff = 0, pi = 0, qi = 1;
-    for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) if (Math.abs(T.get(i, j)) > maxOff) { maxOff = Math.abs(T.get(i, j)); pi = i; qi = j; }
-    if (maxOff < 1e-14) break;
-    let theta: number;
-    if (Math.abs(T.get(pi, pi) - T.get(qi, qi)) < 1e-15) theta = Math.PI / 4;
-    else theta = 0.5 * Math.atan2(2 * T.get(pi, qi), T.get(pi, pi) - T.get(qi, qi));
-    const c = Math.cos(theta), s = Math.sin(theta);
-    for (let i = 0; i < n; i++) { const tp = T.get(i, pi), tq = T.get(i, qi); T.set(i, pi, c * tp - s * tq); T.set(i, qi, s * tp + c * tq); }
-    for (let j = 0; j < n; j++) { const tp = T.get(pi, j), tq = T.get(qi, j); T.set(pi, j, c * tp - s * tq); T.set(qi, j, s * tp + c * tq); }
-    for (let i = 0; i < n; i++) { const qp = Q.get(i, pi), qq = Q.get(i, qi); Q.set(i, pi, c * qp - s * qq); Q.set(i, qi, s * qp + c * qq); }
-  }
-  const eigenvalues: number[] = [];
-  for (let i = 0; i < n; i++) eigenvalues.push(T.get(i, i));
-  const order = eigenvalues.map((_, i) => i).sort((a, b) => eigenvalues[b] - eigenvalues[a]);
-  const sorted = order.map(i => eigenvalues[i]);
-  const evd = new Float64Array(n * n);
-  for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) evd[i * n + j] = Q.get(i, order[j]);
-  return { eigenvalues: sorted, eigenvectors: new Matrix(evd, n, n) };
-}
-
-function eye_local(n: number): Matrix { const m = Matrix.zeros(n, n); for (let i = 0; i < n; i++) m.data[i * n + i] = 1; return m; }
-
-// ═══════════════════════════════════════════════════════════════════
-// Divide Configuration into Blocks (for PLS analysis)
-// ═══════════════════════════════════════════════════════════════════
-
-/**
- * Select an arbitrary subset of columns (fixes the previous
- * implementation, which took a contiguous sliceCols range and therefore
- * grabbed the wrong columns whenever the random permutation interleaved
- * landmarks).
- */
-function _selectColumns(M: Matrix, cols: number[]): Matrix {
-  const nc = cols.length;
-  const d = new Float64Array(M.rows * nc);
-  for (let i = 0; i < M.rows; i++)
-    for (let j = 0; j < nc; j++) d[i * nc + j] = M.get(i, cols[j]);
-  return new Matrix(d, M.rows, nc);
 }
 
 /**

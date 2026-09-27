@@ -46,7 +46,11 @@ export function eigenshape(
   // Sort descending
   const order = eig.eigenvalues.map((v, i) => ({ v, i })).sort((a, b) => b.v - a.v).map(o => o.i);
   const sortedVals = order.map(i => Math.max(0, eig.eigenvalues[i]));
-  const nc = nComponents ?? Math.min(sortedVals.length, nVar);
+  const nc = Math.max(1, Math.min(nComponents ?? sortedVals.length, sortedVals.length, nVar));
+  // `nc` is clamped to the number of variables above: there are only nVar
+  // eigenvalues and only nVar eigenvector columns, so an un-clamped request
+  // (the UI happily offers more) indexed `order[k]` past the end of the array
+  // and filled the loading matrix and the summary text with NaN.
   const sortedValsSlice = sortedVals.slice(0, nc);
   const totalVar = sortedVals.reduce((s, v) => s + v, 0) || 1;
   const explained = sortedValsSlice.map(v => v / totalVar);
