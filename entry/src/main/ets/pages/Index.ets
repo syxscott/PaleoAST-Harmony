@@ -22,6 +22,7 @@ import Logger from '../utils/Logger';
 import { PreferenceManager } from '../utils/PreferenceManager';
 import { AppSettings } from '../utils/AppSettings';
 import { HistoryRepository } from '../database/HistoryRepository';
+import { dataFingerprint, DATA_HASH_KEY } from '../utils/dataFingerprint';
 import fs from '@ohos.file.fs';
 
 // ─── 主页面 ──────────────────────────────────────────────────────
@@ -894,9 +895,21 @@ struct Index {
     } catch (e) {
       /* summary is cosmetic */
     }
+    // The de-duplication probe in HistoryRepository compares the stored
+    // `params` string and nothing else -- the data identity lived in a separate
+    // `data_shape` column the probe never read. So loading a DIFFERENT dataset
+    // and re-running the same analysis with the same dialog settings was
+    // suppressed as a double-tap, and the run vanished from the persistent
+    // history and therefore from the exported reproducible script. The
+    // fingerprint rides inside the stored params (the in-memory
+    // `analysisHistory`, which is what buildAnalysisScript reads, always keeps
+    // the caller's untouched params), so the probe sees the data and the script
+    // does not.
+    const fp = this.dataFingerprint(dm);
+    const storedParams: Record<string, Object> = { ...(params ?? {}), [DATA_HASH_KEY]: fp };
     HistoryRepository.insertRecord({
       analysisName: name,
-      params: JSON.stringify(params ?? {}),
+      params: JSON.stringify(storedParams),
       resultSummary: summary,
       plotType: this.plotType,
       dataShape: dm ? dm.nSamples + 'x' + dm.nVariables : '',
@@ -921,6 +934,10 @@ struct Index {
           } catch (e) {
             /* keep {} for a record written by an older version */
           }
+          // Reserved key: it identifies the dataset for the history store's
+          // de-duplication, it is not an analysis parameter. Records written
+          // before this key existed simply do not have it.
+          delete params[DATA_HASH_KEY];
           const step: AnalysisStep = {
             analysis: r.analysisName,
             params,

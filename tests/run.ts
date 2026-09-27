@@ -15,6 +15,7 @@ import './morphometrics2026.test.ts';
 import './models2026.test.ts';
 import './utils2026.test.ts';
 import './ets2026.test.ts';
+import './history2026.test.ts';
 
 const ok = await runAll();
 process.exit(ok ? 0 : 1);

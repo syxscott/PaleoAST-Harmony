@@ -36,6 +36,7 @@
 
 | 日期 | 标题 | 类型 |
 |---|---|---|
+| 2026-09-27 | [分析历史去重会吞掉真实运行:参数相同的两次分析只留下一条](2026-09-27-history-dedup-data-fingerprint.md) | 缺陷修复 |
 | 2026-09-27 | [statistics 第二轮审查:9 处缺陷,含 1 处全模块级 NaN](2026-09-27-statistics-matrix-nan-fixes.md) | 缺陷修复 |
 | 2026-09-27 | [ets 层:两个"恒等映射"被当成真分析展示,导出复选框完全无效](2026-09-27-ets-identity-analyses-and-export-flag.md) | 缺陷修复 |
 | 2026-09-27 | [utils + controllers:协方差算错轴、EFA 分辨率被丢弃、校验器谎报支持集](2026-09-27-utils-covariance-and-efa-resolution.md) | 缺陷修复 / 文档 |
