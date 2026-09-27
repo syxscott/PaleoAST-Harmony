@@ -48,7 +48,7 @@ export function pca(
 ): PCAResult {
   const n = data.rows, p = data.cols;
   const maxComp = Math.min(n - 1, p);
-  const nc = Math.min(nComponents ?? maxComp, maxComp);
+  const nc = Math.max(1, Math.min(nComponents ?? maxComp, maxComp));
 
   // Determine matrix type: explicit method overrides scale flag for backward compat
   const matrixType: 'covariance' | 'correlation' =
@@ -144,7 +144,7 @@ export interface PCoAResult {
  */
 export function pcoa(distMatrix: Matrix, nComponents?: number): PCoAResult {
   const n = distMatrix.rows;
-  const nc = Math.min(nComponents ?? Math.min(n - 1, 20), n - 1);
+  const nc = Math.max(1, Math.min(nComponents ?? Math.min(n - 1, 20), n - 1));
 
   // Double centering: B = -0.5 * J * D^2 * J
   const D2 = distMatrix.mul(distMatrix);
@@ -803,7 +803,7 @@ export function lda(data: Matrix, groups: number[], nComponents?: number, cvFold
   requireUsableGroups(groups, n, 'lda');
   const uniqueGroups = [...new Set(groups)].sort((a, b) => a - b);
   const k = uniqueGroups.length;
-  const nc = Math.min(nComponents ?? k - 1, k - 1, p);
+  const nc = Math.max(1, Math.min(nComponents ?? k - 1, k - 1, p));
 
   // Grand mean
   const grandMean = data.meanAxis(0);
@@ -982,7 +982,7 @@ export function cca(
   envNames?: string[],
 ): CCAResult {
   const n = Y.rows, p = Y.cols, q = X.cols;
-  const nc = Math.min(nComponents ?? Math.min(n - 1, p, q), n - 1, p, q);
+  const nc = Math.max(1, Math.min(nComponents ?? Math.min(n - 1, p, q), n - 1, p, q));
   const spNames = speciesNames ?? Array.from({ length: p }, (_, i) => `Species_${i + 1}`);
   const envNms = envNames ?? Array.from({ length: q }, (_, i) => `Env_${i + 1}`);
 

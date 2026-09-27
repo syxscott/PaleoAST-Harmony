@@ -1,5 +1,5 @@
 /**
- * State machine ¡ª replaces state_machine/base.py
+ * State machine â€” replaces state_machine/base.py
  * Core state/transition/machine abstractions.
  */
 

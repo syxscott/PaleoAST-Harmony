@@ -88,8 +88,43 @@ def strip_noise(src):
     return ''.join(out)
 
 
+def check_encoding(path):
+    """Reject source files that are not valid UTF-8.
+
+    TypeScript and the DevEco toolchain both read source as UTF-8. A GBK byte
+    pair (0xA1 0xAA is an em dash in GBK) is a decode error in the compiler and
+    mojibake in any editor.
+
+    This check exists because `check()` used to read with errors='ignore', which
+    silently discarded the bad bytes -- four files (hpc/ProcessPool.ts,
+    parsers/BinaryCache.ts, state_machine/Base.ts and
+    app_infrastructure/ExceptionHandler.ts) had been sitting in the tree as
+    invalid UTF-8 while every gate stayed green. The last of those four was
+    mixed: one GBK em dash in the header next to correctly encoded UTF-8 box
+    drawing further down, so a whole-file transcoding pass is not the fix and
+    the bad pair has to be found byte by byte.
+    """
+    problems = []
+    raw = open(path, 'rb').read()
+    try:
+        raw.decode('utf-8')
+    except UnicodeDecodeError as e:
+        window = raw[max(0, e.start - 12):e.start + 12]
+        problems.append(
+            f'not valid UTF-8 at byte {e.start} ({e.reason}); '
+            f'near {window.hex(" ")} -- re-save the file as UTF-8')
+    if b'\xef\xbf\xbd' in raw:
+        problems.append(
+            'contains U+FFFD replacement characters, i.e. text that was already '
+            'mangled by an earlier write')
+    return problems
+
+
 def check(path):
-    src = open(path, encoding='utf-8', errors='ignore').read()
+    encoding_problems = check_encoding(path)
+    if encoding_problems:
+        return encoding_problems
+    src = open(path, encoding='utf-8', errors='strict').read()
     code = strip_noise(src)
     stack = []
     line = 1

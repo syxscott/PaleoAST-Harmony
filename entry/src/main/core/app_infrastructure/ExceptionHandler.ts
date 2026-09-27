@@ -1,5 +1,5 @@
 /**
- * Exception handler ¡ª replaces app_infrastructure/exception_handler.py
+ * Exception handler â€” replaces app_infrastructure/exception_handler.py
  * Converts technical exceptions to user-friendly messages.
  */
 

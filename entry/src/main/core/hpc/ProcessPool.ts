@@ -1,5 +1,5 @@
 /**
- * Process pool ¡ª replaces hpc/process_pool.py
+ * Process pool â€” replaces hpc/process_pool.py
  * Promise-based execution for HarmonyOS with REAL taskpool dispatch.
  *
  * `map` first attempts true multithreading via @kit.ArkTS taskpool: when the
@@ -8,7 +8,7 @@
  * runs in parallel. When taskpool rejects the closure (plain function, PC
  * preview, node tests) it transparently falls back to sequential execution
  * with identical results. Python's multiprocessing closures cannot cross the
- * ArkTS thread boundary by design ¡ª see TaskScheduler for the @Concurrent
+ * ArkTS thread boundary by design â€” see TaskScheduler for the @Concurrent
  * pattern.
  */
 

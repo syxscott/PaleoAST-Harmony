@@ -36,6 +36,7 @@
 
 | 日期 | 标题 | 类型 |
 |---|---|---|
+| 2026-09-27 | [成分数只有上界(零列/负数)与 4 个非 UTF-8 源文件:结构门禁用 errors='ignore' 吞了坏字节](2026-09-27-component-count-lower-bound-and-utf8.md) | 缺陷修复 |
 | 2026-09-27 | [快捷分析链路:本人上一个提交引入的回归 + 跑不了的分析被报成 completed](2026-09-27-ets-dispatch-groups-and-false-completion.md) | 缺陷修复 |
 | 2026-09-27 | [Index.ets 编译不过:字符串字面量里的真实换行](2026-09-27-index-ets-uncompilable-string-literal.md) | 缺陷修复 |
 | 2026-09-27 | [分析历史去重会吞掉真实运行:参数相同的两次分析只留下一条](2026-09-27-history-dedup-data-fingerprint.md) | 缺陷修复 |

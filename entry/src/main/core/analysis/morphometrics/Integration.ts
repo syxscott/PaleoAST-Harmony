@@ -71,7 +71,7 @@ export function plsIntegration(
   // SVD of C via linalg
   const svd = linalg.svd(C);
   const maxComp = Math.min(svd.S.length, A.cols, B.cols, A.rows - 1);
-  const k = Math.min(nComponents ?? maxComp, maxComp);
+  const k = Math.max(1, Math.min(nComponents ?? maxComp, maxComp));
   // Ur columns = svd.U[:, :k]   |   Vr = Vt[:k].T (q × k)
   const Ur = _sliceColumns(svd.U, k);
   const Vr = _sliceVTColumns(svd.Vt, k);

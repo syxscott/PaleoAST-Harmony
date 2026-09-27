@@ -1,5 +1,5 @@
 /**
- * Binary cache ¡ª replaces parsers/binary_cache.py
+ * Binary cache â€” replaces parsers/binary_cache.py
  * Stores analysis results in a compact binary format.
  *
  * Layout (version 2):
