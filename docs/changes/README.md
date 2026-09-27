@@ -36,6 +36,7 @@
 
 | 日期 | 标题 | 类型 |
 |---|---|---|
+| 2026-09-27 | [快捷分析链路:本人上一个提交引入的回归 + 跑不了的分析被报成 completed](2026-09-27-ets-dispatch-groups-and-false-completion.md) | 缺陷修复 |
 | 2026-09-27 | [Index.ets 编译不过:字符串字面量里的真实换行](2026-09-27-index-ets-uncompilable-string-literal.md) | 缺陷修复 |
 | 2026-09-27 | [分析历史去重会吞掉真实运行:参数相同的两次分析只留下一条](2026-09-27-history-dedup-data-fingerprint.md) | 缺陷修复 |
 | 2026-09-27 | [statistics 第二轮审查:9 处缺陷,含 1 处全模块级 NaN](2026-09-27-statistics-matrix-nan-fixes.md) | 缺陷修复 |

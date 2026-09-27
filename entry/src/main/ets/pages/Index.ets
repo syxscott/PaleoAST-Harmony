@@ -736,7 +736,10 @@ struct Index {
   private runQuickAnalysisCore(name: string): any {
     if (!this.stateMgr?.dataMatrix) { return null; }
     const data = this.stateMgr.dataMatrix.data;
-    const groups = this.requireGroups();
+    // NOTE: groups are read per-case via this.requireGroups(), never hoisted here.
+    // Hoisting it made every quick analysis demand a grouping factor, so
+    // analyses that never use groups (Summary, Spectral, Markov, ...) failed
+    // with "No usable groups" whenever the data happened to be ungrouped.
     const dm = this.stateMgr.dataMatrix;
 
     // Helper to check empty columns
@@ -746,7 +749,7 @@ struct Index {
     };
 
     switch (name) {
-      case 'LDA': return this.statCtrl.runLDA(groups);
+      case 'LDA': return this.statCtrl.runLDA(this.requireGroups());
       case 'CCA':
         // CCA constrains a species matrix to an environment matrix. Passing one
         // table as both is a self-constrained ordination: the "environment" is
@@ -766,9 +769,9 @@ struct Index {
         return this.statCtrl.runRarefaction(data.row(0));
       case 'SHE Analysis': return this.statCtrl.runSHE();
       case 'Clustering': return this.statCtrl.runClustering(3);
-      case 'ANOSIM': return this.statCtrl.runANOSIM(groups);
-      case 'PERMANOVA': return this.statCtrl.runPERMANOVA(groups);
-      case 'SIMPER': return this.statCtrl.runSIMPER(groups);
+      case 'ANOSIM': return this.statCtrl.runANOSIM(this.requireGroups());
+      case 'PERMANOVA': return this.statCtrl.runPERMANOVA(this.requireGroups());
+      case 'SIMPER': return this.statCtrl.runSIMPER(this.requireGroups());
       case 'GPA': return this.statCtrl.runGPA();
       case 'TPS Grid':
         throw new Error('TPS Grid needs a source and a target configuration. ' +
@@ -1173,8 +1176,6 @@ struct Index {
     }
 
     // 记录分析历史（可复现脚本用；对话框分析在 runAnalysisWithParams 里记录）
-    this.recordAnalysis(name, {});
-
     this.statusText = 'Running: ' + name + '...';
     this.isLoading = true;
     try {
@@ -1213,35 +1214,56 @@ struct Index {
           break;
         case 'PLS Integration':
           this.statusText = 'PLS Integration: 2 blocks required (use Import or Dialog)';
-          break;
-        case 'Ripley K': this.statusText = 'Ripley K: needs 2D coordinate data'; break;
-        case 'DTW': this.statusText = 'DTW: needs 2 sequences'; break;
-        case 'TPS Analyzer': this.statusText = 'TPS Analyzer: needs (source, target) landmarks'; break;
-        case 'Unitary Associations': this.statusText = 'UA: needs FAD/LAD matrices'; break;
-        case 'RASC Ranking': this.statusText = 'RASC: needs event distance matrix'; break;
-        case 'Age Model': this.statusText = 'Age Model: needs age constraints'; break;
-        case 'Sedimentation Rate': this.statusText = 'Sed Rate: needs section with ages'; break;
-        case 'Moving Average': this.statusText = 'Moving Average: needs 1D series'; break;
-        case 'Cox PH': this.statusText = 'Cox PH: needs durations + events + covariates'; break;
-        case 'Log-rank': this.statusText = 'Log-rank: needs two survival groups'; break;
-        case 'FBD Likelihood': this.statusText = 'FBD Likelihood: needs tree data'; break;
-        case 'NJ Tree': this.statusText = 'NJ: needs distance matrix + names'; break;
-        case 'UPGMA Tree': this.statusText = 'UPGMA: needs distance matrix + names'; break;
-        case 'Strict Consensus': this.statusText = 'Strict Consensus: needs ≥ 2 trees'; break;
-        case 'Majority Rule': this.statusText = 'Majority Rule: needs ≥ 2 trees'; break;
-        case 'Heuristic Search': this.statusText = 'Heuristic Search: needs sequences'; break;
-        case 'Tree Comparator': this.statusText = 'Tree Comparator: needs ≥ 2 parsed trees'; break;
+          return;
+        case 'Ripley K': this.statusText = 'Ripley K: needs 2D coordinate data';
+          return;
+        case 'DTW': this.statusText = 'DTW: needs 2 sequences';
+          return;
+        case 'TPS Analyzer': this.statusText = 'TPS Analyzer: needs (source, target) landmarks';
+          return;
+        case 'Unitary Associations': this.statusText = 'UA: needs FAD/LAD matrices';
+          return;
+        case 'RASC Ranking': this.statusText = 'RASC: needs event distance matrix';
+          return;
+        case 'Age Model': this.statusText = 'Age Model: needs age constraints';
+          return;
+        case 'Sedimentation Rate': this.statusText = 'Sed Rate: needs section with ages';
+          return;
+        case 'Moving Average': this.statusText = 'Moving Average: needs 1D series';
+          return;
+        case 'Cox PH': this.statusText = 'Cox PH: needs durations + events + covariates';
+          return;
+        case 'Log-rank': this.statusText = 'Log-rank: needs two survival groups';
+          return;
+        case 'FBD Likelihood': this.statusText = 'FBD Likelihood: needs tree data';
+          return;
+        case 'NJ Tree': this.statusText = 'NJ: needs distance matrix + names';
+          return;
+        case 'UPGMA Tree': this.statusText = 'UPGMA: needs distance matrix + names';
+          return;
+        case 'Strict Consensus': this.statusText = 'Strict Consensus: needs ≥ 2 trees';
+          return;
+        case 'Majority Rule': this.statusText = 'Majority Rule: needs ≥ 2 trees';
+          return;
+        case 'Heuristic Search': this.statusText = 'Heuristic Search: needs sequences';
+          return;
+        case 'Tree Comparator': this.statusText = 'Tree Comparator: needs ≥ 2 parsed trees';
+          return;
         case 'Null Model': DialogManager.open('NullModel'); return;
         case 'Import': DialogManager.open('Import'); return;
         case 'Export': DialogManager.open('Export'); return;
       }
 
+      // Only a run that actually produced a result enters the reproducible
+      // script; the "needs ..." cases above return before reaching this.
+      this.recordAnalysis(name, {});
       this.statusText = name + ' completed';
       this.addWidget(name);
     } catch (e) {
       this.statusText = name + ' error: ' + String(e).substring(0, 100);
+    } finally {
+      this.isLoading = false;
     }
-    this.isLoading = false;
   }
 
   private handleAction(action: string): void {
