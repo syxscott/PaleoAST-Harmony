@@ -27,6 +27,32 @@ export class FilePickerHelper {
    * and return the target URI (null when the user cancels).
    */
   static async saveFile(content: string, suggestedName: string): Promise<string | null> {
+    return FilePickerHelper.writeViaPicker(
+      (fd: number) => { fs.writeSync(fd, content); },
+      suggestedName,
+    );
+  }
+
+  /**
+   * Binary counterpart of saveFile, for figure exports (PNG bytes).
+   *
+   * saveFile takes a string, and fs.writeSync(fd, string) writes text, so PNG
+   * data could not go through it. Accepts either an ArrayBuffer or a typed
+   * array so the caller can hand over whatever the image packer returned.
+   */
+  static async saveBinary(bytes: ArrayBuffer | Uint8Array, suggestedName: string): Promise<string | null> {
+    const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+    return FilePickerHelper.writeViaPicker(
+      (fd: number) => { fs.writeSync(fd, view.buffer); },
+      suggestedName,
+    );
+  }
+
+  /** Shared picker + write sequence, so both save paths behave identically. */
+  private static async writeViaPicker(
+    write: (fd: number) => void,
+    suggestedName: string,
+  ): Promise<string | null> {
     const options = new picker.DocumentSaveOptions();
     options.newFileNames = [suggestedName];
     const pickerObj = new picker.DocumentViewPicker();
@@ -35,7 +61,7 @@ export class FilePickerHelper {
       if (uris && uris.length > 0) {
         const file = fs.openSync(uris[0], fs.OpenMode.READ_WRITE | fs.OpenMode.TRUNC);
         try {
-          fs.writeSync(file.fd, content);
+          write(file.fd);
         } finally {
           fs.closeSync(file.fd);
         }

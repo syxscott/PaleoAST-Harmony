@@ -203,7 +203,11 @@ struct Index {
               plotDataY: $plotDataY,
               plotTitle: $plotTitle,
               plotType: $plotType,
-              darkMode: $darkMode
+              darkMode: $darkMode,
+              onStatus: (msg: string) => { this.statusText = msg; },
+              onExportData: (format: string, payload: string | ArrayBuffer, name: string) => {
+                this.onExportPlotData(format, payload, name);
+              }
             })
           }
         }
@@ -362,6 +366,33 @@ struct Index {
           this.statusText = 'Export error: ' + String(e).substring(0, 80);
         });
     } catch (e) { this.statusText = 'Export error: ' + e; }
+  }
+
+  /**
+   * Save a figure encoded by PlotCanvas (PNG bytes or SVG markup).
+   *
+   * PlotCanvas owns pixels-to-bytes — only it can snapshot its own canvas — and
+   * this side owns the save dialog and the status line, the same split used by
+   * exportFile above. The PNG / SVG buttons previously called exportPNG() /
+   * exportSVG() with no path, which threw 'no export path' and reported it
+   * through an `onStatus` that nothing ever assigned: no file, no dialog and no
+   * message, i.e. a completely silent failure.
+   */
+  private onExportPlotData(format: string, payload: string | ArrayBuffer, suggestedName: string): void {
+    const done = (uri: string | null): void => {
+      this.statusText = uri
+        ? 'Chart saved to ' + uri
+        : 'Chart export cancelled';
+    };
+    if (typeof payload === 'string') {
+      FilePickerHelper.saveFile(payload, suggestedName)
+        .then(done)
+        .catch((e: Error) => { this.statusText = 'Chart export error: ' + String(e).substring(0, 80); });
+      return;
+    }
+    FilePickerHelper.saveBinary(payload, suggestedName)
+      .then(done)
+      .catch((e: Error) => { this.statusText = 'Chart export error: ' + String(e).substring(0, 80); });
   }
 
   // ─── 同步计算核心（原 taskpool 闭包体，避免跨线程序列化组件 this） ───

@@ -17,6 +17,25 @@ export struct WorkspaceView {
   @Link plotType: string;
   @Link darkMode: boolean;
 
+  /**
+   * Figure export sink, passed straight through to PlotCanvas.
+   *
+   * PlotCanvas's PNG / SVG buttons used to call exportPNG() / exportSVG() with
+   * no path, which threw 'no export path'; the error was reported through
+   * `onStatus`, which nothing ever assigned, so both buttons failed in complete
+   * silence. Index now owns the save dialog and the status line, matching how it
+   * already handles CSV and script export.
+   */
+  onExportData: (format: string, payload: string | ArrayBuffer, suggestedName: string) => void =
+    (_format: string, _payload: string | ArrayBuffer, _suggestedName: string) => {};
+
+  /**
+   * Status sink for PlotCanvas. It reports export outcomes, "no series to
+   * plot" notices and unsupported-format warnings through `onStatus`; before
+   * this hook existed nothing supplied it and every one of those was discarded.
+   */
+  onStatus: (msg: string) => void = (_msg: string) => {};
+
   // @State（非普通字段）：重新加载文件时经 EventBus 刷新，@ObjectLink 需要
   // 拿到新的 @Observed DataMatrix 实例才能更新表格
   @State dataMatrix: DataMatrix | null = null;
@@ -75,7 +94,11 @@ export struct WorkspaceView {
                   title: this.plotTitle,
                   darkMode: this.darkMode,
                   dataX: this.plotDataX,
-                  dataY: this.plotDataY
+                  dataY: this.plotDataY,
+                  onStatus: (msg: string) => { this.onStatus(msg); },
+                  onExportData: (format: string, payload: string | ArrayBuffer, name: string) => {
+                    this.onExportData(format, payload, name);
+                  }
                 })
                   .width('100%')
                   .layoutWeight(1);

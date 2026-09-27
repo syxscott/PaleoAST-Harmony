@@ -28,7 +28,16 @@ const TICK_DIVISIONS: number = 5;
 export struct PlotCanvas {
   // 样式/类型属性用 @Prop + @Watch：父级（WorkspaceView）变化时同步并触发
   // Canvas 重绘（@State 只在创建时取值，主题切换和二次分析不会生效）
-  @Prop @Watch('onStyleChanged') plotType: string = 'scatter';
+  //
+  // plotType gets its OWN watcher rather than sharing onStyleChanged, because a
+  // type change has to re-ingest the series, not merely repaint. The old
+  // onStyleChanged only called redraw(), so whichever order the parent assigned
+  // dataX/dataY and plotType in, the chart kept whatever the previous run had
+  // built. Index.ets assigns the data first and the type last, and because the
+  // setters below used to overwrite this @Prop, a second run of a histogram
+  // analysis dispatched on the stale local type 'bar' and drew the RAW scores
+  // as bars while the legend still said "histogram".
+  @Prop @Watch('onPlotTypeChanged') plotType: string = 'scatter';
   @Prop @Watch('onStyleChanged') title: string = '';
   @Prop @Watch('onStyleChanged') darkMode: boolean = false;
   @State xlabel: string = '';
@@ -55,6 +64,18 @@ export struct PlotCanvas {
 
   private onStyleChanged(): void {
     this.redraw();
+  }
+
+  /**
+   * A plot-type change must rebuild the series, not just repaint it.
+   *
+   * This is what makes the parent free to assign dataX/dataY and plotType in
+   * either order: whichever arrives second, the second pass converges on the
+   * right chart. Previously a type change only reached redraw(), so the canvas
+   * kept the geometry built for the previous type.
+   */
+  private onPlotTypeChanged(): void {
+    this.ingestInputData();
   }
 
   private onInputDataChanged(): void {
@@ -135,6 +156,19 @@ export struct PlotCanvas {
   private ctx: CanvasRenderingContext2D | null = null;
   onStatus: (msg: string) => void = (_msg: string) => {};
 
+  /**
+   * Receives an encoded figure from the PNG / SVG toolbar buttons.
+   *
+   * Plain (non-decorated) field, so the parent passes it once through the
+   * component-argument object — the same pattern `onStatus` already uses. The
+   * default is a no-op, and requestExport() says so out loud rather than
+   * failing silently, which is what the old path did.
+   *
+   * `payload` is the SVG markup for 'svg' and the packed bytes for 'png'.
+   */
+  onExportData: (format: string, payload: string | ArrayBuffer, suggestedName: string) => void =
+    (_format: string, _payload: string | ArrayBuffer, _suggestedName: string) => {};
+
   // Render scheduling — avoids duplicate RAF-driven renders
   private canvasRenderScheduled: boolean = false;
   private pendingRenderFrame: number = -1;
@@ -185,9 +219,9 @@ export struct PlotCanvas {
         Button('Clear Sel').fontSize(10).height(28).margin({ right: 4 })
           .onClick(() => { this.selectedPoints.clear(); this.redraw(); })
         Button('PNG').fontSize(10).height(28).margin({ right: 4 })
-          .onClick(() => { this.exportPNG(); })
+          .onClick(() => { this.requestExport('png'); })
         Button('SVG').fontSize(10).height(28).margin({ right: 4 })
-          .onClick(() => { this.exportSVG(); })
+          .onClick(() => { this.requestExport('svg'); })
         Blank()
         Text(this.title).fontSize(11).fontColor('#7F8C8D')
       }.width('100%').height(32).padding({ left: 8, right: 8 })
@@ -254,25 +288,38 @@ export struct PlotCanvas {
     }.width('100%').height('100%')
   }
 
-  // ─── Data Setters ──────────────────────────────────────────────
+  // ─── Data Setters ─────────────────────────────────────────────────────────
+  //
+  // None of these assign `this.plotType` any more. Writing a @Prop from inside
+  // the component that declares it desynchronises the local copy from the
+  // parent's, and because ingestInputData() dispatches on `this.plotType`, the
+  // next run inherited the previous run's type — a second histogram run
+  // dispatched on the stale local 'bar' and drew the RAW scores as bars while
+  // the legend still read "histogram". The parent's plotType is the single
+  // source of truth; the concrete geometry lives in plotData.type, which is
+  // what _redrawCore() dispatches on.
+  //
+  // Every setter also calls updateRanges(). Only scatter and line used to, so a
+  // bar / box-plot / heat-map inherited the PREVIOUS analysis's data range (or
+  // the unit window that clearPlot() resets to) while the grid, axes and tick
+  // labels all come from the viewport — see updateRanges() for the per-type
+  // mapping.
 
   setScatterData(x: number[], y: number[], labels?: string[], groups?: number[]): void {
     this.plotData = { type: 'scatter', x, y, labels, groups };
-    this.plotType = 'scatter';
     this.updateRanges();
     this.redraw();
   }
 
   setLineData(x: number[], y: number[], color: string = '#3498DB'): void {
     this.plotData = { type: 'line', x, y, color };
-    this.plotType = 'line';
     this.updateRanges();
     this.redraw();
   }
 
   setBarData(labels: string[], values: number[]): void {
     this.plotData = { type: 'bar', labels, values };
-    this.plotType = 'bar';
+    this.updateRanges();
     this.redraw();
   }
 
@@ -289,13 +336,13 @@ export struct PlotCanvas {
   setBoxPlotData(groups: { label: string; values: number[] }[]): void {
     // Box-plot groups have their own field: PlotData.groups stays number[]
     this.plotData = { type: 'boxplot', boxGroups: groups };
-    this.plotType = 'boxplot';
+    this.updateRanges();
     this.redraw();
   }
 
   setHeatmapData(matrix: number[][], rowLabels: string[], colLabels: string[]): void {
     this.plotData = { type: 'heatmap', matrix, rowLabels, colLabels };
-    this.plotType = 'heatmap';
+    this.updateRanges();
     this.redraw();
   }
 
@@ -329,10 +376,60 @@ export struct PlotCanvas {
     this.vp.setPlotSize(this.canvasWidth || 800, this.canvasHeight || 600);
   }
 
-  /** Recompute the data range and pick a formatter suited to its span. */
+  /**
+   * Recompute the viewport's data range and pick a formatter suited to its span.
+   *
+   * The range has to be derived PER CHART TYPE, because only scatter and line
+   * carry numeric x/y series. The old version read `plotData.x` / `plotData.y`
+   * unconditionally and simply returned early for the other three types, so a
+   * bar / box-plot / heat-map kept whatever range the previous analysis left in
+   * the viewport — or the unit window that clearPlot() resets to. The grid, the
+   * axis lines and the tick LABELS all read that range, so a bar chart of bin
+   * counts 3…88 was drawn with a Y axis labelled 0.00 … 1.00. Reproduced with
+   * the real ViewPortHandler/ChartComputator: tick "1" sat at pixel 90.8 while
+   * the value-88 bar top mapped to pixel −35434.
+   *
+   * Per type:
+   *   scatter / line  — the x/y series as given
+   *   bar            — X is categorical and the renderer lays bars out by index,
+   *                    so the axis spans 0…n−1; Y spans 0…max because bars grow
+   *                    from a zero baseline
+   *   boxplot        — X spans the group indices, Y the pooled group values
+   *   heatmap        — X spans the column indices, Y the row indices, matching
+   *                    the cell geometry drawHeatmap() computes
+   */
   private updateRanges(): void {
-    if (!this.plotData?.x || !this.plotData.y) return;
-    this.vp.setDataRange(this.plotData.x, this.plotData.y);
+    const d = this.plotData;
+    if (!d) return;
+    let xs: number[] | null = null;
+    let ys: number[] | null = null;
+    switch (d.type) {
+      case 'scatter':
+      case 'line':
+        xs = d.x ?? null;
+        ys = d.y ?? null;
+        break;
+      case 'bar':
+        if (d.values && d.values.length > 0) {
+          xs = d.values.map((_: number, i: number) => i);
+          ys = [0].concat(d.values);
+        }
+        break;
+      case 'boxplot':
+        if (d.boxGroups && d.boxGroups.length > 0) {
+          xs = d.boxGroups.map((_: { label: string; values: number[] }, i: number) => i);
+          ys = d.boxGroups.flatMap((g: { label: string; values: number[] }) => g.values);
+        }
+        break;
+      case 'heatmap':
+        if (d.matrix && d.matrix.length > 0) {
+          xs = [0, Math.max(0, d.matrix[0].length - 1)];
+          ys = [0, Math.max(0, d.matrix.length - 1)];
+        }
+        break;
+    }
+    if (!xs || !ys) return;
+    this.vp.setDataRange(xs, ys);
     // Re-pick the formatter whenever the span changes class (tiny/huge/normal)
     // so axis labels stay readable across analyses.
     this.fmt = autoFormatter(this.vp.spanY, 2);
@@ -592,30 +689,72 @@ export struct PlotCanvas {
     }
   }
 
+  /**
+   * Which bars of a categorical X axis fall inside the plot rectangle.
+   *
+   * Shared by drawBar() and the SVG exporter so the two cannot disagree.
+   *
+   * Two passes, because the bar width depends on how many bars are visible:
+   *   1. take the index range whose CENTRES are inside the plot rect
+   *   2. drop an edge bar whose rectangle would stick out past the axes, then
+   *      recompute the width for the smaller count
+   * Step 2 matters because ArkUI's Canvas does not clip: a bar drawn past the
+   * plot edge simply paints over the axis and the margin. The loop terminates
+   * because every pass removes at least one index.
+   */
+  private visibleBarRange(labelCount: number, plotWidthPx: number): { iStart: number; iEnd: number } {
+    const leftPx = this.vp.margin.left;
+    const rightPx = leftPx + plotWidthPx;
+    const a = this.vp.unmapX(leftPx);
+    const b = this.vp.unmapX(rightPx);
+    let iStart = Math.max(0, Math.ceil(Math.min(a, b)));
+    let iEnd = Math.min(labelCount - 1, Math.floor(Math.max(a, b)));
+    let changed = true;
+    while (changed && iEnd >= iStart && labelCount > 0) {
+      changed = false;
+      const w = ChartComputator.barLayout(this.vp, iEnd - iStart + 1, 0.3).barWidth;
+      if (this.vp.mapX(iStart) - w / 2 < leftPx) { iStart++; changed = true; }
+      if (iEnd >= iStart && this.vp.mapX(iEnd) + w / 2 > rightPx) { iEnd--; changed = true; }
+    }
+    return { iStart, iEnd };
+  }
+
   private drawBar(ctx: CanvasRenderingContext2D, pw: number, ph: number): void {
     const data = this.plotData!;
     const labels = data.labels!, values = data.values!;
-    const maxVal = values.reduce((a, b) => Math.max(a, b), 1);
-    // One layout source for the renderer and the SVG exporter.
-    const { barWidth, gap } = ChartComputator.barLayout(this.vp, labels.length, 0.3);
+    // Bars are placed through the viewport, exactly as scatter and line points
+    // are, so zoom and pan move the marks together with the axes, the grid and
+    // the tick labels. This version laid them out from `margin.left + i*(w+gap)`
+    // and scaled their height by value/max against the RAW plot height, so
+    // neither X nor Y zoom had any effect on a bar chart: the axes and labels
+    // moved and the bars stayed put.
+    //
+    // updateRanges() sets the bar axis to span 0..max, so `vp.mapY(0)` is the
+    // baseline and `vp.mapY(value)` the bar top — no separate maxVal
+    // normalisation is needed, and the two can no longer disagree.
+    const iStart = this.visibleBarRange(labels.length, pw);
+    if (iStart.iEnd < iStart.iStart) return;
+    const { barWidth } = ChartComputator.barLayout(this.vp, iStart.iEnd - iStart.iStart + 1, 0.3);
     const colors = ['#3498DB', '#E74C3C', '#27AE60', '#F39C12', '#9B59B6'];
+    const baseline = this.vp.mapY(0);
 
-    for (let i = 0; i < labels.length; i++) {
-      const x = this.vp.margin.left + (i * (barWidth + gap)) + gap / 2;
-      const barH = (values[i] / maxVal) * ph;
+    for (let i = iStart.iStart; i <= iStart.iEnd; i++) {
+      const centre = this.mapX(i);
+      const x = centre - barWidth / 2;
+      const top = this.mapY(values[i]);
       ctx.fillStyle = colors[i % colors.length];
       ctx.globalAlpha = 0.8;
-      ctx.fillRect(x, this.vp.margin.top + ph - barH, barWidth, barH);
+      ctx.fillRect(x, Math.min(top, baseline), barWidth, Math.abs(baseline - top));
       ctx.globalAlpha = 1;
 
       // Value label
       ctx.fillStyle = this.darkMode ? '#ccc' : '#2C3E50';
       ctx.font = '9px sans-serif'; ctx.textAlign = 'center';
-      ctx.fillText(this.tickLabel(values[i]), x + barWidth / 2, this.vp.margin.top + ph - barH - 3);
+      ctx.fillText(this.tickLabel(values[i]), centre, Math.min(top, baseline) - 3);
 
       // X label (rotated)
       ctx.save();
-      ctx.translate(x + barWidth / 2, this.vp.margin.top + ph + 5);
+      ctx.translate(centre, this.vp.margin.top + ph + 5);
       ctx.rotate(-Math.PI / 4);
       ctx.textAlign = 'right';
       ctx.fillText(labels[i], 0, 0);
@@ -930,23 +1069,167 @@ export struct PlotCanvas {
           break;
         case 'bar':
           if (this.plotData.labels && this.plotData.values) {
-            const maxVal = this.plotData.values.reduce((a, b) => Math.max(a, b), 1);
-            const layout = ChartComputator.barLayout(this.vp, this.plotData.labels.length, 0.3);
-            const barW = layout.barWidth;
-            const gap = layout.gap;
-            const barColors = ['#3498DB', '#E74C3C', '#27AE60', '#F39C12', '#9B59B6'];
-            for (let i = 0; i < this.plotData.labels.length; i++) {
-              const x = this.vp.margin.left + (i * (barW + gap)) + gap / 2;
-              const barH = (this.plotData.values[i] / maxVal) * ph;
-              svg += '<rect x="' + x + '" y="' + (this.vp.margin.top + ph - barH) + '" width="' + barW + '" height="' + barH + '" fill="' + barColors[i % barColors.length] + '" opacity="0.8"/>';
+            // Same viewport-driven geometry AND the same visible range as
+            // drawBar(), otherwise the exported figure would disagree with the
+            // canvas exactly as the old pair did.
+            const range = this.visibleBarRange(this.plotData.labels.length, pw);
+            const iStart = range.iStart, iEnd = range.iEnd;
+            if (iEnd >= iStart) {
+              const barW = ChartComputator.barLayout(this.vp, iEnd - iStart + 1, 0.3).barWidth;
+              const barColors = ['#3498DB', '#E74C3C', '#27AE60', '#F39C12', '#9B59B6'];
+              const baseline = this.vp.mapY(0);
+              for (let i = iStart; i <= iEnd; i++) {
+                const centre = this.mapX(i);
+                const top = this.mapY(this.plotData.values[i]);
+                const y = Math.min(top, baseline), h = Math.abs(baseline - top);
+                svg += '<rect x="' + (centre - barW / 2).toFixed(1) + '" y="' + y.toFixed(1)
+                  + '" width="' + barW.toFixed(1) + '" height="' + h.toFixed(1)
+                  + '" fill="' + barColors[i % barColors.length] + '" opacity="0.8"/>';
+              }
+            }
+          }
+          break;
+        case 'boxplot':
+          if (this.plotData.boxGroups) {
+            const groups = this.plotData.boxGroups;
+            const gw = ChartComputator.barLayout(this.vp, groups.length, 0.4).barWidth;
+            const stroke = this.darkMode ? '#ccc' : '#2C3E50';
+            for (let g = 0; g < groups.length; g++) {
+              const vals = groups[g].values.slice().sort((a, b) => a - b);
+              if (vals.length === 0) continue;
+              const q = (f: number): number => {
+                const idx = (vals.length - 1) * f;
+                const lo = Math.floor(idx), hi = Math.ceil(idx);
+                return vals[lo] + (vals[hi] - vals[lo]) * (idx - lo);
+              };
+              const q1 = q(0.25), med = q(0.5), q3 = q(0.75);
+              const lo = vals[0], hi = vals[vals.length - 1];
+              const centre = this.mapX(g);
+              const x = centre - gw / 2;
+              const yTop = this.mapY(hi), yBot = this.mapY(lo);
+              svg += '<rect x="' + x.toFixed(1) + '" y="' + Math.min(yTop, this.mapY(q3)).toFixed(1)
+                + '" width="' + gw.toFixed(1) + '" height="' + Math.abs(this.mapY(q3) - this.mapY(q1)).toFixed(1)
+                + '" fill="none" stroke="' + stroke + '" stroke-width="1.5"/>';
+              svg += '<line x1="' + x.toFixed(1) + '" y1="' + yTop.toFixed(1) + '" x2="' + (x + gw).toFixed(1)
+                + '" y2="' + yTop.toFixed(1) + '" stroke="' + stroke + '" stroke-width="1.5"/>';
+              svg += '<line x1="' + x.toFixed(1) + '" y1="' + yBot.toFixed(1) + '" x2="' + (x + gw).toFixed(1)
+                + '" y2="' + yBot.toFixed(1) + '" stroke="' + stroke + '" stroke-width="1.5"/>';
+              // Median line across the box.
+              svg += '<line x1="' + x.toFixed(1) + '" y1="' + this.mapY(med).toFixed(1) + '" x2="' + (x + gw).toFixed(1)
+                + '" y2="' + this.mapY(med).toFixed(1) + '" stroke="' + stroke + '" stroke-width="2"/>';
+            }
+          }
+          break;
+        case 'heatmap':
+          if (this.plotData.matrix) {
+            const m = this.plotData.matrix;
+            const rows = m.length, cols = m.length > 0 ? m[0].length : 0;
+            if (rows > 0 && cols > 0) {
+              let lo = Infinity, hi = -Infinity;
+              for (const r of m) for (const v of r) { if (v < lo) lo = v; if (v > hi) hi = v; }
+              const span = hi - lo || 1;
+              const cw = Math.abs(this.mapX(1) - this.mapX(0));
+              const ch = Math.abs(this.mapY(0) - this.mapY(1));
+              for (let r = 0; r < rows; r++) {
+                for (let c = 0; c < cols; c++) {
+                  const t = (m[r][c] - lo) / span;
+                  const x = Math.min(this.mapX(c), this.mapX(c + 1));
+                  const y = Math.min(this.mapY(r), this.mapY(r + 1));
+                  svg += '<rect x="' + x.toFixed(1) + '" y="' + y.toFixed(1) + '" width="' + cw.toFixed(1)
+                    + '" height="' + ch.toFixed(1) + '" fill="rgb(' + Math.round(t * 255) + ','
+                    + Math.round((1 - Math.abs(t - 0.5) * 2) * 255) + ',255)"/>';
+                }
+              }
             }
           }
           break;
       }
     }
 
+    // Tick labels and axis titles.
+    //
+    // These were MISSING entirely, so an exported figure carried grid lines and
+    // axes with no numbers on them — unusable as a publication figure, and in
+    // direct contradiction of the comment above claiming the exporter and the
+    // canvas renderer cannot drift apart. Positions and labels come from the
+    // same ChartComputator the canvas uses, so the two are identical by
+    // construction.
+    svg += '<g font-family="sans-serif" font-size="10" fill="' + (this.darkMode ? '#aaa' : '#7F8C8D') + '">';
+    for (const tick of ChartComputator.xTicks(this.vp, TICK_DIVISIONS, (v: number) => this.tickLabel(v))) {
+      svg += '<text x="' + tick.pixel.toFixed(1) + '" y="' + (this.vp.margin.top + ph + 15)
+        + '" text-anchor="middle">' + this.escapeXml(tick.label) + '</text>';
+    }
+    for (const tick of ChartComputator.yTicks(this.vp, TICK_DIVISIONS, (v: number) => this.tickLabel(v))) {
+      svg += '<text x="' + (this.vp.margin.left - 5) + '" y="' + (tick.pixel + 4)
+        + '" text-anchor="end">' + this.escapeXml(tick.label) + '</text>';
+    }
+    if (this.xlabel) {
+      svg += '<text x="' + (this.vp.margin.left + pw / 2) + '" y="' + (this.canvasHeight - 10)
+        + '" text-anchor="middle" font-size="12">' + this.escapeXml(this.xlabel) + '</text>';
+    }
+    if (this.ylabel) {
+      svg += '<text x="15" y="' + (this.vp.margin.top + ph / 2) + '" text-anchor="middle" font-size="12"'
+        + ' transform="rotate(-90, 15, ' + (this.vp.margin.top + ph / 2) + ')">'
+        + this.escapeXml(this.ylabel) + '</text>';
+    }
+    svg += '</g>';
+
     svg += '</svg>';
     return svg;
+  }
+
+  /**
+   * Encode the current figure and hand it to whoever owns the file dialogs.
+   *
+   * This is what the PNG / SVG toolbar buttons call.
+   *
+   * They used to call `exportPNG()` / `exportSVG()` with no argument. Both
+   * require a path (`throw new Error('no export path')` when it is empty), the
+   * exception was caught, and the failure was reported through `onStatus` —
+   * which no parent ever assigned, so it stayed the no-op default. Clicking
+   * either button therefore produced NO file, NO dialog and NO message: a
+   * completely silent failure.
+   *
+   * PlotCanvas keeps ownership of pixels-to-bytes (only it can snapshot its own
+   * canvas) while the parent owns the save dialog and the status line, which is
+   * the same split `Index.exportFile` already uses for CSV and scripts.
+   */
+  private async requestExport(format: 'png' | 'svg'): Promise<void> {
+    const label = this.title.length > 0 ? this.title : 'plot';
+    // Keep ASCII word characters, dots, dashes AND CJK: this project's UI is
+    // bilingual, and `\w` alone is ASCII-only, so a Chinese analysis title would
+    // have every character replaced and yield "paleoast_______.png".
+    const safe = label.replace(/[^\w.\-\u4e00-\u9fa5]+/g, '_').replace(/^_+|_+$/g, '');
+    try {
+      if (format === 'svg') {
+        const svg = this.buildSVG();
+        if (this.onExportData) {
+          this.onExportData('svg', svg, suggested);
+        } else {
+          this.onStatus('SVG built (' + svg.length + ' bytes) but no exporter is attached');
+        }
+        return;
+      }
+      const pixelMap = await componentSnapshot.get('plotCanvas');
+      try {
+        const packer = image.createImagePacker();
+        try {
+          const data = await packer.pack(pixelMap, { format: 'image/png', quality: 100 });
+          if (this.onExportData) {
+            this.onExportData('png', data as ArrayBuffer, suggested);
+          } else {
+            this.onStatus('PNG built but no exporter is attached');
+          }
+        } finally {
+          packer.release();
+        }
+      } finally {
+        pixelMap.release();
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      this.onStatus(format.toUpperCase() + ' export failed: ' + msg);
+    }
   }
 
   exportSVG(path: string = ''): void {
