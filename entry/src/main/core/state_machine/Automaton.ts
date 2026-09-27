@@ -91,14 +91,33 @@ export class DFA extends FiniteAutomaton {
    * (automaton.py minimize_hopcroft).
    */
   minimize(): DFA {
-    // 0) complete first so the transition function is total
     const sigma = this.alphabet.length > 0 ? this.alphabet : this._inferAlphabet();
-    this.makeComplete(sigma);
+
+    // 0) Complete a COPY so the transition function is total. makeComplete()
+    //    is a mutating operation (it mirrors automaton.py make_complete and
+    //    adds a DEAD state in place); calling it on `this` grew the caller's
+    //    automaton by one state per call, and repeatedly, even though the
+    //    returned DFA was already correct. This method documents itself as
+    //    returning "a new minimal DFA equivalent to this one" -- it must not
+    //    edit the receiver, so every read below comes from the copy.
+    const work = new DFA();
+    work.alphabet = sigma;
+    const srcIndex = new Map<State, number>();
+    this.states.forEach((s, i) => srcIndex.set(s, i));
+    const copies: State[] = this.states.map(s => work.addState(s.name, s.isAccept));
+    copies.forEach((c, i) => {
+      for (const [sym, targets] of this.states[i].transitions) {
+        c.transitions.set(sym, targets.map(t => copies[srcIndex.get(t)!]));
+      }
+    });
+    work.start = copies[srcIndex.get(this.start)!];
+    work.accept = this.accept.map(a => copies[srcIndex.get(a)!]);
+    work.makeComplete(sigma);
 
     // 1) initial partition: accepting vs non-accepting
     const stateIndex = new Map<State, number>();
-    this.states.forEach((s, i) => stateIndex.set(s, i));
-    let partition: number[] = this.states.map(s => (s.isAccept ? 0 : 1));
+    work.states.forEach((s, i) => stateIndex.set(s, i));
+    let partition: number[] = work.states.map(s => (s.isAccept ? 0 : 1));
     let numBlocks = 2;
 
     // 2) refinement loop (Moore-style partition refinement; equivalent fixed
@@ -107,9 +126,9 @@ export class DFA extends FiniteAutomaton {
     while (changed) {
       changed = false;
       const signatures = new Map<string, number>();
-      const newPartition: number[] = new Array(this.states.length).fill(0);
-      for (let i = 0; i < this.states.length; i++) {
-        const s = this.states[i];
+      const newPartition: number[] = new Array(work.states.length).fill(0);
+      for (let i = 0; i < work.states.length; i++) {
+        const s = work.states[i];
         const sigParts: string[] = [String(partition[i])];
         for (const sym of sigma) {
           const t = (s.transitions.get(sym) ?? [])[0];
@@ -127,16 +146,16 @@ export class DFA extends FiniteAutomaton {
     // 3) build the minimal DFA: one state per block
     const minimal = new DFA();
     const blockStates = new Map<number, State>();
-    for (let i = 0; i < this.states.length; i++) {
+    for (let i = 0; i < work.states.length; i++) {
       const b = partition[i];
       if (!blockStates.has(b)) {
-        blockStates.set(b, minimal.addState(`M${b}`, this.states[i].isAccept));
+        blockStates.set(b, minimal.addState(`M${b}`, work.states[i].isAccept));
       }
     }
-    for (let i = 0; i < this.states.length; i++) {
-      if (this.states[i] === this.start) minimal.start = blockStates.get(partition[i])!;
+    for (let i = 0; i < work.states.length; i++) {
+      if (work.states[i] === work.start) minimal.start = blockStates.get(partition[i])!;
     }
-    for (const s of this.states) {
+    for (const s of work.states) {
       if (s.isAccept && !minimal.accept.includes(blockStates.get(partition[stateIndex.get(s)!])!)) {
         minimal.accept.push(blockStates.get(partition[stateIndex.get(s)!])!);
       }
