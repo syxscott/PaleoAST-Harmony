@@ -145,10 +145,16 @@ export function computeNormals(mesh: Mesh3D): number[][] {
       weights[vi] += area;
     }
   }
-  return normals.map((n, i) => {
-    const w = weights[i];
-    if (w < 1e-15) return [0, 0, 1];
-    return [n[0]/w, n[1]/w, n[2]/w];
+  // Normalise by the LENGTH of the accumulated area-weighted normal, not by the
+  // accumulated area alone. Dividing by `weights[i]` leaves a non-unit vector:
+  // for a unit cube a vertex returns [-0.2, -0.4, -0.4], magnitude 0.6, so any
+  // consumer treating this as a unit normal (shading, curvature, PCA of normals)
+  // gets a systematically wrong result. The area weighting already happened in
+  // the accumulation loop above; all that is left is to make the vector unit.
+  return normals.map((n) => {
+    const len = Math.sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+    if (len < 1e-15) return [0, 0, 1];
+    return [n[0] / len, n[1] / len, n[2] / len];
   });
 }
 

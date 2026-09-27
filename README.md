@@ -21,7 +21,7 @@ PaleoAST-Harmony 是 [PaleoAST](https://github.com/syxscott/PaleoAST) Python 版
 | **地层学** | 18 | CONISS 分带、Markov 转移矩阵、方向统计、灭绝置信区间 (Marshall/Strauss-Sadler)、频谱分析 (DFT)、小波变换 (Morlet CWT)、LOWESS 平滑、ARMA 模型、异常值检测、交叉验证、同位素偏移检测 |
 | **宏观演化** | 10 | 存活分析 (Foote 1999)、FBD 模拟 (Stadler 2010)、Cox 比例风险、Log-rank 检验、指数/逻辑斯蒂模型拟合、中性模拟、平衡态检验、FBD 似然函数 |
 | **形态测量** | 7 | GPA 普氏对齐、EFA 椭圆傅里叶 (Kuhl & Giardina 1982)、异速生长、演化速率 (随机游走/定向/停滞)、TPS 薄板样条变形、相对扭曲、配置块划分 |
-| **3D 形态测量** | 5 | 四元数旋转、3D GPA、3D TPS 变形、半地标滑动、网格法向量/面积计算 |
+| **3D 形态测量**（**已移植，尚未接入 UI**） | 5 | 四元数旋转、3D GPA、3D TPS 变形、半地标滑动、网格法向量/面积计算。代码在 `core/analysis/morpho3d/`，`morphometrics/index.ts` 未 re-export，无任何 UI 入口 |
 
 ### 图表引擎
 
@@ -94,7 +94,6 @@ PaleoAST-Harmony/
 │   │   ├── state_machine/            # 状态机
 │   │   ├── app_infrastructure/       # 异常处理 + 主题管理
 │   │   └── reporting/               # 报告生成器
-│   ├── chart/                        # 图表引擎 (26 种图表)
 │   ├── ets/                          # ArkUI 界面
 │   │   ├── pages/                    # 主页面 + 启动页
 │   │   ├── components/               # UI 组件 (6 个 + 34 对话框)
@@ -196,8 +195,10 @@ node test/device/run.mjs --device <udid>
 
 - **NAPI 加速尚未启用**：C++ 侧的 7 个函数与错误码通道已就绪，但**分析路径目前不调用它们**（`nativeSVD` 等尚无调用方）。且 C++ 的 `matrixSVD` 只返回奇异值、`matrixEigh` 只返回特征值，与返回向量/矩阵的 TS 版本不是等价替换 —— 切换前必须逐一对拍并补对比测试。
 - `dendrogram` 通道缺 linkage 数据通路，聚类/CONISS 绘制合并高度曲线而非树状图。
-- 导出支持 PNG / SVG / EPS；PDF 与 TIFF 未实现（会在状态栏明确提示，不会静默失败）。
-- i18n 目前只有英文与中文。
+- 导出支持 PNG / SVG / EPS；PDF 与 TIFF 未实现（会在状态栏明确提示，不会静默失败）。数据与报告导出支持 CSV / TSV / 分析脚本 / Markdown / HTML / LaTeX（LaTeX 需自行用 pdflatex 编译）。
+- **界面目前只有英文**。`core/config/i18n/` 备好了中英两套词条（约 1260 行），但没有任何 UI 文件引用它，界面文案是写死的 —— 中英切换尚未接入。
+- **3D 形态测量尚未接入 UI**：`core/analysis/morpho3d/` 已移植并通过数值验证（见 `tests/morpho3d2026.test.ts`），但 `morphometrics/index.ts` 不 re-export 它，因此 `gpa3d` / `tps3dFit` / 半地标滑动等在应用里无法调用。
+- **约 1600 行规划接口暂无运行时入口**：`core/plugins`、`core/hpc`、`core/state_machine`、`core/utils/{Validators,Decorators,Transformations}`、`core/app_infrastructure` 的异常处理与主题、`math/Bootstrap`（BCa 自助法）、`math/NativeMath`。它们只有单测覆盖。
 - 界面级断言尚未实现：`test/device/run.mjs` 目前验证的是接线，不是端到端通过。
 
 ## 许可证

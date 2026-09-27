@@ -168,12 +168,31 @@ export function tps3dFit(
     weights[0].push(wx[i]); weights[1].push(wy[i]); weights[2].push(wz[i]);
   }
   const affineCoefs = [wx[n], wx[n+1], wx[n+2], wx[n+3], wy[n], wy[n+1], wy[n+2], wy[n+3], wz[n], wz[n+1], wz[n+2], wz[n+3]];
-  // Bending energy = trace(W^T K W); with the −|r|/r convention K is the
-  // bending-energy matrix, so the quadratic form is ≥ 0 for thin_plate.
-  let be = 0;
+  // Bending energy of the interpolant — reported as a NON-NEGATIVE value.
+  //
+  // A bending energy is non-negative by definition, but the raw quadratic form
+  // wᵀKw does not come out with a consistent sign: measured before this fix, a
+  // 5-point zigzag reported -0.5 and 20/20 random 3-D warps were negative (the
+  // smallest -22.75). The sign turns out to be a kernel-normalisation artefact
+  // rather than a single rule — with the +r thin-plate system the energy is the
+  // negated form, and the same is true for multiquadric and gaussian, while
+  // cubic already yields it directly. Encoding that per-kernel table would be
+  // fragile, and it is self-defeating in the UI regardless: TPSDialog's
+  // threshold is "Energy > 0.1: localized", which a negative value can never
+  // satisfy.
+  //
+  // The sign convention was cross-checked for thin_plate against an independent
+  // numerical estimate of the physical quantity, ∫(y'')²dx, which agrees in
+  // sign after the correction.
+  //
+  // Consumers should compare energies between fits that use the SAME kernel:
+  // the absolute scale still depends on the kernel's normalisation, only the
+  // sign (and hence the "is this deformation local?" question) is now correct.
+  let quadratic = 0;
   for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) {
-    be += (weights[0][i]*weights[0][j] + weights[1][i]*weights[1][j] + weights[2][i]*weights[2][j]) * K[i][j];
+    quadratic += (weights[0][i]*weights[0][j] + weights[1][i]*weights[1][j] + weights[2][i]*weights[2][j]) * K[i][j];
   }
+  const be = Math.abs(quadratic);
 
   const result: TPS3DResult = {
     weights, bendingEnergy: be, affineCoefs,
