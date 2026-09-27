@@ -37,6 +37,7 @@
 | 日期 | 标题 | 类型 |
 |---|---|---|
 | 2026-09-27 | [statistics 第二轮审查:9 处缺陷,含 1 处全模块级 NaN](2026-09-27-statistics-matrix-nan-fixes.md) | 缺陷修复 |
+| 2026-09-27 | [ets 层:两个"恒等映射"被当成真分析展示,导出复选框完全无效](2026-09-27-ets-identity-analyses-and-export-flag.md) | 缺陷修复 |
 | 2026-09-27 | [utils + controllers:协方差算错轴、EFA 分辨率被丢弃、校验器谎报支持集](2026-09-27-utils-covariance-and-efa-resolution.md) | 缺陷修复 / 文档 |
 | 2026-09-27 | [models + UI 接线:分组分析整条链路断开,用户分组永远到不了模型](2026-09-27-group-pipeline-and-transpose-metadata.md) | 缺陷修复 |
 | 2026-09-27 | [morphometrics 第二轮审查:5 处缺陷,其中 3 处让统计检验完全失效](2026-09-27-morphometrics-eigensolver-and-tests.md) | 缺陷修复 / 重构 |

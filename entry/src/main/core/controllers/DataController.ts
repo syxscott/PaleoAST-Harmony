@@ -16,15 +16,22 @@ export class DataController {
     return dm;
   }
 
-  exportCSV(delimiter = ','): string {
+  /**
+   * @param includeLabels write the column-header row and the row-label column.
+   *        The export dialog's "Include labels" checkbox publishes this value
+   *        and it was never read; `toCSV` grew the flag so the control does what
+   *        it says. `false` round-trips through
+   *        `parseCSV(text, delimiter, false, false)`.
+   */
+  exportCSV(delimiter = ',', includeLabels = true): string {
     const dm = this.state.dataMatrix;
     if (!dm) throw new Error('No data to export');
-    return toCSV(dm, delimiter);
+    return toCSV(dm, delimiter, includeLabels);
   }
 
   /** Export and persist to a sandbox path (data_controller.py export flow). */
-  exportCSVToFile(path: string, delimiter = ','): void {
-    const text = this.exportCSV(delimiter);
+  exportCSVToFile(path: string, delimiter = ',', includeLabels = true): void {
+    const text = this.exportCSV(delimiter, includeLabels);
     const file = fs.openSync(path, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
     try {
       fs.writeSync(file.fd, text);

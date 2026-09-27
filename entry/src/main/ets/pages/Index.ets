@@ -365,8 +365,11 @@ struct Index {
       this.exportReport(format);
       return;
     }
+    // The export dialog's "Include labels" checkbox publishes includeLabels and
+    // nothing read it, so unticking it changed nothing about the file written.
+    const includeLabels = (params['includeLabels'] as boolean) ?? true;
     try {
-      const content = this.dataCtrl.exportCSV(format === 'TSV' ? '\t' : ',');
+      const content = this.dataCtrl.exportCSV(format === 'TSV' ? '\t' : ',', includeLabels);
       const ext = format === 'TSV' ? 'tsv' : 'csv';
       // 真导出：系统保存对话框 + 落盘（FilePickerHelper.saveFile 内部写文件）
       FilePickerHelper.saveFile(content, 'paleoast_export.' + ext)
@@ -697,9 +700,14 @@ struct Index {
         // along (default 'jaccard').
         return this.statCtrl.runBetaDiv(params['metric'] as string ?? 'jaccard');
       case 'TPS Grid':
-        return this.statCtrl.runTPSAnalyze(
-          this.stateMgr.dataMatrix.data.to2D(), this.stateMgr.dataMatrix.data.to2D()
-        );
+        // A thin-plate spline needs a SOURCE and a TARGET configuration. This
+        // used to pass the loaded matrix as both, which is the identity map: the
+        // non-affine weights are all zero, the bending energy is exactly 0, and
+        // the "deformation grid" is a picture of the input table. It is not a
+        // result, so it refuses instead of drawing one.
+        throw new Error('TPS Grid needs a source and a target configuration. ' +
+          'The quick action has only one table loaded, so there is nothing to ' +
+          'deform it into; use the TPS dialog with both configurations.');
       default:
         return null;
     }
@@ -738,7 +746,14 @@ struct Index {
 
     switch (name) {
       case 'LDA': return this.statCtrl.runLDA(groups);
-      case 'CCA': return this.statCtrl.runCCA(data, data);
+      case 'CCA':
+        // CCA constrains a species matrix to an environment matrix. Passing one
+        // table as both is a self-constrained ordination: the "environment" is
+        // literally the "species", so the result says nothing about ecology and
+        // is presented under the name CCA. The quick action has a single table,
+        // so there is no second block to use.
+        throw new Error('CCA needs a species table and a separate environment table. ' +
+          'The quick action has only one table loaded; use the CCA dialog.');
       case 'Summary': return this.statCtrl.runSummary();
       case 'Normality': return this.statCtrl.runNormalityTest(0);
       case 't-test': return this.statCtrl.runTTest(safeCol(0), safeCol(1));
@@ -754,7 +769,10 @@ struct Index {
       case 'PERMANOVA': return this.statCtrl.runPERMANOVA(groups);
       case 'SIMPER': return this.statCtrl.runSIMPER(groups);
       case 'GPA': return this.statCtrl.runGPA();
-      case 'TPS Grid': return this.statCtrl.runTPSAnalyze(data.to2D(), data.to2D());
+      case 'TPS Grid':
+        throw new Error('TPS Grid needs a source and a target configuration. ' +
+          'The quick action has only one table loaded, so there is nothing to ' +
+          'deform it into; use the TPS dialog with both configurations.');
       case 'Allometry': return this.statCtrl.runAllometry();
       case 'Evolution Rate': return this.statCtrl.runEvoRate();
       case 'Spectral':

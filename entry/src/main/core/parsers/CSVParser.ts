@@ -77,12 +77,25 @@ function quoteField(value: string, delimiter: string): string {
   return value;
 }
 
-export function toCSV(dm: DataMatrix, delimiter = ','): string {
+/**
+ * Serialise a DataMatrix to delimited text (RFC 4180 quoting).
+ *
+ * `includeLabels` exists because the export dialog has offered an
+ * "Include labels" checkbox since the beginning; it published the value but
+ * `Index.ets` never read it, so unchecking it changed nothing. With
+ * `includeLabels = false` no header row is written and each record starts at
+ * the first variable — which round-trips through
+ * `parseCSV(text, delimiter, false, false)`.
+ */
+export function toCSV(dm: DataMatrix, delimiter = ',', includeLabels = true): string {
   const lines: string[] = [];
-  lines.push(['', ...dm.colLabels].map(v => quoteField(v, delimiter)).join(delimiter));
+  if (includeLabels) {
+    lines.push(['', ...dm.colLabels].map(v => quoteField(v, delimiter)).join(delimiter));
+  }
   for (let i = 0; i < dm.nSamples; i++) {
     const vals = dm.data.row(i).map(v => isNaN(v) ? 'NA' : v.toString());
-    lines.push([dm.rowLabels[i], ...vals].map(v => quoteField(v, delimiter)).join(delimiter));
+    const cells = includeLabels ? [dm.rowLabels[i], ...vals] : vals;
+    lines.push(cells.map(v => quoteField(v, delimiter)).join(delimiter));
   }
   return lines.join('\n');
 }
