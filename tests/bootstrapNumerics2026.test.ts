@@ -31,9 +31,19 @@
  */
 import { describe, it, expect } from './runner.ts';
 import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { bootstrap } from '../entry/src/main/core/math/Bootstrap.ts';
 
-const ROOT = 'D:/GIthub/PaleoAST-Harmony/';
+/**
+ * The repository root, derived from this file's own location.
+ *
+ * It used to be the absolute path of the machine the test was written on,
+ * which made the suite unrunnable on any other machine -- including the CI
+ * runner, so the tests had effectively never run outside one laptop. The
+ * trailing slash is deliberate: the paths below are built by concatenation
+ * and one of them slices ROOT.length to get a repo-relative path back.
+ */
+const ROOT = fileURLToPath(new URL('../', import.meta.url)).replace(/\\/g, '/');
 const SRC = ROOT + 'entry/src/main/core/math/Bootstrap.ts';
 const src = readFileSync(SRC, 'utf-8');
 

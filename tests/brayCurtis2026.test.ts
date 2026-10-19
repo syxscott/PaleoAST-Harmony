@@ -24,11 +24,18 @@
  */
 import { describe, it, expect } from './runner.ts';
 import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { computeDistanceMatrix } from '../entry/src/main/core/analysis/statistics/statistics.ts';
 import { rowDistance } from '../entry/src/main/core/scipy/DistanceCluster.ts';
 import { Matrix } from '../entry/src/main/core/math/Matrix.ts';
 
-const ROOT = 'D:/GIthub/PaleoAST-Harmony/';
+/**
+ * The repository root, derived from this file's own location. It used to be
+ * the absolute path of the machine the test was written on, which made the
+ * suite unrunnable anywhere else -- including the CI runner. The trailing
+ * slash is deliberate: the paths below are built by concatenation.
+ */
+const ROOT = fileURLToPath(new URL('../', import.meta.url)).replace(/\\/g, '/');
 const source = (rel: string) => readFileSync(ROOT + rel, 'utf-8');
 
 // [a, b, scipy's answer] -- all six verified against scipy 1.15.3.

@@ -23,9 +23,17 @@
 import { describe, it, expect } from './runner.ts';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { findUnterminatedStringLiterals } from './stringLexer.ts';
 
-const ROOT = 'D:/GIthub/PaleoAST-Harmony/';
+/**
+ * The repository root, derived from this file's own location. It used to be
+ * the absolute path of the machine the test was written on, which made the
+ * suite unrunnable anywhere else -- including the CI runner. The trailing
+ * slash is deliberate: the paths below are built by concatenation and one of
+ * them slices ROOT.length to get a repo-relative path back.
+ */
+const ROOT = fileURLToPath(new URL('../', import.meta.url)).replace(/\\/g, '/');
 const SCAN_DIRS = ['entry/src/main', 'tests', 'test', 'tools'];
 
 function collectSources(dir: string, out: string[]): string[] {

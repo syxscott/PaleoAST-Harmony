@@ -22,13 +22,21 @@
 import { describe, it, expect } from './runner.ts';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { Matrix } from '../entry/src/main/core/math/Matrix.ts';
 import {
   pca, pcoa, lda, computeDistanceMatrix,
 } from '../entry/src/main/core/analysis/statistics/statistics.ts';
 import { plsIntegration } from '../entry/src/main/core/analysis/morphometrics/Integration.ts';
 
-const ROOT = 'D:/GIthub/PaleoAST-Harmony/';
+/**
+ * The repository root, derived from this file's own location. It used to be
+ * the absolute path of the machine the test was written on, which made the
+ * suite unrunnable anywhere else -- including the CI runner. The trailing
+ * slash is deliberate: the paths below are built by concatenation and one of
+ * them slices ROOT.length to get a repo-relative path back.
+ */
+const ROOT = fileURLToPath(new URL('../', import.meta.url)).replace(/\\/g, '/');
 
 // Deterministic data with a real two-group structure.
 const N = 24;

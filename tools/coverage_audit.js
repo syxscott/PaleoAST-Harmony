@@ -6,8 +6,14 @@
 const fs = require('fs');
 const path = require('path');
 
-const PY_ROOT = 'D:/GIthub/PaleoAST';
-const HM_ROOT = 'D:/GIthub/PaleoAST-Harmony/entry/src/main';
+// The repository root, derived from this file's own location. It used to be
+// the absolute path of the machine the tool was written on, which meant the
+// tool only worked there. `PY_ROOT` points at the Python original, which is a
+// SEPARATE checkout next to this one -- point it at your own clone, or
+// override it with the PY_ROOT environment variable.
+const REPO_ROOT = path.resolve(__dirname, '..');
+const PY_ROOT = process.env.PY_ROOT || path.resolve(REPO_ROOT, '..', 'PaleoAST');
+const HM_ROOT = path.resolve(REPO_ROOT, 'entry', 'src', 'main');
 
 // computational modules to audit (UI views handled separately)
 const MODULES = [

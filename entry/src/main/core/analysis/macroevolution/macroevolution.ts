@@ -793,10 +793,10 @@ export interface FBDTreeData {
  *                   other sampled descendant (E(t))
  *
  * NOTE: this is a self-consistent derivation from the Stadler (2010) /
- * Heath et al. (2014) conditioning; it has NOT been diffed against the
- * Python original (D:/GIthub/PaleoAST is not authorised for this task).
- * The per-node `E(t)` used here is also the closed-form one below, which
- * is not the same function as `fbdExtinctionProbability` in this file.
+ * Heath et al. (2014) conditioning; it has NOT been diffed value-by-value
+ * against the Python original's `fbd_log_likelihood`. The per-node `E(t)`
+ * used here is also the closed-form one below, which is not the same
+ * function as `fbdExtinctionProbability` in this file.
  */
 export function fbdLogLikelihood(
   speciation: number, extinction: number, fossilSampling: number,

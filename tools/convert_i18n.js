@@ -5,8 +5,14 @@
 const fs = require('fs');
 const path = require('path');
 
-const PY_DIR = 'D:/GIthub/PaleoAST/config/i18n';
-const OUT_DIR = 'D:/GIthub/PaleoAST-Harmony/entry/src/main/core/config/i18n';
+// The repository root, derived from this file's own location. It used to be
+// the absolute path of the machine the tool was written on, which meant the
+// tool only worked there. `PY_DIR` still points at the Python original, which
+// is a SEPARATE checkout next to this one -- point it at your own clone, or
+// override it with the PY_DIR environment variable.
+const REPO_ROOT = path.resolve(__dirname, '..');
+const PY_DIR = process.env.PY_DIR || path.resolve(REPO_ROOT, '..', 'PaleoAST', 'config', 'i18n');
+const OUT_DIR = path.resolve(REPO_ROOT, 'entry', 'src', 'main', 'core', 'config', 'i18n');
 
 function parsePyDict(src) {
   // Extract the TRANSLATIONS = { ... } literal and evaluate it as JS

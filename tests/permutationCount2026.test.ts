@@ -19,13 +19,20 @@
  */
 import { describe, it, expect } from './runner.ts';
 import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { parseNewick } from '../entry/src/main/core/analysis/phylogenetics/index.ts';
 import {
   phylogeneticSignal, phyloANOVA, anosim, permanova, computeDistanceMatrix,
 } from '../entry/src/main/core/analysis/statistics/statistics.ts';
 import { Matrix } from '../entry/src/main/core/math/Matrix.ts';
 
-const ROOT = 'D:/GIthub/PaleoAST-Harmony/';
+/**
+ * The repository root, derived from this file's own location. It used to be
+ * the absolute path of the machine the test was written on, which made the
+ * suite unrunnable anywhere else -- including the CI runner. The trailing
+ * slash is deliberate: the paths below are built by concatenation.
+ */
+const ROOT = fileURLToPath(new URL('../', import.meta.url)).replace(/\\/g, '/');
 const TREE = parseNewick('((A:0.1,B:0.1):0.1,(C:0.1,D:0.1):0.1,(E:0.1,F:0.1):0.1);');
 const TRAITS = { A: 1.2, B: 2.1, C: 3.4, D: 2.8, E: 5.1, F: 4.3 };
 const GROUPS = { A: 'g1', B: 'g1', C: 'g2', D: 'g2', E: 'g3', F: 'g3' };
