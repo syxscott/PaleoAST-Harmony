@@ -8,6 +8,10 @@
  */
 import { describe, it, expect } from './runner.ts';
 
+// The 2026-10-19 regression suite for the same module lives in its own file
+// (it covers the Kabsch transpose, the block division, the allometry guard,
+// the RV coefficient and the 3D kernel). It is registered in `tests/run.ts`.
+
 import { Matrix } from '../entry/src/main/core/math/Matrix.ts';
 import { eigh } from '../entry/src/main/core/math/linalg.ts';
 import {
@@ -226,9 +230,14 @@ describe('audit: buildKernelMatrix silently used the 2D kernel for dim = 3', () 
   });
 
   it('both builders still produce the right kernel on the right dimension', () => {
-    // r^2 log r: only the off-diagonals at distance 1 survive, r^2 ln r = ln 1 = 0
+    // The 2D kernel is r^2 log r, which is 0 at r = 1 — but NOT at
+    // r = sqrt(2): there it is 2 * log(sqrt(2)) = log 2 = 0.6931.  The old
+    // expectation of an all-zero matrix was simply wrong (the (1,0)-(0,1)
+    // pair of these three landmarks sits at distance sqrt(2)), and it had
+    // been failing on exactly that value.  The implementation was right.
     const k2 = buildKernelMatrix([[0, 0], [1, 0], [0, 1]], 2);
-    for (let i = 0; i < 9; i++) expect(k2.data[i]).toBeCloseTo(0, 12);
+    const ref2 = [0, 0, 0, 0, 0, Math.LN2, 0, Math.LN2, 0];
+    for (let i = 0; i < 9; i++) expect(k2.data[i]).toBeWithin(ref2[i], 1e-12);
     // -|r|: unit distances give -1, the diagonal distance sqrt(2) gives -1.4142
     const k3 = buildKernelMatrix3D([[0, 0, 0], [1, 0, 0], [0, 1, 0]]);
     const ref = [0, -1, -1, -1, 0, -Math.SQRT2, -1, -Math.SQRT2, 0];

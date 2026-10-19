@@ -25,4 +25,26 @@ export const fs = {
   readTextSync: (): never => unavailable('fs.readTextSync'),
 };
 
-export default { fs };
+/**
+ * The document picker. `core/io/FilePickerHelper.ts` imports it, so without
+ * this the module fails to instantiate under the node harness and the
+ * all-modules import smoke test reports it as broken. The picker has no
+ * meaningful node equivalent: the shim resolves to a URI that no caller can
+ * open, and every write through it throws, which is exactly the "the file
+ * API is not available here" behaviour the rest of this shim encodes.
+ */
+export const picker = {
+  DocumentSelectOptions: class DocumentSelectOptions {
+    maxSelectNumber?: number;
+    fileSuffixFilters?: Array<string>;
+  },
+  DocumentSaveOptions: class DocumentSaveOptions {
+    newFileNames?: Array<string>;
+  },
+  DocumentViewPicker: class DocumentViewPicker {
+    async select(_options?: unknown): Promise<string[]> { return []; }
+    async save(_options?: unknown): Promise<string[]> { return []; }
+  },
+};
+
+export default { fs, picker };

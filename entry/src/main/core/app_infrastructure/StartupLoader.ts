@@ -107,7 +107,15 @@ export class StartupLoader {
   }
 }
 
-/** Default PaleoAST warm-up table (loader.py PaleoASTLoader) — real self-checks. */
+/**
+ * Default PaleoAST warm-up table (loader.py PaleoASTLoader) — real self-checks.
+ *
+ * Every entry below runs an ACTUAL function of the module it names and
+ * checks the result. Four of the entries used to be empty stubs
+ * (`load: () => { void 0; }`) that reported success without warming
+ * anything up — a module shown as "loaded" in the splash screen that had
+ * never been executed.
+ */
 export function createPaleoastStartupLoader(): StartupLoader {
   return new StartupLoader().registerBatch([
     {
@@ -128,23 +136,66 @@ export function createPaleoastStartupLoader(): StartupLoader {
     },
     {
       id: 'stratigraphy', label: 'Stratigraphy analyses', weight: 2, dependencies: ['math'],
-      load: () => { void 0; },
+      load: () => {
+        // Real warm-up: run a stratigraphy function and check the number.
+        const sm = require_strat().movingAverage([1, 2, 3, 4, 5], 3);
+        if (!Array.isArray(sm) || sm.length !== 5 || Math.abs(sm[2] - 3) > 1e-12) {
+          throw new Error('stratigraphy self-check failed');
+        }
+      },
     },
     {
       id: 'morphometrics', label: 'Morphometrics', weight: 2, dependencies: ['math'],
-      load: () => { void 0; },
+      load: () => {
+        // Real warm-up: fit two elliptic Fourier harmonics to a unit circle.
+        const contour: number[][] = [];
+        for (let i = 0; i < 16; i++) {
+          const a = (i / 16) * 2 * Math.PI;
+          contour.push([Math.cos(a), Math.sin(a)]);
+        }
+        const r = require_morpho().efa(contour, 2, 16);
+        if (!r || !Array.isArray(r.reconstructed) || r.reconstructed.length !== 16) {
+          throw new Error('morphometrics self-check failed');
+        }
+      },
     },
     {
       id: 'phylogenetics', label: 'Phylogenetics', weight: 2, dependencies: ['math'],
-      load: () => { void 0; },
+      load: () => {
+        // Real warm-up: parse a Newick tree and count its tips.
+        const tree = require_phylo().parseNewick('(A,B,(C,D));');
+        if (!tree || tree.getLeaves().length !== 4) {
+          throw new Error('phylogenetics self-check failed');
+        }
+      },
     },
     {
       id: 'native', label: 'Native acceleration', weight: 1, dependencies: ['math'],
-      load: (): void => { void _startupInitNative().catch(() => false); },
+      // The promise is AWAITED. It used to be discarded
+      // (`void initNative().catch(...)`), so a native warm-up that failed
+      // could never be reported: the startup announced "ready" either way.
+      // `initNative()` resolves FALSE when the .so is unavailable — that is
+      // the documented pure-TS fallback, not a failure — but a rejection now
+      // stops the startup and is reported through `StartupProgress.error`.
+      load: (): Promise<void> => _startupInitNative().then(() => undefined),
     },
     {
       id: 'plugins', label: 'Plugins', weight: 1, dependencies: ['statistics'],
-      load: () => { void 0; },
+      load: () => {
+        // Real warm-up: exercise the plugin registry end to end. The registry
+        // is a global singleton, so the probe plugin is removed again before
+        // the warm-up returns.
+        const registry = require_plugins();
+        const probe: Plugin = {
+          name: '__startup_probe__', version: '0.0.0',
+          description: 'startup self-check', author: 'paleoast',
+          analyze: (_data: number[][], _params: Record<string, unknown>): unknown => null,
+        };
+        registry.register(probe);
+        const found = registry.get('__startup_probe__');
+        registry.remove('__startup_probe__');
+        if (found !== probe) throw new Error('plugin registry self-check failed');
+      },
     },
   ]);
 }
@@ -153,5 +204,14 @@ export function createPaleoastStartupLoader(): StartupLoader {
 import { Matrix as _StartupMatrix } from '../math/Matrix';
 import { mean as _startupMean } from '../math/stats';
 import { initNative as _startupInitNative } from '../math/NativeMath';
+import { movingAverage as _startupMovingAverage } from '../analysis/stratigraphy/stratigraphy';
+import { efa as _startupEfa } from '../analysis/morphometrics/morphometrics';
+import { parseNewick as _startupParseNewick } from '../analysis/phylogenetics/phylogenetics';
+import { PluginRegistry as _startupPluginRegistry } from '../plugins/Registry';
+import type { Plugin } from '../plugins/Base';
 function require_matrix() { return { Matrix: _StartupMatrix }; }
 function require_stats() { return { mean: _startupMean }; }
+function require_strat() { return { movingAverage: _startupMovingAverage }; }
+function require_morpho() { return { efa: _startupEfa }; }
+function require_phylo() { return { parseNewick: _startupParseNewick }; }
+function require_plugins() { return _startupPluginRegistry; }

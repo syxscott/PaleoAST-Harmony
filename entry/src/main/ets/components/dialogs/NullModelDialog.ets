@@ -15,9 +15,14 @@ export struct NullModelDialog {
   // forwarded — while still being written into the analysis script.
   @State showAdvanced: boolean = false;
   metricOpts: string[] = ['c_score', 'checkerboard', 'combo'];
+  // One description per option: the array had two entries for three options,
+  // so picking "combo" read past the end of the array and the explanation
+  // line rendered empty (the analysis itself ran fine — the metric is
+  // supported by the core).
   metricDesc: string[] = [
     'C-score (Stone & Roberts 1990): measures checkerboard structure',
     'Checkerboard: counts perfect checkerboard pairs',
+    'Combo: mean of the C-score and the checkerboard score normalised to 0..1',
   ];
   onConfirm: (params: Record<string, Object>) => void = () => {};
 

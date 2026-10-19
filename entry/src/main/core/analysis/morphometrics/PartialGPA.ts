@@ -216,8 +216,14 @@ function rotateConfig(cfg: Configuration, R: number[][]): Configuration {
   const out: Configuration = [];
   for (let i = 0; i < k; i++) {
     const p = new Array<number>(m).fill(0);
+    // cfg' = cfg @ Rᵀ, i.e. p[b] = Σ_a cfg[a] · R[b][a].
+    //
+    // The old code accumulated `cfg[i][a] * R[a][b]` — the transpose of the
+    // superimposition (see morphometrics.ts::_rotateConfig).  R comes out of
+    // the SVD as the column-vector rotation, so a row-vector configuration
+    // has to be multiplied by Rᵀ.
     for (let a = 0; a < m; a++)
-      for (let b = 0; b < m; b++) p[b] += cfg[i][a] * R[a][b];
+      for (let b = 0; b < m; b++) p[b] += cfg[i][a] * R[b][a];
     out.push(p);
   }
   return out;
@@ -601,8 +607,12 @@ export function computeSurfaceTangentsAndNormals(
  *
  * Solves the Bookstein (1989) constrained TPS system on the fixed landmarks
  * and returns the non-affine bending energy E = tr(Wᵀ K W) = wᵀKw.
- * 2D kernel: K_ij = r² log r (biharmonic); 3D kernel: K_ij = r (Laplacian
- * fundamental solution, consistent with morpho3d tps3d thin_plate).
+ * 2D kernel: K_ij = r² log r (biharmonic); 3D kernel: K_ij = −|r| (the
+ * linearized bending energy of Bookstein 1991, the same kernel as
+ * `tpsKernel3D` / TPSAnalyzer, so that E = wᵀKw ≥ 0).  The 3D sign used to
+ * be +r here while the rest of the module used −|r|; the two disagreed on
+ * the sign of the 3D energy, which flipped the relative weight of the
+ * sliding penalty λ.
  *
  * References:
  * - Bookstein, F.L. (1989). IEEE TPAMI 11(6): 567-585.
@@ -626,7 +636,8 @@ export function computeBendingEnergy(
     for (let j = 0; j < nFixed; j++) {
       if (i === j) continue;
       const r = Math.sqrt(_sqDist(fixedCoords[i], fixedCoords[j]));
-      if (r > 1e-10) K[i][j] = nDims === 2 ? r * r * Math.log(r) : r;
+      // 3D kernel: −|r| (Bookstein 1991), matching tpsKernel3D / TPSAnalyzer.
+      if (r > 1e-10) K[i][j] = nDims === 2 ? r * r * Math.log(r) : -r;
     }
   }
 

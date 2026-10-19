@@ -1,6 +1,7 @@
 import { Matrix } from '../math/Matrix';
 import { DataMatrix, StateManager } from '../models/index';
 import { parseCSV, toCSV } from '../parsers/index';
+import { isMissingValue, percentStandardize, zscoreStandardize } from '../utils/Transformations';
 import { fs } from '@kit.CoreFileKit';
 
 /**
@@ -68,10 +69,22 @@ export class DataController {
     return dm.data.sqrt();
   }
 
+  /**
+   * Z-score of every column.
+   *
+   * This used to be `data.sub(data.meanAxis(0)).div(data.stdAxis(0))`, which
+   * THROWS "Division by zero" on a constant column. The two other
+   * z-score implementations in the repository
+   * (`utils/Transformations.zscoreStandardize` and
+   * `utils/MatrixOps.standardizeMatrix`) both guard the standard deviation
+   * with `|| 1` and return 0 for a constant column, so the same table
+   * produced an error here and a value there. This now delegates to the
+   * shared implementation: one transform, one behaviour.
+   */
   transformZScore(): Matrix {
     const dm = this.state.dataMatrix;
     if (!dm) throw new Error('No data');
-    return dm.data.sub(dm.data.meanAxis(0)).div(dm.data.stdAxis(0));
+    return zscoreStandardize(dm.data, 0);
   }
 
   transformHellinger(): Matrix {
@@ -86,16 +99,23 @@ export class DataController {
     return new Matrix(d, dm.data.rows, dm.data.cols);
   }
 
-  transformPercent(): Matrix {
+  /**
+   * Relative-abundance ("percent") standardization.
+   *
+   * AXIS SEMANTICS (identical to `utils/Transformations.percentStandardize`):
+   *   axis 0 -> every COLUMN is scaled to sum to 1;
+   *   axis 1 -> every ROW is scaled to sum to 1.
+   *
+   * The default is axis 1, i.e. the row-wise behaviour this method always
+   * had (each specimen becomes a composition of 1). Note that
+   * `percentStandardize` itself defaults to axis 0, so the two functions are
+   * NOT interchangeable under their bare names — the axis has to be stated.
+   * The implementation is now shared instead of duplicated.
+   */
+  transformPercent(axis: number = 1): Matrix {
     const dm = this.state.dataMatrix;
     if (!dm) throw new Error('No data');
-    const rowSums = dm.data.sumAxis(1);
-    const d = new Float64Array(dm.data.length);
-    for (let i = 0; i < dm.data.rows; i++) {
-      const rs = rowSums.get(i, 0) || 1;
-      for (let j = 0; j < dm.data.cols; j++) d[i * dm.data.cols + j] = dm.data.get(i, j) / rs;
-    }
-    return new Matrix(d, dm.data.rows, dm.data.cols);
+    return percentStandardize(dm.data, axis);
   }
 
   transformWisconsin(): Matrix {
@@ -177,13 +197,22 @@ export class DataController {
 
   // ─── Validation ────────────────────────────────────────────────
 
-  validateData(): { valid: boolean; message: string; nRows: number; nCols: number; nNaN: number } {
+  /**
+   * Structural check of the loaded table.
+   *
+   * `valid` used to be `true` for a table that contained missing values, so
+   * a caller that only looks at `valid` kept running analyses on a table
+   * with holes in it and treated the result as valid. `valid` is now false
+   * when anything is missing, and `hasMissing` says so explicitly.
+   */
+  validateData(): { valid: boolean; hasMissing: boolean; message: string; nRows: number; nCols: number; nNaN: number } {
     const dm = this.state.dataMatrix;
-    if (!dm) return { valid: false, message: 'No data loaded', nRows: 0, nCols: 0, nNaN: 0 };
+    if (!dm) return { valid: false, hasMissing: false, message: 'No data loaded', nRows: 0, nCols: 0, nNaN: 0 };
     let nNaN = 0;
-    for (let i = 0; i < dm.data.length; i++) if (isNaN(dm.data.data[i])) nNaN++;
+    for (let i = 0; i < dm.data.length; i++) if (isMissingValue(dm.data.data[i])) nNaN++;
     return {
-      valid: true,
+      valid: nNaN === 0,
+      hasMissing: nNaN > 0,
       message: nNaN > 0 ? `${nNaN} missing values detected` : 'Data OK',
       nRows: dm.nSamples,
       nCols: dm.nVariables,

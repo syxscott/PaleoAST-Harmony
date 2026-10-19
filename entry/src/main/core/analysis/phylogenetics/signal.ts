@@ -40,8 +40,19 @@ export function phylogeneticSignal(
   rngSeed?: number,
 ): PhylogeneticSignalResult {
   const { tipNames, V } = brownianVCV(tree, 1.0);
-  const n = Math.min(tipNames.length, traitValues.length);
-  const y = traitValues.slice(0, n);
+  // The trait vector must match the tree tip for tip. The old code took
+  // Math.min(tipNames.length, traitValues.length) and silently truncated:
+  // a 4-tip tree with 3 trait values still produced a 4x4 V, which was then
+  // inverted as if it were 3x3 (the upper-left block of an inverse is NOT
+  // the inverse of that block), so the reported K = 0.9333 had no
+  // statistical meaning and nTaxa contradicted the tree.
+  if (traitValues.length !== tipNames.length) {
+    throw new Error(
+      `phylogeneticSignal: the trait vector has ${traitValues.length} value(s) but the tree has ` +
+      `${tipNames.length} tip(s) (${tipNames.join(', ')}) — they must match one for one`);
+  }
+  const n = tipNames.length;
+  const y = [...traitValues];
 
   if (rngSeed !== undefined) seedRng(rngSeed);
 

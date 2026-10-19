@@ -23,6 +23,13 @@ export interface Split {
   size: number;
 }
 
+/**
+ * Key prefix for the terminal branch of a leaf. It keeps a leaf split from
+ * colliding with an internal clade key (which is the sorted leaf names
+ * joined by "|").
+ */
+const LEAF_SPLIT_PREFIX = '@';
+
 export class TreeComparator {
   /**
    * Compute Robinson-Foulds distance between two trees.
@@ -51,8 +58,12 @@ export class TreeComparator {
     TreeComparator._collectLeaves(a).forEach(l => sa.add(l));
     TreeComparator._collectLeaves(b).forEach(l => sb.add(l));
     const common = new Set<string>([...sa].filter(x => sb.has(x)));
-    if (common.size <= 3) return 0;
-    const maxSplits = common.size - 3;
+    if (common.size < 3) return 0;
+    // A ROOTED binary tree on n leaves has n-2 internal clades, so the two
+    // trees can differ in at most 2(n-2) splits. The old denominator used the
+    // UNROOTED count 2(n-3), so `((A,B),(C,D))` vs `((A,C),(B,D))` scored 2.0
+    // on a scale that is documented as [0, 1].
+    const maxSplits = common.size - 2;
     return TreeComparator.robinsonFoulds(a, b) / (2 * maxSplits);
   }
 
@@ -116,7 +127,15 @@ export class TreeComparator {
       const leaves = new Set<string>();
       const isLeaf = !n.children || n.children.length === 0;
       if (isLeaf) {
-        if (n.name) leaves.add(n.name);
+        if (n.name) {
+          leaves.add(n.name);
+          // The terminal branch of a leaf IS a split. The old code returned
+          // here, so a terminal branch never entered the map and two trees
+          // that differed ONLY in a terminal branch length scored
+          // weightedRF = 0 -- a different measurement of the same tree was
+          // reported as identical.
+          map.set(LEAF_SPLIT_PREFIX + n.name, n.branchLength ?? 0);
+        }
         return leaves;
       }
       for (const c of n.children) {

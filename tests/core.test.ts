@@ -181,13 +181,13 @@ describe('ecology', () => {
     expect(r.totalIndividuals).toBe(10);
     // Shannon of {4,2,2,1,1}: H = -Σ p ln p
     const expectedH = -(0.4 * Math.log(0.4) + 2 * 0.2 * Math.log(0.2) + 2 * 0.1 * Math.log(0.1));
-    expect(r.shannon).toBeCloseTo(expectedH, 1e-9);
+    expect(r.shannon).toBeWithin(expectedH, 1e-9);
   });
 
   it('Fisher alpha solver satisfies S = α ln(1+N/α)', () => {
     const alpha = computeFisherAlpha(20, 500);
     if (alpha !== null) {
-      expect(alpha * Math.log(1 + 500 / alpha)).toBeCloseTo(20, 1e-6);
+      expect(alpha * Math.log(1 + 500 / alpha)).toBeWithin(20, 1e-6);
     } else {
       throw new Error('Fisher alpha failed to converge');
     }
@@ -206,15 +206,15 @@ describe('ecology', () => {
     const b = [1, 1, 0, 0, 1, 1];
     const r = betaDiversityDecomposition([a, b], 'sorensen');
     // shared = 2, only_i = 2, only_j = 2
-    expect(r.totalBeta[0][1]).toBeCloseTo(4 / 8, 1e-9);
-    expect(r.turnover[0][1]).toBeCloseTo(2 / (4 + 2), 1e-9);
-    expect(r.nestedness[0][1]).toBeCloseTo(1 / 6, 1e-9); // Baselga S_ne with a=2,b=c=2
+    expect(r.totalBeta[0][1]).toBeWithin(4 / 8, 1e-9);
+    expect(r.turnover[0][1]).toBeWithin(2 / (4 + 2), 1e-9);
+    expect(r.nestedness[0][1]).toBeWithin(1 / 6, 1e-9); // Baselga S_ne with a=2,b=c=2
     expect(r.pairwiseResults).toHaveLength(1);
   });
 
   it('DTW distance of identical sequences is zero', () => {
     const r = dtw([1, 2, 3, 4], [1, 2, 3, 4]);
-    expect(r.distance).toBeCloseTo(0, 1e-9);
+    expect(r.distance).toBeWithin(0, 1e-9);
     expect(r.path.length).toBeGreaterThanOrEqual(4);
   });
 
@@ -242,7 +242,7 @@ describe('ecology', () => {
     for (let i = 1; i < r.expectedRichness.length; i++) {
       expect(r.expectedRichness[i]).toBeGreaterThanOrEqual(r.expectedRichness[i - 1] - 1e-9);
     }
-    expect(r.expectedRichness[r.expectedRichness.length - 1]).toBeCloseTo(3, 1e-9);
+    expect(r.expectedRichness[r.expectedRichness.length - 1]).toBeWithin(3, 1e-9);
   });
 });
 
@@ -252,7 +252,7 @@ describe('stratigraphy', () => {
   it('broken-stick expectation sums to 1 and declines', () => {
     const r = brokenStickTest([5, 3, 1, 0.5, 0.2], 199);
     const sum = r.brokenStickExpectation.reduce((a, b) => a + b, 0);
-    expect(sum).toBeCloseTo(1, 1e-9);
+    expect(sum).toBeWithin(1, 1e-9);
     for (let i = 1; i < r.brokenStickExpectation.length; i++) {
       expect(r.brokenStickExpectation[i]).toBeLessThan(r.brokenStickExpectation[i - 1]);
     }
@@ -286,7 +286,7 @@ describe('stratigraphy', () => {
       for (let j = 0; j < 2; j++) {
         const denom = total - rowSums[i];
         const expected = denom > 0 ? (rowSums[i] * colSums[j]) / denom : 0;
-        expect(r.expectedMatrix[i][j]).toBeCloseTo(expected, 1e-9);
+        expect(r.expectedMatrix[i][j]).toBeWithin(expected, 1e-9);
       }
     }
     expect(r.nTransitions).toBe(total);
@@ -304,7 +304,7 @@ describe('stratigraphy', () => {
   it('Kim & O’Neil paleotemperature gives ~25°C for typical values', () => {
     const tC = computePaleotemperatureKimONeil(0, 0);
     // δc=0, δw=0 → alpha=1.03091^1 → T ≈ 25.1°C (well-known calibration check)
-    expect(tC).toBeCloseTo(13.67, 0.5);
+    expect(tC).toBeWithin(13.67, 0.5);
   });
 
   it('PCHIP interpolates monotonically through monotone data', () => {
@@ -351,9 +351,9 @@ describe('phylogenetics', () => {
     expect(tipNames).toHaveLength(3);
     // Human/Chimp LCA at depth 1 → V(H,C) = 1; diag = 2
     const hi = tipNames.indexOf('Human'), ci = tipNames.indexOf('Chimp');
-    expect(V[hi][hi]).toBeCloseTo(2.0, 1e-9);
-    expect(V[hi][ci]).toBeCloseTo(1.0, 1e-9);
-    expect(V[hi][tipNames.indexOf('Gorilla')]).toBeCloseTo(0, 1e-9);
+    expect(V[hi][hi]).toBeWithin(2.0, 1e-9);
+    expect(V[hi][ci]).toBeWithin(1.0, 1e-9);
+    expect(V[hi][tipNames.indexOf('Gorilla')]).toBeWithin(0, 1e-9);
   });
 
   it('canonical Blomberg K is exactly 1 on a star tree (V = I)', () => {
@@ -461,10 +461,10 @@ describe('parsers', () => {
     const dm = parseCSV('a,b,c\n1,2,3\n4,"5,5",NA\n');
     expect(dm.nSamples).toBe(2);
     expect(dm.nVariables).toBe(2); // quoted comma must not split the row (row label takes col 0)
-    expect(dm.data.get(1, 0)).toBeCloseTo(5, 1e-9); // parseFloat('5,5') = 5 (leading-numeric parse)
+    expect(dm.data.get(1, 0)).toBeWithin(5, 1e-9); // parseFloat('5,5') = 5 (leading-numeric parse)
     expect(isNaN(dm.data.get(1, 1))).toBe(true);
     const dm2 = parseCSV('a;b;c\n1;2;3\n4;"5.5";NA\n', ';');
-    expect(dm2.data.get(1, 0)).toBeCloseTo(5.5, 1e-9); // quoted numeric parses (col 0 after row label)
+    expect(dm2.data.get(1, 0)).toBeWithin(5.5, 1e-9); // quoted numeric parses (col 0 after row label)
   });
 
   it('NEXUS writer emits TAXA/CHARACTER blocks with quoting', () => {
@@ -593,7 +593,7 @@ describe('real dispatch & native loading', () => {
     const out = await pool.map([1, 0, 3], (x: number) => { if (x === 0) throw new Error('div by zero'); return 10 / x; });
     expect(out[0]).toBe(10);
     expect(out[1]).toBeNull();
-    expect(out[2]).toBeCloseTo(10 / 3, 1e-9);
+    expect(out[2]).toBeWithin(10 / 3, 1e-9);
   });
 
   it('TaskScheduler.executeInTaskPool falls back to same-thread and still computes', async () => {
@@ -661,7 +661,7 @@ describe('review fixes: numerics', () => {
   it('univariateSummary averages the two central values for even n', () => {
     const m = new Matrix(new Float64Array([1, 2, 3, 4]), 4, 1);
     const s = univariateSummary(m, ['x']);
-    expect(s[0].median).toBeCloseTo(2.5, 1e-12);
+    expect(s[0].median).toBeWithin(2.5, 1e-12);
   });
 
   it('PIC propagates the harmonic node variance, not the contrast variance', () => {
@@ -671,7 +671,7 @@ describe('review fixes: numerics', () => {
     const tree = parseNewick('((A:1,B:1):1,C:1);');
     const r = pic(tree, { A: 0, B: 0, C: 2 });
     const rootSE = Math.max(...r.standardErrors);
-    expect(rootSE).toBeCloseTo(Math.sqrt(2.5), 1e-9);
+    expect(rootSE).toBeWithin(Math.sqrt(2.5), 1e-9);
   });
 
   it('Blomberg K is unbiased under Brownian motion (E[K] = 1)', () => {

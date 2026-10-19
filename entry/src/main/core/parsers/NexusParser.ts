@@ -93,16 +93,45 @@ export interface NexusData {
   dataType: string;
   missingChar: string;
   gapChar: string;
+  /**
+   * Non-fatal inconsistencies found while reading (a taxon without a matrix
+   * row, a matrix row without a taxon, a declared NCHAR that disagrees with
+   * the data). A parse problem must never look like "the file simply had
+   * fewer rows".
+   */
+  warnings?: string[];
+}
+
+/**
+ * Split one matrix line into its taxon name and its sequence.
+ * The name may be quoted (`'Homo sapiens' ACGT`).
+ */
+function splitMatrixLine(line: string): { name: string; seq: string } {
+  let i = 0;
+  let name = '';
+  const first = line[0];
+  if (first === "'" || first === '"') {
+    i = 1;
+    while (i < line.length && line[i] !== first) { name += line[i]; i++; }
+    if (i < line.length) i++; // closing quote
+    name = name.trim();
+  } else {
+    while (i < line.length && !/\s/.test(line[i])) { name += line[i]; i++; }
+  }
+  const rest = line.slice(i).trim().replace(/\s+/g, '');
+  return { name, seq: rest.replace(/;+$/, '') };
 }
 
 export function parseNexus(text: string): NexusData {
-  // Fixed: proper regex for line splitting
   const lines = text.split(/\r?\n/);
-  const taxa: string[] = [];
-  const charRows: string[][] = [];
+  /** Taxon names in TAXLABELS order. */
+  const declaredTaxa: string[] = [];
+  /** Matrix rows in file order; an interleaved matrix repeats a taxon. */
+  const matrixRows: { name: string; seq: string }[] = [];
   let dataType = 'standard';
   let missingChar = '?';
   let gapChar = '-';
+  let declaredNChar = 0;
   let inMatrix = false;
   let inBlock = '';
 
@@ -116,23 +145,22 @@ export function parseNexus(text: string): NexusData {
       inMatrix = false;
       continue;
     }
-    if (lower === 'end;') { inBlock = ''; inMatrix = false; continue; }
+    if (lower === 'end;' || lower === 'end') { inBlock = ''; inMatrix = false; continue; }
 
     if (inBlock === 'taxa' || inBlock === 'taxa_block') {
-      if (lower.startsWith('dimensions') && lower.includes('ntax=')) {
-        const m = lower.match(/ntax=(\d+)/);
-        if (m) { /* nTax parsed */ }
-      }
       if (lower.startsWith('taxlabels')) {
         const rest = t.substring(9).replace(';', '').trim();
-        const names = rest.split(/\s+/);
         // De-duplicate: a repeated label would make the taxon list longer than
         // the matrix rows and shift every downstream leaf/label mapping.
-        for (const n of names) if (n && !taxa.includes(n)) taxa.push(n);
+        for (const n of rest.split(/\s+/)) if (n && !declaredTaxa.includes(n)) declaredTaxa.push(n);
       }
     }
 
     if (inBlock === 'characters' || inBlock === 'data') {
+      if (lower.startsWith('dimensions')) {
+        const m = lower.match(/nchar\s*=\s*(\d+)/);
+        if (m) declaredNChar = parseInt(m[1], 10);
+      }
       if (lower.startsWith('format')) {
         // Fixed: removed duplicate condition
         if (lower.includes('datatype=dna')) dataType = 'dna';
@@ -144,22 +172,83 @@ export function parseNexus(text: string): NexusData {
       if (lower === 'matrix') { inMatrix = true; continue; }
       if (inMatrix && t !== ';' && !lower.startsWith('end')) {
         const parts = t.split(/\s+/);
-        if (parts.length >= 2) {
-          const name = parts[0];
-          const seq = parts.slice(1).join('').split('');
-          if (!taxa.includes(name)) taxa.push(name);
-          charRows.push(seq);
+        if (parts.length === 1) {
+          // A line with a single token continues the previous taxon: an
+          // interleaved or line-wrapped matrix. The old parser dropped such a
+          // line, so half of every long sequence disappeared without a word.
+          const previous = matrixRows[matrixRows.length - 1];
+          if (previous) previous.seq += parts[0];
+        } else {
+          matrixRows.push(splitMatrixLine(t));
         }
       }
     }
   }
 
-  const nChar = charRows[0]?.length ?? 0;
-  const characters = charRows.map(row => row.map(ch => {
-    if (ch === missingChar || ch === gapChar || ch === '?' || ch === '-') return 0;
-    const v = parseInt(ch, 36);
-    return isNaN(v) ? 0 : v;
-  }));
+  // Matrix rows keyed by name. An interleaved matrix contributes several rows
+  // for the same taxon; they are concatenated in file order.
+  const byName = new Map<string, string>();
+  for (const row of matrixRows) {
+    byName.set(row.name, (byName.get(row.name) ?? '') + row.seq);
+  }
 
-  return { taxa, characters, nTax: taxa.length, nChar, dataType, missingChar, gapChar };
+  const warnings: string[] = [];
+
+  // The taxon list: TAXLABELS order first, then any matrix row the label
+  // list does not mention (so its data is not thrown away).
+  const taxa: string[] = [...declaredTaxa];
+  for (const name of byName.keys()) {
+    if (!taxa.includes(name)) {
+      taxa.push(name);
+      warnings.push(`Matrix row "${name}" has no TAXLABELS entry; it was appended to the taxon list.`);
+    }
+  }
+  for (const name of declaredTaxa) {
+    if (!byName.has(name)) {
+      warnings.push(`Taxon "${name}" has no matrix row; its characters are missing (NaN).`);
+    }
+  }
+  if (declaredTaxa.length > 0 && byName.size !== declaredTaxa.length) {
+    warnings.push(`Taxa list has ${declaredTaxa.length} entries but the matrix has ${byName.size} rows.`);
+  }
+
+  // Character states per taxon, ALIGNED BY NAME. The old parser appended the
+  // taxa list and the matrix rows independently, so a filtered file (matrix
+  // order != TAXLABELS order) put the sequence of one taxon under the name of
+  // another one.
+  let maxLen = 0;
+  for (const seq of byName.values()) maxLen = Math.max(maxLen, seq.length);
+  const nChar = Math.max(declaredNChar, maxLen);
+  if (declaredNChar > 0 && maxLen !== declaredNChar) {
+    warnings.push(`Declared NCHAR ${declaredNChar} does not match the matrix (${maxLen} characters).`);
+  }
+
+  const characters: number[][] = taxa.map(name => {
+    const seq = byName.get(name);
+    const row: number[] = [];
+    for (let i = 0; i < nChar; i++) {
+      const ch = seq === undefined ? undefined : seq[i];
+      if (ch === undefined) {
+        // No row for this taxon, or a row shorter than the matrix.
+        row.push(NaN);
+      } else if (ch === missingChar || ch === gapChar || ch === '?' || ch === '-') {
+        row.push(0);
+      } else {
+        const v = parseInt(ch, 36);
+        row.push(isNaN(v) ? 0 : v);
+      }
+    }
+    return row;
+  });
+
+  return {
+    taxa,
+    characters,
+    nTax: taxa.length,
+    nChar,
+    dataType,
+    missingChar,
+    gapChar,
+    warnings: warnings.length > 0 ? warnings : undefined
+  };
 }

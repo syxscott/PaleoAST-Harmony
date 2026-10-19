@@ -11,10 +11,24 @@ import { ReportBuilder, SectionType } from './ReportBuilder';
 import { LATEX_PREAMBLE } from './latexPreamble';
 
 export interface CompileOptions {
-  title: string;
+  /**
+   * Document title.
+   *
+   * Optional on purpose: the production export path (Index.ets) sets the
+   * title on the ReportBuilder and never passed one here, so every exported
+   * .tex came out with an empty `\title{}` and the PDF title page had NO
+   * title — silently, with pdflatex exit code 0. When this is empty the
+   * builder's title is used instead (same fallback as the author line).
+   */
+  title?: string;
   authors?: string[];
   documentClass?: 'article' | 'report' | 'book' | 'beamer';
-  bibliography?: string[];    // BibTeX keys
+  /**
+   * BibTeX keys. `false` is accepted and means "no bibliography": the
+   * production call site passes `bibliography: false`, which the old
+   * `string[]` type rejected even though the runtime ignored it.
+   */
+  bibliography?: string[] | false;
   packages?: string[];       // additional LaTeX packages
   fontSize?: number;         // default 11
   /**
@@ -72,6 +86,12 @@ export function compileLaTeX(builder: ReportBuilder, opts: CompileOptions): Comp
     const allPackages = [...new Set([...standardPackages, ...(opts.packages ?? [])])];
     const pkgText = allPackages.map(p => `\\usepackage{${p}}`).join('\n');
 
+    // Build title: the caller's title wins, the builder's title is the
+    // fallback. The export path never passed a title, so `\title{}` came out
+    // empty and the PDF title page had no title at all — a silent, complete
+    // loss of the one thing that identifies the report in a manuscript.
+    const title = String(opts.title ?? '').trim() || String(builder.getTitle() ?? '').trim();
+
     // Build author line
     const authorLine = opts.authors?.join(' \\and ') || builder.getAuthors().map(a => a.name).join(' \\and ') || 'PaleoAST';
 
@@ -79,9 +99,10 @@ export function compileLaTeX(builder: ReportBuilder, opts: CompileOptions): Comp
     const sections = builder.getSections();
     const sectionsTex = sections.map(s => renderSection(s)).join('\n\n');
 
-    // Bibliography
-    const bibTex = opts.bibliography?.length
-      ? `\n\\bibliographystyle{plainnat}\n\\bibliography{${opts.bibliography.join(',')}}\n`
+    // Bibliography (`bibliography` may be `false` — see CompileOptions)
+    const bibKeys = Array.isArray(opts.bibliography) ? opts.bibliography : [];
+    const bibTex = bibKeys.length > 0
+      ? `\n\\bibliographystyle{plainnat}\n\\bibliography{${bibKeys.join(',')}}\n`
       : '';
 
     // Statistical results
@@ -107,7 +128,7 @@ export function compileLaTeX(builder: ReportBuilder, opts: CompileOptions): Comp
       `\\geometry{${paperSize}, margin=${margin}}`,
       pkgText,
       '',
-      `\\title{${escapeLatex(opts.title)}}`,
+      `\\title{${escapeLatex(title)}}`,
       `\\author{${escapeLatex(authorLine)}}`,
       `\\date{${builder.getAbstract() ? '\\today' : ''}}`,
       '',
@@ -209,12 +230,15 @@ function renderSection(section: { title: string; content: string; type: SectionT
 
 /**
  * Render a figure reference to LaTeX.
+ *
+ * The path is wrapped in `\detokenize{}` — see detokenizePath() for why the
+ * LaTeX escaper cannot be used here.
  */
 function renderFigure(fig: { id: string; caption: string; path: string; width?: string }): string {
   return [
     '\\begin{figure}[htbp]',
     '\\centering',
-    `\\includegraphics[width=${fig.width || '0.8\\textwidth'}]{${escapeLatex(fig.path)}}`,
+    `\\includegraphics[width=${fig.width || '0.8\\textwidth'}]{${detokenizePath(fig.path)}}`,
     `\\caption{${escapeLatex(fig.caption)}}`,
     `\\label{${fig.id}}`,
     '\\end{figure}'
@@ -237,6 +261,10 @@ function renderTable(tbl: { id: string; caption: string; content: string; placem
 
 /**
  * Render statistical results table.
+ *
+ * The 95% CI column was missing here (and in ReportBuilder.toHTML), so a
+ * confidence interval recorded on a result was silently dropped from the
+ * LaTeX/HTML output while the Markdown output still carried it.
  */
 function renderStatisticalResults(results: Array<{
   testName: string;
@@ -244,6 +272,8 @@ function renderStatisticalResults(results: Array<{
   pValue?: number;
   df?: number;
   effectSize?: number;
+  ciLower?: number;
+  ciUpper?: number;
 }>): string {
   const lines: string[] = [];
 
@@ -251,9 +281,9 @@ function renderStatisticalResults(results: Array<{
   lines.push('');
   lines.push('\\begin{table}[htbp]');
   lines.push('\\centering');
-  lines.push('\\begin{tabular}{lllll}');
+  lines.push('\\begin{tabular}{llllll}');
   lines.push('\\toprule');
-  lines.push('Test & Statistic & df & p-value & Effect size \\\\');
+  lines.push('Test & Statistic & df & p-value & Effect size & 95\\% CI \\\\');
   lines.push('\\midrule');
 
   for (const r of results) {
@@ -262,7 +292,8 @@ function renderStatisticalResults(results: Array<{
     const df = r.df !== undefined ? String(r.df) : '--';
     const pVal = r.pValue !== undefined ? formatPValue(r.pValue) : '--';
     const effect = r.effectSize !== undefined ? r.effectSize.toFixed(4) : '--';
-    lines.push(`${testName} & ${stat} & ${df} & ${pVal} & ${effect} \\\\`);
+    const ci = formatCI(r.ciLower, r.ciUpper);
+    lines.push(`${testName} & ${stat} & ${df} & ${pVal} & ${effect} & ${ci} \\\\`);
   }
 
   lines.push('\\bottomrule');
@@ -271,6 +302,19 @@ function renderStatisticalResults(results: Array<{
   lines.push('\\end{table}');
 
   return lines.join('\n');
+}
+
+/**
+ * Format a 95% confidence interval for a table cell.
+ *
+ * `--` when neither bound is known, `[lower, --]` when only one is. The
+ * brackets are plain text in LaTeX and in HTML, so no escaping is needed.
+ */
+export function formatCI(lower?: number, upper?: number, digits: number = 4): string {
+  if (lower === undefined && upper === undefined) return '--';
+  const lo = lower !== undefined ? lower.toFixed(digits) : '--';
+  const hi = upper !== undefined ? upper.toFixed(digits) : '--';
+  return `[${lo}, ${hi}]`;
 }
 
 /**
@@ -308,6 +352,62 @@ export function escapeLatex(s: string | undefined | null): string {
     }
   }
   return out;
+}
+
+/**
+ * Escape special HTML characters.
+ *
+ * The LaTeX escaper must NOT be used for HTML: it leaves `<` and `>` alone
+ * (they are not LaTeX specials) and turns `&` into `\&`, which is not an
+ * HTML entity. A cell containing `<script>alert(1)</script>` therefore came
+ * out of the HTML table writer as a LIVE tag, and `a & b` came out as
+ * `a \& b`. Column names come straight from the user's data file, so this is
+ * a real injection surface as soon as the table is rendered in a browser.
+ *
+ * This is the one HTML escaper of the reporting package — ReportBuilder,
+ * TableGenerator and FigureHandler all use it (docs/code-style.md 1.4: one
+ * quantity, one implementation).
+ */
+export function escapeHtml(s: string | undefined | null): string {
+  if (s === undefined || s === null) return '';
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+/**
+ * Wrap a file path in `\detokenize{}` for use as a graphicx file name.
+ *
+ * Neither the raw path nor the LaTeX escaper works here:
+ *
+ * - raw (`C:\Users\paleo\fig1.png`) → pdflatex reports
+ *   "Undefined control sequence." and produces NO pdf (verified with
+ *   TeX Live 2025: 12 occurrences, exit code 1);
+ * - escaped (`C\textbackslash{}Users\textbackslash{}...`) → the macro is
+ *   expanded while the file name is parsed, so LaTeX looks for a file
+ *   literally called `C\textbackslash{}Users...` and dies with
+ *   "Missing endcsname inserted" (verified, exit code 1).
+ *
+ * `\detokenize` turns every character into a catcode-12 token, so the path
+ * reaches graphicx verbatim: a relative name (`fig1.png`) and an absolute
+ * POSIX/forward-slash path both compile cleanly (exit code 0, verified).
+ * A backslash-separated absolute path still fails to FIND the file on a
+ * POSIX compiler, but it no longer breaks the LaTeX syntax.
+ *
+ * `{` and `}` cannot be carried by `\detokenize` (it needs balanced
+ * braces), so such a path is rejected with an explanation instead of
+ * producing a broken document.
+ */
+export function detokenizePath(path: string): string {
+  const p = String(path ?? '');
+  if (p.indexOf('{') >= 0 || p.indexOf('}') >= 0) {
+    throw new Error(
+      'Figure path must not contain "{" or "}" (\\detokenize{} needs balanced braces): ' + p);
+  }
+  return '\\detokenize{' + p + '}';
 }
 
 /**

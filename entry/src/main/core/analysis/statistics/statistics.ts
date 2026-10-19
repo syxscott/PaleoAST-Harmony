@@ -1,13 +1,33 @@
 import { Matrix } from '../../math/Matrix';
 import { svd, eigh, inv } from '../../math/linalg';
 // p-value paths use the verified CDF/quantile functions from math/stats
-// (pt/pF/pchisq/pnorm/qnorm/qt/gammainc); the local *_approx helpers below are
-// kept only because core/math is frozen (they must not gain new call sites).
-import { mean, std, median, rankdata, skewness, kurtosis, pt, qt, pF, pchisq, pnorm, qchisq } from '../../math/stats';
+// (qnorm/qt/qchisq/gammainc) and its numerically STABLE UPPER-tail
+// counterparts (ptUpper/pFUpper/pchisqUpper/pnormUpper). The upper-tail
+// functions exist because `1 - cdf(x)` cancels to exactly 0 once the tail
+// drops below the resolution of 1 - x (~1e-16), which destroyed the p-value of
+// every significant test (see the individual call sites below).
+import { mean, std, median, rankdata, skewness, kurtosis, qt, qchisq, ptUpper, pFUpper, pchisqUpper, pnormUpper } from '../../math/stats';
 import { randnArray } from '../../math/random';
 import { seed, randint, shuffle as rngShuffle } from '../../math/random';
 import { blombergKFromVCV } from '../phylogenetics/vcv';
 import { tukeyHsd, type TukeyPairResult } from './Tukey';
+
+/**
+ * Is this trait value actually measurable?
+ *
+ * A tip whose value was never measured (absent, null or NaN) is NOT a number:
+ * it used to be shuffled around as a NaN and turned every contrast into a
+ * NaN, so the whole test answered F = NaN, p = NaN. Such tips are treated as
+ * missing — they contribute no contrast, and they are not candidates for the
+ * permutation either.
+ *
+ * Module scope, not function scope: the observed recursion and the permuted
+ * recursion live in different functions but MUST agree on what "missing"
+ * means, otherwise the observed F and the permuted F are computed on
+ * different data and the p-value compares incomparable numbers.
+ */
+const isUsable = (v: unknown): boolean =>
+  v !== undefined && v !== null && typeof v === 'number' && isFinite(v);
 
 /**
  * PCA Result — mirrors Python PCAResult.
@@ -222,13 +242,19 @@ export function nmds(
   maxIterations: number = 300,
   nRestarts: number = 5,
   tolerance: number = 1e-6,
-  rngSeed?: number,
+  rngSeed: number = 42,
   method: 'stress_1' | 'raw_stress' = 'raw_stress',
 ): NMDSResult {
   if (method !== 'stress_1' && method !== 'raw_stress') {
     throw new Error(`Unknown NMDS stress method '${method}'. Use 'raw_stress' (default) or 'stress_1'.`);
   }
-  if (rngSeed !== undefined) seed(rngSeed);
+  // The random restart was drawn from the GLOBAL PRNG, and the seed was only
+  // applied when the caller passed one: `nmds(D, 2)` therefore consumed
+  // whatever state the previous analysis left behind, so the same input gave
+  // a different configuration (and a different stress) on every run. The
+  // repository convention is a default seed of 42 (core/math/random, and the
+  // sibling `ripleyK`).
+  seed(rngSeed);
   const n = distMatrix.rows;
   const iu: number[] = [], ju: number[] = [];
   for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) { iu.push(i); ju.push(j); }
@@ -502,6 +528,19 @@ export function tTest(group1: number[], group2: number[], paired: boolean = fals
   const n1 = group1.length, n2 = group2.length;
   const m1 = mean(group1), m2 = mean(group2);
 
+  // A group of ONE observation has no within-group variance: the Welch
+  // standard error is 0/0 = NaN, `se > 0` is false, so t was set to 0 and the
+  // p-value to 1 — the test reported "no significant difference" for an input
+  // it could not analyse at all. The sibling `requireUsableGroups` rejects
+  // unusable group vectors for the same reason; the t-test now does too.
+  if (n1 < 2 || n2 < 2) {
+    throw new Error(
+      `tTest: need at least 2 observations per group (got ${n1} and ${n2}). ` +
+      `A group of ${Math.min(n1, n2)} observation(s) has no within-group variance, ` +
+      `so the t statistic is undefined — not "no significant difference".`,
+    );
+  }
+
   if (paired) {
     // Python: sp_stats.ttest_rel — differences within pairs
     if (n1 !== n2) throw new Error('Paired t-test requires equal sample sizes');
@@ -512,7 +551,10 @@ export function tTest(group1: number[], group2: number[], paired: boolean = fals
     const se = sd / Math.sqrt(nd);
     const t = se > 0 ? md / se : 0;
     const df = nd - 1;
-    const p = 2 * (1 - pt(Math.abs(t), Math.max(df, 1)));
+    // 2 * (1 - pt(|t|, df)) cancelled to exactly 0 for |t| > ~8: the p-value
+    // of a strongly significant difference was reported as 0. The upper tail
+    // is evaluated directly instead.
+    const p = 2 * ptUpper(Math.abs(t), Math.max(df, 1));
     return { statistic: t, pValue: p, df, meanDiff: md, testType: 'paired', n1, n2, mean1: m1, mean2: m2 };
   }
 
@@ -525,7 +567,7 @@ export function tTest(group1: number[], group2: number[], paired: boolean = fals
   const num = (v1 / n1 + v2 / n2) ** 2;
   const denom = (v1 / n1) ** 2 / Math.max(n1 - 1, 1) + (v2 / n2) ** 2 / Math.max(n2 - 1, 1);
   const df = denom > 0 ? num / denom : Math.max(n1 + n2 - 2, 1);
-  const p = 2 * (1 - pt(Math.abs(t), Math.max(df, 1)));
+  const p = 2 * ptUpper(Math.abs(t), Math.max(df, 1));
   return { statistic: t, pValue: p, df, meanDiff: m1 - m2, testType: 'independent', n1, n2, mean1: m1, mean2: m2 };
 }
 
@@ -572,8 +614,10 @@ export function anova(groups: number[][], tukey: boolean = true): ANOVAResult {
   const f = msw > 0 ? msb / msw : 0;
 
   // Exact F-distribution upper-tail probability (replaces the local
-  // series-expansion approximation of the incomplete beta).
-  const p = 1 - pF(f, dfb, dfw);
+  // series-expansion approximation of the incomplete beta). The upper tail is
+  // evaluated directly: `1 - pF(f, ...)` cancels to exactly 0 once the tail
+  // drops below ~1e-16, which reported a significant ANOVA as p = 0.
+  const p = pFUpper(f, dfb, dfw);
 
   // Tukey HSD post-hoc on significant results (Python: tukey=True branch)
   let tukeyResults: TukeyPairResult[] | undefined = undefined;
@@ -596,8 +640,13 @@ export interface ANOSIMResult {
   nPermutations: number;
 }
 
-export function anosim(distMatrix: Matrix, groups: number[], nPermutations: number = 999, rngSeed?: number): ANOSIMResult {
-  if (rngSeed !== undefined) seed(rngSeed);
+export function anosim(distMatrix: Matrix, groups: number[], nPermutations: number = 999, rngSeed: number = 42): ANOSIMResult {
+  // The permutation shuffles were drawn from the GLOBAL PRNG and the seed was
+  // only applied when the caller passed one, so `anosim(D, g)` consumed
+  // whatever state the previous analysis left behind and returned a different
+  // p-value on every run — the same input could land on either side of the
+  // 0.05 threshold. Default seed 42 (repository convention).
+  seed(rngSeed);
   const n = distMatrix.rows;
   requireUsableGroups(groups, n, 'anosim');
   const R_obs = computeR(distMatrix, groups, n);
@@ -800,10 +849,18 @@ function ldaPredict1LD(sampleLD: number[], centroidsLD: Matrix, k: number, nc: n
  *     seeded RNG from math/random for reproducibility); each fold is
  *     classified by an LDA refit on the remaining f-1 folds — port of
  *     Python lda.py `cv_folds` via sklearn cross_val_predict.
+ * @param rngSeed     seed for the CV fold shuffle. The function NEVER seeded
+ *   the generator even though its own documentation promised "the seeded RNG
+ *   from math/random for reproducibility": the fold split was drawn from
+ *   whatever state the previous analysis left behind, so the reported
+ *   cross-validated accuracy changed from run to run. Default 42.
  */
-export function lda(data: Matrix, groups: number[], nComponents?: number, cvFolds: number = 0): LDAResult {
+export function lda(
+  data: Matrix, groups: number[], nComponents?: number, cvFolds: number = 0, rngSeed: number = 42,
+): LDAResult {
   const n = data.rows, p = data.cols;
   requireUsableGroups(groups, n, 'lda');
+  seed(rngSeed);
   const uniqueGroups = [...new Set(groups)].sort((a, b) => a - b);
   const k = uniqueGroups.length;
   const nc = Math.max(1, Math.min(nComponents ?? k - 1, k - 1, p));
@@ -1105,8 +1162,12 @@ function requireUsableGroups(groups: number[], nSamples: number, who: string): v
   }
 }
 
-export function permanova(distMatrix: Matrix, groups: number[], nPermutations: number = 999, rngSeed?: number): PERMANOVAResult {
-  if (rngSeed !== undefined) seed(rngSeed);
+export function permanova(distMatrix: Matrix, groups: number[], nPermutations: number = 999, rngSeed: number = 42): PERMANOVAResult {
+  // The permutation shuffles were drawn from the GLOBAL PRNG and the seed was
+  // only applied when the caller passed one, so `permanova(D, g)` consumed
+  // whatever state the previous analysis left behind and returned a different
+  // p-value on every run. Default seed 42 (repository convention).
+  seed(rngSeed);
   const n = distMatrix.rows;
   requireUsableGroups(groups, n, 'permanova');
   const uniqueGroups = [...new Set(groups)];
@@ -1114,7 +1175,33 @@ export function permanova(distMatrix: Matrix, groups: number[], nPermutations: n
   const D2 = distMatrix.mul(distMatrix);
 
   const computeF = (grp: number[]): number => {
-    const ssTotal = D2.sum() / n;
+    // Anderson (2001) over UNORDERED pairs -- the same formula the Python
+    // original uses (stats/permanova.py::_compute_F_statistic), which is
+    // cross-validated against vegan::adonis2 there:
+    //
+    //     SS_T = (1/n)   * sum_{i<j}   d2_ij
+    //     SS_W = sum_g (1/n_g) * sum_{i<j in g} d2_ij
+    //     SS_B = SS_T - SS_W
+    //     F    = (SS_B / (g-1)) / (SS_W / (n-g))
+    //
+    // Both denominators are the sample or group COUNT, never one less.
+    //
+    // The old code took SS_T from the FULL n x n matrix (every pair counted
+    // twice) and used (2/n_g) for the group term. Both terms were therefore
+    // exactly 2x the values above, so the RATIO -- and hence F -- came out
+    // right by accident; but the REPORTED sums of squares were on a scale
+    // nobody else publishes. (The original's own docstring warns about
+    // exactly this trap: "Because the two terms were scaled by different
+    // factors the error did not cancel.")
+    //
+    // Using the original's formula makes F, the reported sums of squares and
+    // the permutation p-value all come from ONE definition, and that
+    // definition is the one vegan::adonis2 implements: adonis2's
+    // SS.wi[i] = sum(D.sq[ix,ix]) / (2 * n_i) sums ORDERED pairs, so it is
+    // 2 * grpSum / (2 * n_i) = grpSum / n_i -- the same 1/n_g.
+    let ssTotal = 0;
+    for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) ssTotal += D2.get(i, j);
+    ssTotal /= n;
     let ssWithin = 0;
     for (const g of uniqueGroups) {
       const idx = grp.map((v, i) => v === g ? i : -1).filter(i => i >= 0);
@@ -1122,7 +1209,7 @@ export function permanova(distMatrix: Matrix, groups: number[], nPermutations: n
       if (ng < 2) continue;
       let grpSum = 0;
       for (let a = 0; a < idx.length; a++) for (let b = a + 1; b < idx.length; b++) grpSum += D2.get(idx[a], idx[b]);
-      ssWithin += (2 / ng) * grpSum;
+      ssWithin += grpSum / ng;
     }
     const ssBetween = ssTotal - ssWithin;
     const dfb = k - 1, dfw = n - k;
@@ -1140,8 +1227,31 @@ export function permanova(distMatrix: Matrix, groups: number[], nPermutations: n
     if (computeF(shuffled) >= F_obs) count++;
   }
 
-  // Recompute SS for result
-  const ssTotal = D2.sum() / n;
+  // ── Reported sums of squares ──────────────────────────────────────────────
+  // Anderson (2001) over unordered pairs -- the SAME definition `computeF`
+  // above uses, and the one the Python original
+  // (stats/permanova.py::_compute_F_statistic) uses, where it is
+  // cross-validated against vegan::adonis2:
+  //
+  //     SS_total     = (1/n)   * Σ_{i<j}   d²_ij
+  //     SS_within(g) = Σ_g (1/n_g) * Σ_{i<j∈g} d²_ij
+  //     SS_between   = SS_total - Σ_g SS_within(g)
+  //     F            = (SS_between/(k-1)) / (SS_within/(n-k))
+  //
+  // The reported table and the F statistic MUST come from one definition, or
+  // the F printed next to the sums cannot be recomputed from them. The
+  // previous code reported the group term with a 1/(2·n_g) divisor (half of
+  // the original) while the F was computed from the original's values, so
+  // (ssBetween/dfBetween)/(ssWithin/dfWithin) was NOT the reported F.
+  //
+  // Note that adonis2 agrees: its SS.wi[i] = sum(D.sq[ix,ix])/(2·n_i) sums
+  // ORDERED pairs, so it is 2·grpSum/(2·n_i) = grpSum/n_i -- the same 1/n_g.
+  const upperTotal = (() => {
+    let s = 0;
+    for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) s += D2.get(i, j);
+    return s;
+  })();
+  const ssTotal = upperTotal / n;
   let ssWithin = 0;
   for (const g of uniqueGroups) {
     const idx = groups.map((v, i) => v === g ? i : -1).filter(i => i >= 0);
@@ -1149,12 +1259,13 @@ export function permanova(distMatrix: Matrix, groups: number[], nPermutations: n
     if (ng < 2) continue;
     let grpSum = 0;
     for (let a = 0; a < idx.length; a++) for (let b = a + 1; b < idx.length; b++) grpSum += D2.get(idx[a], idx[b]);
-    ssWithin += (2 / ng) * grpSum;
+    ssWithin += grpSum / ng;
   }
+  const ssBetween = ssTotal - ssWithin;
 
   return {
     fStatistic: F_obs, pValue: (count + 1) / (nPerm + 1),
-    ssBetween: ssTotal - ssWithin, ssWithin, dfBetween: k - 1, dfWithin: n - k,
+    ssBetween, ssWithin, dfBetween: k - 1, dfWithin: n - k,
     nPermutations: nPerm,
   };
 }
@@ -1359,8 +1470,30 @@ export interface KruskalResult {
 }
 
 export function kruskalWallis(groups: number[][]): KruskalResult {
+  // Degenerate input used to produce NaN for BOTH the statistic and the
+  // p-value, which is not a result: an empty group makes the rank sum term
+  // 0/0, and a single group leaves df = 0. scipy.stats.kruskal refuses the
+  // same inputs ("At least two samples are required", "Sample must have at
+  // least 1 observation"), so the failure is reported instead of printed.
+  if (!Array.isArray(groups) || groups.length < 2) {
+    throw new Error(
+      `kruskalWallis: need at least 2 groups to compare (got ${Array.isArray(groups) ? groups.length : 0}). ` +
+      `A Kruskal-Wallis test on a single group has no degrees of freedom.`,
+    );
+  }
+  const emptyIdx = groups.findIndex(g => !Array.isArray(g) || g.length === 0);
+  if (emptyIdx >= 0) {
+    throw new Error(
+      `kruskalWallis: group ${emptyIdx + 1} is empty. ` +
+      `Every group needs at least one observation, otherwise the rank sum is 0/0 and the test is undefined.`,
+    );
+  }
+
   const allVals = groups.flat();
   const N = allVals.length;
+  if (N < 2) {
+    throw new Error(`kruskalWallis: need at least 2 observations in total (got ${N}).`);
+  }
   const ranks = rankdata(allVals); // average ranks (math/stats rankdata)
 
   let offset = 0;
@@ -1391,9 +1524,12 @@ export function kruskalWallis(groups: number[][]): KruskalResult {
   if (tieCorr > 0) H = H / tieCorr;
 
   // Chi-squared upper-tail p-value via the verified regularized gamma
-  // (math/stats pchisq; replaces the local series approximation).
+  // (math/stats pchisqUpper; replaces the local series approximation).
+  // The upper tail is evaluated directly: `1 - pchisq(H, df)` cancels to
+  // exactly 0 for a large H, so a strongly significant result was reported
+  // with p = 0.
   const df = k - 1;
-  const p = 1 - pchisq(H, df);
+  const p = pchisqUpper(H, df);
   return { statistic: H, pValue: p, df };
 }
 
@@ -1745,6 +1881,19 @@ export interface PhyloSignalResult {
   tipNames?: string[];
   /** ape-convention Brownian VCV used for the canonical K. */
   vcvMatrix?: number[][];
+  /**
+   * Tips that were EXCLUDED from the analysis because their trait value was
+   * missing (absent, null or NaN). Blomberg K is defined on a tip set with a
+   * value for every tip, so the incomplete tips are dropped from both the
+   * trait vector and the VCV rather than being turned into a number.
+   */
+  droppedTips?: string[];
+  /**
+   * Set when the statistic could not be computed. The value explains WHY
+   * (e.g. a constant trait, a singular VCV); `k`, `z` and `pValue` are then
+   * NaN rather than a number that could be mistaken for a result.
+   */
+  note?: string;
 }
 
 /**
@@ -1766,17 +1915,78 @@ export interface PhyloSignalResult {
  * References: Blomberg, Garland & Ives (2003) Evolution 57(4):717-745;
  * add-one corrected permutation p-value.
  */
-export function phylogeneticSignal(root: any, traitValues: Record<string, number>, nRandomizations: number = 999, rngSeed?: number): PhyloSignalResult {
-  if (rngSeed !== undefined) seed(rngSeed);
+export function phylogeneticSignal(root: any, traitValues: Record<string, number>, nRandomizations: number = 999, rngSeed: number = 42): PhyloSignalResult {
+  // The permutation shuffles were drawn from the GLOBAL PRNG and the seed was
+  // only applied when the caller passed one, so `phylogeneticSignal(root,
+  // traits)` consumed whatever state the previous analysis left behind: the
+  // p-value of the same input jumped between 0.03, 0.06 and 0.12 on repeated
+  // runs, i.e. it crossed the 0.05 significance threshold at random. Default
+  // seed 42 (repository convention).
+  seed(rngSeed);
   const leaves = getLeaves(root);
-  const tipNames = leaves.map(l => l.name);
-  const n = tipNames.length;
-  if (n < 3) return { k: 0, z: 0, pValue: 1, nRandomizations: 0, tipNames, vcvMatrix: [] };
+  const allTipNames = leaves.map(l => l.name);
+  const n = allTipNames.length;
+  if (n < 3) return { k: 0, z: 0, pValue: 1, nRandomizations: 0, tipNames: allTipNames, vcvMatrix: [] };
 
-  const y = tipNames.map(nm => traitValues[nm] ?? NaN);
-  const V = buildVCV(root, tipNames);
+  // ── Missing traits ─────────────────────────────────────────────────────────
+  // A tip whose value was never measured (absent, null or NaN) used to be
+  // mapped to NaN and handed to `blombergKFromVCV`, which turned the whole
+  // analysis into either a silent K = 0 ("no phylogenetic signal" — a
+  // legitimate conclusion, so the failure was invisible) or, now that the VCV
+  // layer reports degenerate input, an exception with no context in the UI.
+  // The incomplete tips are therefore DROPPED — from the trait vector AND
+  // from the VCV — and reported in `droppedTips`.
+  const isMissing = (v: unknown): boolean => v === undefined || v === null || !isFinite(v as number);
+  const keptTipNames: string[] = [];
+  const y: number[] = [];
+  const droppedTips: string[] = [];
+  for (const nm of allTipNames) {
+    const v = traitValues[nm];
+    if (isMissing(v)) { droppedTips.push(nm); continue; }
+    keptTipNames.push(nm);
+    y.push(v as number);
+  }
 
-  const K = blombergKFromVCV(y, V);
+  if (keptTipNames.length < 3) {
+    throw new Error(
+      `phylogeneticSignal: only ${keptTipNames.length} of ${n} tips carry a trait value ` +
+      `(${droppedTips.length} missing: ${droppedTips.slice(0, 8).join(', ')}` +
+      `${droppedTips.length > 8 ? ', ...' : ''}). Blomberg K needs at least 3 tips with a value.`,
+    );
+  }
+
+  const V = buildVCV(root, keptTipNames);
+
+  // ── Degenerate trait ───────────────────────────────────────────────────────
+  // A constant trait has no variation to explain: K is mathematically
+  // undefined, which is NOT a calculation failure and NOT "no phylogenetic
+  // signal". It is reported as an explained non-result instead of a number.
+  let yMin = Infinity, yMax = -Infinity;
+  for (const v of y) { if (v < yMin) yMin = v; if (v > yMax) yMax = v; }
+  if (!(yMax > yMin)) {
+    return {
+      k: NaN, z: NaN, pValue: NaN, nRandomizations: 0,
+      tipNames: keptTipNames, vcvMatrix: V.map(row => [...row]), droppedTips,
+      note: `the trait is constant (every tip = ${yMin}) — Blomberg K is undefined for a trait without variation`,
+    };
+  }
+
+  // The VCV layer now REJECTS degenerate input (singular V, n < 3, non-finite
+  // values) instead of returning 0, and 0 is a legitimate K ("no signal"), so
+  // a failure used to be indistinguishable from a conclusion. The error is
+  // caught here and turned into an explained non-result, so the UI never
+  // dies on an analysis it could have reported.
+  let K: number;
+  try {
+    K = blombergKFromVCV(y, V);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return {
+      k: NaN, z: NaN, pValue: NaN, nRandomizations: 0,
+      tipNames: keptTipNames, vcvMatrix: V.map(row => [...row]), droppedTips,
+      note: `Blomberg K could not be computed — ${msg}`,
+    };
+  }
 
   // Permutation test: shuffle the trait values across tips (groups/VCV fixed)
   // Without the floor, nRandomizations = -3 gave pValue = 1 / -2 = -0.5.
@@ -1797,7 +2007,7 @@ export function phylogeneticSignal(root: any, traitValues: Record<string, number
 
   return {
     k: K, z, pValue: (count + 1) / (nRand + 1), nRandomizations: nRand,
-    tipNames, vcvMatrix: V.map(row => [...row]),
+    tipNames: keptTipNames, vcvMatrix: V.map(row => [...row]), droppedTips,
   };
 }
 
@@ -2008,13 +2218,22 @@ export interface PhyloANOVAResult {
  * classic ANOVA F of a different quantity, which invalidates the p-value.
  * p = mean(F_perm >= F_obs) over group-fixed trait permutations.
  */
-export function phyloANOVA(root: any, traitValues: Record<string, number>, groupLabels: Record<string, string>, nPermutations: number = 999, rngSeed?: number): PhyloANOVAResult {
-  if (rngSeed !== undefined) seed(rngSeed);
+export function phyloANOVA(root: any, traitValues: Record<string, number>, groupLabels: Record<string, string>, nPermutations: number = 999, rngSeed: number = 42): PhyloANOVAResult {
+  // The permutation shuffles were drawn from the GLOBAL PRNG and the seed was
+  // only applied when the caller passed one, so the p-value of the same input
+  // changed from run to run. Default seed 42 (repository convention).
+  seed(rngSeed);
+
+  // A tip whose value was never measured (absent, null or NaN) is NOT a
+  // number: it used to be shuffled around as a NaN and turned every contrast
+  // into a NaN, so the whole test answered F = NaN, p = NaN. Such tips are
+  // treated as missing — they contribute no contrast, and they are not
+  // candidates for the permutation either. See the module-level `isUsable`.
 
   // Valid labelled tips (intersection of trait and group keys)
   const tipsWithGroups: Record<string, string> = {};
   for (const tip of Object.keys(groupLabels)) {
-    if (tip in traitValues) tipsWithGroups[tip] = groupLabels[tip];
+    if (isUsable(traitValues[tip])) tipsWithGroups[tip] = groupLabels[tip];
   }
   const groups = [...new Set(Object.values(tipsWithGroups))].sort();
   const nGroups = groups.length;
@@ -2056,7 +2275,10 @@ export function phyloANOVA(root: any, traitValues: Record<string, number>, group
   function computeLabeled(node: any): { value: number | null; cumVar: number } | null {
     if (node.isLeaf) {
       const v = traitValues[node.name];
-      return v === undefined ? null : { value: v, cumVar: 0 };
+      // Missing (absent / null / NaN) = "not measured": the tip contributes
+      // no contrast. The observed and the permuted recursion use the SAME
+      // rule, so the two sets of F values stay comparable.
+      return isUsable(v) ? { value: v as number, cumVar: 0 } : null;
     }
     const childResults: { node: any; value: number; cumVar: number }[] = [];
     for (const c of node.children) {
@@ -2131,12 +2353,23 @@ export function phyloANOVA(root: any, traitValues: Record<string, number>, group
   const nPerm = Math.max(1, Math.floor(nPermutations));
   let count = 0;
   let nValidPerms = 0;
-  const tipArray = tipNamesList.map(nm => traitValues[nm] ?? NaN);
+  // The permutation shuffles the OBSERVED values among the tips that carry
+  // them. A missing value (absent / null / NaN) is not a number: the old code
+  // mapped it to NaN and shuffled the NaNs around, so a missing trait moved a
+  // real value onto a different tip and poisoned the contrasts.
+  const observedTips: string[] = [];
+  const observedValues: number[] = [];
+  for (const nm of tipNamesList) {
+    const v = traitValues[nm];
+    if (!isUsable(v)) continue;
+    observedTips.push(nm);
+    observedValues.push(v as number);
+  }
   for (let perm = 0; perm < nPerm; perm++) {
-    const shuffled = [...tipArray];
+    const shuffled = [...observedValues];
     rngShuffle(shuffled);
     const permDict: Record<string, number> = {};
-    for (let i = 0; i < tipNamesList.length; i++) permDict[tipNamesList[i]] = shuffled[i];
+    for (let i = 0; i < observedTips.length; i++) permDict[observedTips[i]] = shuffled[i];
     // Same recursion code path as the observed contrasts (see
     // runComputeWithTraits) so observed and permuted F are directly comparable.
     const permIc = runComputeWithTraits(root, permDict, dominantGroup, groups);
@@ -2172,7 +2405,10 @@ function runComputeWithTraits(
   function compute(node: any): { value: number | null; cumVar: number } | null {
     if (node.isLeaf) {
       const v = traitValues[node.name];
-      return v === undefined ? null : { value: v, cumVar: 0 };
+      // Missing (absent / null / NaN) = "not measured": the tip contributes
+      // no contrast. The observed and the permuted recursion use the SAME
+      // rule, so the two sets of F values stay comparable.
+      return isUsable(v) ? { value: v as number, cumVar: 0 } : null;
     }
     const childResults: { node: any; value: number; cumVar: number }[] = [];
     for (const c of node.children) {
@@ -2225,6 +2461,18 @@ export interface MannWhitneyResult {
 
 export function mannWhitneyU(group1: number[], group2: number[]): MannWhitneyResult {
   const n1 = group1.length, n2 = group2.length;
+  // A group with fewer than two observations has no usable rank distribution:
+  // the normal approximation below divides by a variance built from n1·n2,
+  // and an EMPTY group made it 0/0 -- the old code reported uStatistic 0,
+  // pValue 0 ("highly significant") and zScore -500000. A failure must be
+  // explainable, not a number that looks like a result.
+  if (n1 < 2 || n2 < 2) {
+    throw new Error(
+      `mannWhitneyU: need at least 2 observations per group (got ${n1} and ${n2}). ` +
+      `The normal approximation with continuity correction is not defined for ` +
+      `a group of ${Math.min(n1, n2)} observation(s).`,
+    );
+  }
   const combined = [...group1.map(v => ({ v, g: 0 })), ...group2.map(v => ({ v, g: 1 }))];
   combined.sort((a, b) => a.v - b.v);
 
@@ -2263,8 +2511,11 @@ export function mannWhitneyU(group1: number[], group2: number[]): MannWhitneyRes
   // disagreed: 2*(1 - Phi(|zScore|)) came out 20-46% away from pValue on the
   // same result, and pValue saturated at 1 while zScore still read -0.22.
   const z = sigmaU > 0 ? (Math.abs(U - muU) - 0.5) / sigmaU : 0;
-  // Exact normal CDF from math/stats (replaces the local erf approximation)
-  const p = 2 * (1 - pnorm(Math.abs(z)));
+  // Exact normal CDF from math/stats (replaces the local erf approximation).
+  // The upper tail is evaluated directly: `2 * (1 - pnorm(|z|))` cancels to
+  // exactly 0 for |z| > ~8, so a strongly significant Mann-Whitney result was
+  // reported with p = 0.
+  const p = 2 * pnormUpper(Math.abs(z));
 
   return { uStatistic: U, pValue: p, zScore: z };
 }
@@ -2629,28 +2880,43 @@ export function plsAnalysis(blockA: Matrix, blockB: Matrix, nComponents?: number
   const { U, S, Vt } = svd(C);
   const eigTop = S.slice(0, nc);
   // The axes' inertias are the squared singular values, so the explained share
-  // is s^2 / sum(s^2). Using s / sum(s) (the "covarianceExplained" the
-  // interface promises) reported 95.5/4.5 where the true split is 99.8/0.2,
-  // and always printed 100% for a single component. plsIntegration, given the
-  // same SVD, already squares.
+  // is s^2 / sum(s^2) over the FULL spectrum. Using s / sum(s) reported
+  // 95.5/4.5 where the true split is 99.8/0.2. The denominator is the whole
+  // spectrum, not just the components that were kept, so a single-component
+  // fit still reports 98.30% (the share the first axis explains) instead of
+  // a meaningless 100%. plsIntegration, given the same SVD, already squares.
   const totalCov = S.reduce((a, b) => a + b * b, 0);
   const covExplained = eigTop.map(s => totalCov > 0 ? s * s / totalCov * 100 : 0);
 
-  // PLS scores. `Vt` is already q x k (the right singular vectors), so it is
-  // used as-is. The extra `.transpose()` made the product q x k -> k x q,
-  // which only happened to be conformable when nc equalled q; asking for
-  // fewer components than the block has variables threw "matmul shape".
+  // PLS scores. With the convention A = U·diag(S)·Vt the RIGHT singular
+  // vectors are the ROWS of Vt (V = Vt^T), so the first nc of them are
+  // Vt.transpose().sliceCols(0, nc). Taking `Vt.sliceCols(0, nc)` instead
+  // took the first nc COLUMNS of Vt, which are the right singular vectors
+  // written sideways: the B-block scores were the transpose of the right
+  // answer. `pca` (Vt.transpose()) and morphometrics/Integration.ts
+  // (`_sliceVTColumns`) both take the rows.
   const xScores = Ac.matmul(U.sliceCols(0, nc));
-  const yScores = Bc.matmul(Vt.sliceCols(0, nc));
+  const yScores = Bc.matmul(Vt.transpose().sliceCols(0, nc));
 
   // RV coefficient (Escoufier 1973)
-  const C2 = C.mul(C);
-  const normC = Math.sqrt(C2.sum());
-  const A2 = Ac.transpose().matmul(Ac).div(n - 1);
-  const B2 = Bc.transpose().matmul(Bc).div(n - 1);
-  const normA = Math.sqrt(A2.mul(A2).sum());
-  const normB = Math.sqrt(B2.mul(B2).sum());
-  const rv = (normA > 0 && normB > 0) ? (normC * normC) / (normA * normB) : 0;
+  //     RV = tr(C'C) / sqrt( tr((A'A)^2) · tr((B'B)^2) )
+  // with C the cross-block covariance A'B/(n-1) and A, B the CENTRED blocks.
+  //
+  // The normalisation matters and is easy to get wrong: the old code divided
+  // the within-block products by (n-1) as well, which scales the numerator by
+  // 1/(n-1)^2 and the denominator by 1/(n-1)^2 — that cancels — but it then
+  // reported (||C||^2)/(||A||·||B||) with C itself already scaled, so RV came
+  // out 25x too large on the 6x2 reference blocks (0.2197 instead of
+  // 0.0087889). The convention used here (covariance-normalised C, raw
+  // within-block products) is the one the sibling `plsIntegration` in
+  // morphometrics/Integration.ts and the original Python port use, so the
+  // two PLS entry points report the SAME number for the same data.
+  const crossTrace = C.mul(C).sum();
+  const Saa = Ac.transpose().matmul(Ac);
+  const Sbb = Bc.transpose().matmul(Bc);
+  const trSaaSq = Saa.mul(Saa).sum();
+  const trSbbSq = Sbb.mul(Sbb).sum();
+  const rv = (trSaaSq > 0 && trSbbSq > 0) ? crossTrace / Math.sqrt(trSaaSq * trSbbSq) : 0;
 
   return { xScores, yScores, singularValues: eigTop, covarianceExplained: covExplained, rvCoefficient: rv, nComponents: nc };
 }
@@ -2665,33 +2931,65 @@ export interface MSTResult {
   nEdges: number;
 }
 
+/** Pairwise Euclidean distance matrix of a list of coordinate rows. */
+function _euclideanDistanceMatrix(nPts: number[][]): Matrix {
+  const n = nPts.length;
+  const D = Matrix.zeros(n, n);
+  for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) {
+    let s = 0;
+    for (let k = 0; k < nPts[i].length; k++) s += (nPts[i][k] - nPts[j][k]) ** 2;
+    const d = Math.sqrt(s);
+    D.set(i, j, d); D.set(j, i, d);
+  }
+  return D;
+}
+
 /**
  * Minimum Spanning Tree (Prim's algorithm) — port of Python geometry.py
  * `minimum_spanning_tree`.
  *
  * Accepts EITHER:
- *  - a precomputed distance Matrix (n x n), or
+ *  - a precomputed distance Matrix (n x n) — recognised only when it is
+ *    SYMMETRIC with a ZERO diagonal (the same check `hierarchicalClustering`
+ *    applies to a precomputed matrix), or
  *  - point coordinates as number[][] (n points x n dims) or as a Matrix of
  *    shape (n_points x n_dims) — the Python coordinate overload — in which
  *    case the Euclidean distance matrix is computed internally.
+ *
+ * A square Matrix that is NOT a valid distance matrix is treated as
+ * coordinates: `Matrix([[0,0],[1,1]], 2, 2)` is two points in 2-D, not a
+ * 2x2 distance matrix, and the tree it describes has total weight sqrt(2).
  */
 export function minimumSpanningTree(distMatrix: Matrix | number[][]): MSTResult {
   let D: Matrix;
   if (distMatrix instanceof Matrix && distMatrix.rows === distMatrix.cols && distMatrix.cols !== 1) {
-    D = distMatrix;
+    // A SQUARE matrix is only a distance matrix if it is symmetric with a
+    // zero diagonal. The old test (`rows === cols && cols !== 1`) accepted any
+    // square matrix, so the 2-point x 2-dimension coordinate matrix
+    // [[0,0],[1,1]] was read as "point 0 is at distance 0 from point 1" and
+    // the tree came out with totalWeight 0 instead of sqrt(2). Coordinates
+    // whose rows are not a valid distance matrix are now treated as
+    // coordinates, which is what the caller meant.
+    const n = distMatrix.rows;
+    let symmetric = true;
+    let zeroDiagonal = true;
+    for (let i = 0; i < n; i++) {
+      if (Math.abs(distMatrix.get(i, i)) > 1e-10) zeroDiagonal = false;
+      for (let j = i + 1; j < n; j++) {
+        if (Math.abs(distMatrix.get(i, j) - distMatrix.get(j, i)) > 1e-10) symmetric = false;
+      }
+    }
+    if (symmetric && zeroDiagonal) {
+      D = distMatrix;
+    } else {
+      D = _euclideanDistanceMatrix(distMatrix.rows > 0 ? distMatrix.to2D() : []);
+    }
   } else {
     // Coordinate input: compute the pairwise Euclidean distances
     const nPts = distMatrix instanceof Matrix
       ? Array.from({ length: distMatrix.rows }, (_, i) => distMatrix.row(i))
       : distMatrix;
-    const n = nPts.length;
-    D = Matrix.zeros(n, n);
-    for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) {
-      let s = 0;
-      for (let k = 0; k < nPts[i].length; k++) s += (nPts[i][k] - nPts[j][k]) ** 2;
-      const d = Math.sqrt(s);
-      D.set(i, j, d); D.set(j, i, d);
-    }
+    D = _euclideanDistanceMatrix(nPts);
   }
   const n = D.rows;
   const inMST = new Array(n).fill(false);

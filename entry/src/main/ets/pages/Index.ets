@@ -18,6 +18,7 @@ import { LoadingView } from '../components/LoadingView';
 import { ConsoleView } from '../components/ConsoleView';
 import { StatusBar } from '../components/StatusBar';
 import { DialogLayer } from '../components/DialogLayer';
+import { selectPlotSeries } from '../components/plot/plotSeries';
 import Logger from '../utils/Logger';
 import { PreferenceManager } from '../utils/PreferenceManager';
 import { AppSettings } from '../utils/AppSettings';
@@ -344,6 +345,15 @@ struct Index {
       this.canRedo = false;
       // 通知已挂载的 WorkspaceView/Spreadsheet 换用新 DataMatrix
       EventBus.getInstance().emit('data_changed');
+      // A DIFFERENT table, not an edit of the current one. The spreadsheet
+      // keeps its group labels in its own state and publishes the whole
+      // array into the DataMatrix, so it has to be told explicitly: without
+      // this it inherited the previous dataset's labels BY ROW NUMBER and
+      // wrote them into the new table on the next "Set Group" — the new
+      // dataset then inherited the old grouping, and every group-based
+      // analysis (ANOSIM / PERMANOVA / SIMPER / LDA) reported a p-value for
+      // a grouping that had nothing to do with the new data.
+      EventBus.getInstance().emit('dataset_loaded');
     } catch (e) {
       this.loadError = String(e).substring(0, 160);
       this.statusText = 'Error: ' + String(e).substring(0, 100);
@@ -488,27 +498,61 @@ struct Index {
     return Math.min(Math.max(idx, 0), Math.max(0, nRows - 1));
   }
 
+  // NOTE: "which series does this analysis plot?" is NOT decided here any
+  // more. It used to be `firstNumericSeries()` in this file, which returned
+  // "the first numeric array in the result object, in key order" — for a
+  // rarefaction that is `sampleSizes` (a straight line) instead of
+  // `expectedTaxa`, for a periodogram `frequencies` instead of `power`, and
+  // for an LDA `classLabels` (two points) instead of its score plot. The
+  // decision now lives in components/plot/plotSeries.ts, once, and is unit
+  // tested there.
+
   /**
-   * First plain numeric array exposed by a result object, used to give
-   * dialog-routed analyses a chart that belongs to them. Returns null when the
-   * result holds nothing plottable — in that case the caller leaves the series
-   * empty so PlotCanvas clears rather than showing the previous analysis.
+   * The two measured sections the "Stratigraphic Correlation" analysis works
+   * on: heights from column 0, values from the next two columns.
+   *
+   * Both entry points (the dialog and the quick action) build them here, so
+   * the two paths of one menu entry cannot drift into two different
+   * analyses.
    */
-  private firstNumericSeries(result: Record<string, Object>): number[] | null {
-    const preferred: string[] = [
-      'values', 'series', 'expectedRichness', 'amplitudes', 'coefficients',
-      'heights', 'permutationScores', 'simulatedScores', 'eigenvalues',
-      'proportionExplained', 'survivorship', 'rates'
-    ];
-    for (const k of preferred) {
-      const v = result[k];
-      if (Array.isArray(v) && v.length > 0 && typeof v[0] === 'number') return v as number[];
+  private stratCorrSections(): { name: string; heights: number[]; values: number[] }[] {
+    const dm = this.stateMgr?.dataMatrix;
+    if (!dm) return [];
+    const data = dm.data;
+    const safe = (colIdx: number): number[] => {
+      const c = data.col(colIdx);
+      return c.length === 0 ? [0] : c;
+    };
+    return [{
+      name: 'S1', heights: data.col(0), values: safe(1),
+    }, {
+      name: 'S2', heights: data.col(0), values: safe(Math.min(2, data.cols - 1)),
+    }];
+  }
+
+  /**
+   * Group labels for the phylogenetic analyses, taken from the specimen
+   * groups the user assigned in the spreadsheet.
+   *
+   * A phylogenetic ANOVA contrasts a trait BETWEEN groups of tips, so it
+   * needs one group label per tip. The Phylo ANOVA dialog collects none, and
+   * the UI used to pass an empty object — the core then answered
+   * "p = 1, no difference" for an analysis that had never been run. It
+   * refuses now; the groups the spreadsheet already holds are the missing
+   * input, so they are used here.
+   */
+  private phyloGroups(labels: string[]): Record<string, string> {
+    const groups: Record<string, string> = {};
+    const dm = this.stateMgr?.dataMatrix;
+    if (!dm) return groups;
+    for (let i = 0; i < labels.length; i++) {
+      const g = dm.rowMeta.getGroup(i);
+      if (g === undefined) continue;
+      const name = g.trim();
+      if (name.length === 0 || name.toLowerCase() === 'ungrouped') continue;
+      groups[labels[i]] = name;
     }
-    for (const k of Object.keys(result)) {
-      const v = result[k];
-      if (Array.isArray(v) && v.length > 1 && typeof v[0] === 'number') return v as number[];
-    }
-    return null;
+    return groups;
   }
 
   private runDialogAnalysisCore(name: string, params: Record<string, Object>): any {
@@ -642,10 +686,14 @@ struct Index {
       case 'Isotope':
         return this.statCtrl.runIsotope();
       case 'Stratigraphic Correlation':
-        return this.statCtrl.runComputeCorrelation(
-          this.stateMgr.dataMatrix.data.col(0),
-          this.stateMgr.dataMatrix.data.col(Math.min(1, this.stateMgr.dataMatrix.data.cols - 1))
-        );
+        // The same analysis as the shortcut of the same name. This case ran
+        // a plain Pearson correlation between two columns — which is not
+        // stratigraphic correlation at all — so the L-curve / GLS algorithm
+        // of core/analysis/stratigraphy was unreachable from the dialog, and
+        // one menu entry produced two different analyses depending on the
+        // path it was started from. StratCorrDialog collects no parameters,
+        // so the dialog path has nothing extra to pass.
+        return this.statCtrl.runStratCorr(this.stratCorrSections());
       case 'Biostratigraphy':
         // min_occurrence was collected and dropped; unitaryAssociations has had
         // the `minSectionOccurrence` parameter all along (default 2).
@@ -691,8 +739,16 @@ struct Index {
         for (let i = 0; i < labels.length; i++) traits[labels[i]] = vals[i] ?? 0;
         // Same two fixes as 'Phylo Signal': real tree, and the collected
         // permutation count actually forwarded.
+        //
+        // The third: the groups were an EMPTY object, so the core had
+        // nothing to contrast and answered "p = 1, no difference" for an
+        // analysis that had never been run (it refuses now). The group
+        // labels are the specimen groups the user assigned in the
+        // spreadsheet — the same source ANOSIM / PERMANOVA / SIMPER / LDA
+        // use. When nothing is grouped, the core's refusal reaches the user
+        // as a readable message.
         return this.statCtrl.runPhyloANOVA(
-          this.statCtrl.requireParsedTree(), traits, {},
+          this.statCtrl.requireParsedTree(), traits, this.phyloGroups(labels),
           params['n_permutations'] as number
         );
       }
@@ -786,12 +842,9 @@ struct Index {
       case 'Wavelet': return this.statCtrl.runWavelet();
       case 'Isotope': return this.statCtrl.runIsotope();
       case 'Stratigraphic Correlation':
-        // correlate column pairs of the loaded table by height (column 0)
-        return this.statCtrl.runStratCorr([{
-          name: 'S1', heights: data.col(0), values: safeCol(1),
-        }, {
-          name: 'S2', heights: data.col(0), values: safeCol(Math.min(2, data.cols - 1)),
-        }]);
+        // The same sections as the dialog path (stratCorrSections) — one
+        // menu entry must be one analysis.
+        return this.statCtrl.runStratCorr(this.stratCorrSections());
       case 'Biostratigraphy':
         return this.statCtrl.runUnitaryAssociations(data.to2D(), data.to2D(), undefined, undefined);
       case 'Paleo-Environment': return this.statCtrl.runPaleoEnv();
@@ -813,7 +866,10 @@ struct Index {
       case 'Phylo ANOVA': {
         const traits: Record<string, number> = {};
         for (let i = 0; i < dm.rowLabels.length; i++) traits[dm.rowLabels[i]] = safeCol(0)[i] ?? 0;
-        return this.statCtrl.runPhyloANOVA(this.statCtrl.requireParsedTree(), traits, {});
+        // The groups are the specimen groups from the spreadsheet, as in the
+        // dialog path — an empty grouping is not a test (see phyloGroups).
+        return this.statCtrl.runPhyloANOVA(
+          this.statCtrl.requireParsedTree(), traits, this.phyloGroups(dm.rowLabels));
       }
       case 'Cohort Survival': {
         const records: [number, number][] = [];
@@ -908,7 +964,7 @@ struct Index {
     // `analysisHistory`, which is what buildAnalysisScript reads, always keeps
     // the caller's untouched params), so the probe sees the data and the script
     // does not.
-    const fp = this.dataFingerprint(dm);
+    const fp = dataFingerprint(dm);
     const storedParams: Record<string, Object> = { ...(params ?? {}), [DATA_HASH_KEY]: fp };
     HistoryRepository.insertRecord({
       analysisName: name,
@@ -995,7 +1051,10 @@ struct Index {
   private async runAnalysisWithParams(name: string, params: Record<string, Object>): Promise<void> {
     this.isLoading = true;
     this.statusText = 'Running: ' + name + '...';
-    this.recordAnalysis(name, params);
+    // The run is recorded AFTER it succeeded, like the quick path below: a
+    // script must only contain analyses that actually produced a result.
+    // Recording it here also meant a failure in `recordAnalysis` escaped the
+    // try/catch below and left `isLoading` stuck at true.
     try {
       if (!this.stateMgr?.dataMatrix) { throw new Error('No data loaded'); }
       let result: any;
@@ -1088,31 +1147,18 @@ struct Index {
           break;
         }
         default: {
-          // Generic result handling for the extended dialog-routed analyses:
-          // take the first plottable series the result exposes so the chart
-          // belongs to THIS analysis. When nothing is plottable the series
-          // stays empty and PlotCanvas clears itself.
-          if (result && typeof result === 'object') {
-            const r = result as Record<string, Object>;
-            const scores = r['scores'] as number[][] | undefined;
-            const coords = r['coordinates'] as number[][] | undefined;
-            const pairs = (scores && scores.length > 0) ? scores
-              : ((coords && coords.length > 0) ? coords : undefined);
-            if (pairs) {
-              this.plotDataX = pairs.map((row: number[]) => row[0]);
-              this.plotDataY = pairs.map((row: number[]) => row[1]);
-              this.plotType = 'scatter';
-            } else {
-              const series = this.firstNumericSeries(r);
-              if (series) {
-                this.plotDataX = series.map((_: number, i: number) => i + 1);
-                this.plotDataY = series;
-                this.plotType = 'line';
-              } else {
-                this.plotType = 'none';
-              }
-            }
-          }
+          // Every analysis that has no dedicated geometry above decides what
+          // it plots in ONE place: the pure selector in
+          // components/plot/plotSeries.ts. It knows the difference between a
+          // response (expectedTaxa, power, values) and a coordinate
+          // (sampleSizes, periods, depths), and it returns NOTHING when the
+          // X axis cannot be determined — a made-up X axis turns "no chart"
+          // into "a wrong chart".
+          const selection = selectPlotSeries(name, result);
+          this.plotDataX = selection.x;
+          this.plotDataY = selection.y;
+          if (selection.title.length > 0) this.plotTitle = selection.title;
+          this.plotType = selection.type;
           break;
         }
       }
@@ -1122,8 +1168,21 @@ struct Index {
       this.captureWidgetPlot(name);
       this.statusText = name + ' completed';
       this.addWidget(name);
+      // History persistence is fire-and-forget (docs/architecture.md §4): a
+      // failure to write the record must never undo a finished analysis.
+      try {
+        this.recordAnalysis(name, params);
+      } catch (e) {
+        console.error('[history] recordAnalysis failed: ' + String(e));
+      }
     } catch (e) {
-      this.statusText = name + ' error: ' + String(e).substring(0, 100);
+      // The whole message, not its first 100 characters: the cut removed the
+      // useful half of every explanation (the core's "Phylo ANOVA needs at
+      // least 2 group labels on the tips that carry a trait value (got 0).
+      // Without groups there is no test to run." lost exactly the part that
+      // told the user what to do).
+      const msg = e instanceof Error ? e.message : String(e);
+      this.statusText = name + ' failed: ' + (msg.length > 0 ? msg : 'unknown error');
     }
     this.isLoading = false;
   }
@@ -1188,22 +1247,17 @@ struct Index {
 
       // Post-process results and update UI on main thread
       switch (name) {
-        case 'Diversity Indices':
-          this.plotTitle = 'Diversity: S=' + result.richness + ' H=' + result.shannon.toFixed(2);
-          this.plotType = 'bar';
-          break;
-        case 'Rarefaction':
-          this.plotDataX = result.sampleSizes;
-          this.plotDataY = result.expectedTaxa;
-          this.plotTitle = 'Rarefaction Curve';
-          this.plotType = 'line';
-          break;
-        case 'Spectral':
-          this.plotDataX = result.periods;
-          this.plotDataY = result.power;
-          this.plotTitle = 'Spectral (peak=' + result.peakPeriod.toFixed(2) + ')';
-          this.plotType = 'line';
-          break;
+        // The dedicated drawing branches for 'Diversity Indices', 'Rarefaction'
+        // and 'Spectral' used to live HERE. They were unreachable: the first
+        // switch above opens the dialog of those three analyses and returns,
+        // so the quick path never saw them — and the dialog path (which is
+        // where they actually run) had no branch for them at all and fell
+        // through to the generic handler, which drew `sampleSizes` and
+        // `frequencies` instead of `expectedTaxa` and `power`.
+        //
+        // The drawing rule for all three now lives in
+        // components/plot/plotSeries.ts and is applied by the dialog path, so
+        // each analysis is decided in exactly one place.
         case 'FBD Process':
           this.plotTitle = 'FBD Diversity Curve';
           this.plotType = 'line';
@@ -1260,7 +1314,9 @@ struct Index {
       this.statusText = name + ' completed';
       this.addWidget(name);
     } catch (e) {
-      this.statusText = name + ' error: ' + String(e).substring(0, 100);
+      // The whole message — see the note in runAnalysisWithParams.
+      const msg = e instanceof Error ? e.message : String(e);
+      this.statusText = name + ' failed: ' + (msg.length > 0 ? msg : 'unknown error');
     } finally {
       this.isLoading = false;
     }
@@ -1286,15 +1342,31 @@ struct Index {
   private addWidget(name: string): void {
     if (!this.workspaceWidgets.includes(name)) {
       if (this.workspaceWidgets.length >= 8) {
-        const evicted = this.workspaceWidgets.shift();
-        // Drop the evicted tab's chart too, otherwise the map grows without
-        // bound and a re-run of the same name could resurrect a stale chart.
-        if (evicted) this.widgetPlots.delete(evicted);
+        // The data table is NOT evictable. It was the oldest tab, so it was
+        // the first one dropped: after eight analyses the spreadsheet tab —
+        // and with it the only entry point for grouping and cell editing —
+        // disappeared, and the user could only get it back by re-importing
+        // the file. The oldest ANALYSIS tab is dropped instead.
+        const evicted = this.evictableWidget();
+        if (evicted.length > 0) {
+          this.workspaceWidgets = this.workspaceWidgets.filter((w: string) => w !== evicted);
+          // Drop the evicted tab's chart too, otherwise the map grows without
+          // bound and a re-run of the same name could resurrect a stale chart.
+          this.widgetPlots.delete(evicted);
+        }
       }
       this.workspaceWidgets.push(name);
     }
     this.currentWidget = this.workspaceWidgets.indexOf(name);
     if (this.currentWidget < 0) this.currentWidget = this.workspaceWidgets.length - 1;
+  }
+
+  /** The oldest tab that may be dropped to make room. The data table never is. */
+  private evictableWidget(): string {
+    for (const w of this.workspaceWidgets) {
+      if (w !== 'spreadsheet') return w;
+    }
+    return '';
   }
 
   private exportPlot(format: string): void {

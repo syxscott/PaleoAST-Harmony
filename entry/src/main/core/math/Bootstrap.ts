@@ -95,14 +95,24 @@ function quantile(sortedArr: number[], alpha: number): number {
  *
  * a = Σ_i (θ̄  − θ_i)³ / [6 * (Σ_i (θ̄ − θ_i)²)^(3/2)]
  *
+ * The sign of the cubic sum matters: a > 0 means the bootstrap distribution
+ * is right-skewed, a < 0 left-skewed. The differences must therefore be
+ * taken as (θ̄ − θ_i), not (θ_i − θ̄) — the latter flips the sign of `a` and
+ * mirrors the BCa interval (measured on a 25-point right-skewed sample: the
+ * interval became [9.263, 21.593] instead of [10.078, 22.767]).
+ *
  * Ref: Efron B. (1987) J. Amer. Statist. Assoc. 82: 171-200, Eq. (9).
  *      Efron & Tibshirani (1993) An Introduction to the Bootstrap, Chapman & Hall, Eq. (14.10).
+ *      scipy 1.15.3 scipy/stats/_resampling.py::_bca_interval:
+ *          U_ji = (n - 1) * (theta_hat_dot - theta_hat_i)
+ *          a_hat = 1/6 * sum(U_ji**3) / sum(U_ji**2)**1.5
+ *      (the (n-1) factor cancels between numerator and denominator).
  */
 function jackknifeAccelerate(values: number[]): number {
   const n = values.length;
   if (n < 3) return 0;
   const thetaHat = values.reduce((a, b) => a + b, 0) / n;
-  const diffs = values.map(v => v - thetaHat);
+  const diffs = values.map(v => thetaHat - v);
   const sumSq = diffs.reduce((s, d) => s + d * d, 0);
   const sumCu = diffs.reduce((s, d) => s + d * d * d, 0);
   if (sumSq < 1e-15) return 0;
@@ -222,7 +232,19 @@ export function bootstrap<T>(
       // BCa adjustment
       // Ref: Efron (1987) Eq. (10); Efron & Tibshirani (1993) Eq. (14.14)-(14.17)
       // z₀ = Φ⁻¹( #{θ* < θ̂} / B )
+      //
+      // scipy 1.15.3 uses the mid-rank ("mean") percentile, see
+      // scipy/stats/_resampling.py::_percentile_of_score:
+      //     ((a < score).sum() + (a <= score).sum()) / (2 * B)
+      // A strict `<` counts every resample that *equals* the point estimate
+      // as "below", which under-states z₀ and biases the interval. Ties are
+      // common — a median statistic on 21 integers tied the point estimate
+      // in 3 329 of 9 999 resamples — and the error is not small: there z₀
+      // was -0.228 instead of +0.192, and the 95% upper bound came out as 8
+      // instead of 10.
       const below = bootstrapEstimates.filter(v => v < (estimate as number)).length;
+      const equal = bootstrapEstimates.filter(v => v === (estimate as number)).length;
+      const frac = (below + 0.5 * equal) / nResamples;
       // A degenerate distribution (every resample equals the point estimate,
       // e.g. a constant sample or statistic = min) gives below = 0, so
       // normInv(0) = -Infinity and the adjusted quantiles below become NaN --
@@ -230,8 +252,7 @@ export function bootstrap<T>(
       // (DegenerateDataWarning); this project fails louder, so the bias
       // fraction is kept strictly inside (0, 1) and the uncorrected
       // percentiles are used when there is no bias to correct.
-      const degenerate = below === 0 || below === nResamples;
-      const frac = degenerate ? 0.5 : below / nResamples;
+      const degenerate = !(frac > 0 && frac < 1);
       const z0 = degenerate ? 0 : normInv(frac);
 
       // Acceleration a (jackknife)

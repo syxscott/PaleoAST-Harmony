@@ -26,7 +26,9 @@ export interface BioeventResult {
   sections: string[];
   events: string[];
   zones: Zone[];
+  /** FAD matrix AFTER the endemic filter (same columns as `events`). */
   fadMatrix: number[][];
+  /** LAD matrix AFTER the endemic filter (same columns as `events`). */
   ladMatrix: number[][];
   method: 'ua';
   uazGroups?: { uazId: number; uazName: string; zoneIndices: number[]; eventUnion: string[] }[];
@@ -34,6 +36,9 @@ export interface BioeventResult {
   endemicFiltered?: string[];
   /** FAD ordering contradictions detected across sections. */
   cyclicContradictions?: CyclicContradiction[];
+  /** Column index in the INPUT matrices of each event of `events`
+   *  (identity when nothing was filtered out). */
+  eventIndexMap?: number[];
 }
 
 /**
@@ -73,21 +78,24 @@ export function unitaryAssociations(
   // ── Step 1: endemic-species filtering (min_section_occurrence) ──────────
   let fad = fadMatrix, lad = ladMatrix;
   const endemicFiltered: string[] = [];
+  // Column index in the INPUT matrices for every retained event.
+  let keep: number[] = Array.from({ length: nEv }, (_, i) => i);
   if (minSectionOccurrence > 1) {
-    const keep: number[] = [];
+    const kept: number[] = [];
     for (let e = 0; e < nEv; e++) {
       let occ = 0;
       for (let s = 0; s < nSec; s++) {
         if (!isNaN(fad[s][e]) && !isNaN(lad[s][e])) occ++;
       }
-      if (occ >= minSectionOccurrence) keep.push(e);
+      if (occ >= minSectionOccurrence) kept.push(e);
       else endemicFiltered.push(events[e]);
     }
-    if (keep.length < nEv) {
-      fad = fadMatrix.map(row => keep.map(e => row[e]));
-      lad = ladMatrix.map(row => keep.map(e => row[e]));
-      events = keep.map(e => events[e]);
-      nEv = keep.length;
+    if (kept.length < nEv) {
+      fad = fadMatrix.map(row => kept.map(e => row[e]));
+      lad = ladMatrix.map(row => kept.map(e => row[e]));
+      events = kept.map(e => events[e]);
+      nEv = kept.length;
+      keep = kept;
     }
   }
 
@@ -147,12 +155,16 @@ export function unitaryAssociations(
     sections,
     events,
     zones,
-    fadMatrix,
-    ladMatrix,
+    // The filtered matrices: returning the unfiltered ones made the result
+    // self-contradictory (3 event names next to 4-column matrices) and
+    // every consumer that read fadMatrix[s][eventIndex] got the wrong cell.
+    fadMatrix: fad,
+    ladMatrix: lad,
     method: 'ua',
     uazGroups: uaz,
     endemicFiltered,
     cyclicContradictions,
+    eventIndexMap: keep,
   };
 }
 

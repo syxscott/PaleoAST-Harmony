@@ -1,5 +1,6 @@
 import { Matrix } from '../../math/Matrix';
 import { lowess } from '../../math/LOWESS';
+import { ComputationError } from '../../utils/Exceptions';
 import { brokenStickTest, dtwSimilarity, mexicanHatWavelet, fourierWaveFrequency } from './StratExtended';
 
 /**
@@ -14,11 +15,19 @@ import { brokenStickTest, dtwSimilarity, mexicanHatWavelet, fourierWaveFrequency
  *   - Uses Bray-Curtis distance: d(i,j) = Σ|y_i - y_j| / Σ|y_i + y_j|
  *   - At each step, find the adjacent pair with minimum Bray-Curtis distance
  *     and merge using incremental sum of squares (Ward criterion).
- *   - Linkage matrix: [clusterA, clusterB, distance, count]
+ *   - Linkage matrix: [clusterA, clusterB, height, count] where `height` is
+ *     sqrt(ΔSS) — the Ward incremental sum-of-squares height, NOT the
+ *     Bray-Curtis distance of the two clusters. (ΔSS = (n_i·n_j)/(n_i+n_j)·d_BC²,
+ *     so height = sqrt(n_i·n_j/(n_i+n_j))·d_BC.) The broken-stick test in
+ *     StratExtended is fed exactly this column; see the note there.
  */
 export interface CONISSResult {
   linkageMatrix: number[][];
+  /** Number of zones actually produced (may be < the requested nZones when
+   *  the section has fewer samples than zones). */
   nZones: number;
+  /** Number of zones that were asked for. */
+  requestedZones: number;
   zoneAssignments: number[];
   /** Heights/depths echoed back when provided (else empty). */
   depthLabels: number[];
@@ -91,67 +100,109 @@ export function coniss(
     nextId++;
   }
 
-  // Zone assignment: cut the dendrogram into nZones by removing the nZones-1
-  // largest-SS merges, then propagate cluster ids to samples in stratigraphic
-  // order (each leaf keeps the id of the cluster containing it).
+  // Zone assignment: split the section into nZones contiguous zones.
+  //
+  // CONISS only merges adjacent clusters, so the merge tree is a ladder
+  // over the sample order: every internal node corresponds to exactly one
+  // gap between two samples, and a zone boundary is such a gap. The
+  // boundaries are chosen so that the total incremental sum of squares at
+  // them is maximal — the same "cut at the biggest merges" criterion the
+  // old code used, restricted to the boundaries a dendrogram cut can
+  // actually produce. A dynamic program over the tree does that in one
+  // pass and always yields exactly min(nZones, nSamples) zones.
+  //
+  // The old implementation descended from the root, assumed the root merge
+  // was always among the cuts and collapsed a whole subtree into a single
+  // zone whenever an ancestor was missing from the cut set. Roughly half of
+  // all inputs then returned a different number of zones than requested
+  // (e.g. 6 samples with nZones = 2 came back with 3 zones).
   const assignments = new Array(n).fill(0);
-  if (linkage.length > 0 && nZones > 1) {
+  let nActualZones = 1;
+  if (linkage.length > 0) {
+    const kMax = Math.max(1, Math.min(Math.floor(nZones), n));
     // Reconstruct merge tree: node n+k is created by merge k
     const mergeChildren: [number, number][] = linkage.map(row => [row[0], row[1]]);
-    // Choose the nZones-1 merges with the largest ΔSS (linkage col 2 = sqrt(ΔSS))
-    const cutOrder = linkage
-      .map((row, k) => ({ k, height: row[2] }))
-      .sort((a, b) => b.height - a.height)
-      .slice(0, Math.max(0, Math.min(nZones - 1, linkage.length)))
-      .map(x => x.k);
-    const cutSet = new Set(cutOrder);
+    const root = n + mergeChildren.length - 1;
 
-    // Descend from the root cluster (last merge), stopping at cuts
-    const zones: number[][] = [];
-    // Walk merges without cuts to build leaf lists (scipy id convention)
-    const leavesOf = (id: number): number[] => {
-      const mergeIdx = id - n;
-      if (mergeIdx < 0 || mergeIdx >= mergeChildren.length) return [id];
-      const [a, b] = mergeChildren[mergeIdx];
-      return [...leavesOf(a), ...leavesOf(b)];
+    // Leaf range of every node, and the gap each internal node splits at.
+    const lo = new Map<number, number>(), hi = new Map<number, number>();
+    const gap = new Map<number, number>();
+    const measure = (id: number): void => {
+      if (id < n) { lo.set(id, id); hi.set(id, id); return; }
+      const k = id - n;
+      if (k < 0 || k >= mergeChildren.length) { lo.set(id, id); hi.set(id, id); return; }
+      const [a, b] = mergeChildren[k];
+      measure(a); measure(b);
+      lo.set(id, lo.get(a)!);
+      hi.set(id, hi.get(b)!);
+      gap.set(id, hi.get(a)!);
     };
-    // Start below the root: its two child subtrees are separated by the cut
-    // through the final merge (always among the cut merges for nZones >= 2).
-    const rootMerge = mergeChildren.length - 1;
-    const stack: { id: number }[] = mergeChildren[rootMerge].map(id => ({ id }));
-    while (stack.length > 0) {
-      const { id } = stack.shift()!;
-      if (id < n) { zones.push([id]); continue; } // single-sample zone
-      const mergeIdx = id - n;
-      if (mergeIdx < 0 || mergeIdx >= mergeChildren.length) { zones.push([id]); continue; }
-      if (cutSet.has(mergeIdx)) {
-        // this merge is also cut: its children become separate zones
-        const [a, b] = mergeChildren[mergeIdx];
-        stack.push({ id: a }, { id: b });
+    measure(root);
+
+    // plan[k] = best split of the node's range into k contiguous zones:
+    // the total ΔSS at the zone boundaries and the boundary gaps.
+    interface ZonePlan { value: number; cuts: number[] }
+    const plans = new Map<number, ZonePlan[]>();
+    const solve = (id: number): ZonePlan[] => {
+      const cached = plans.get(id);
+      if (cached) return cached;
+      let out: ZonePlan[];
+      if (id < n) {
+        // A single sample is one zone (index 1; index 0 is unused).
+        out = new Array(2);
+        out[1] = { value: 0, cuts: [] };
       } else {
-        zones.push(leavesOf(id)); // intact subtree below the cut
+        const k = id - n;
+        const [a, b] = mergeChildren[k];
+        const pa = solve(a), pb = solve(b);
+        const deltaSS = linkage[k][2] * linkage[k][2];
+        const maxK = Math.min(kMax, pa.length + pb.length - 1);
+        out = new Array(maxK + 1);
+        out[1] = { value: 0, cuts: [] };
+        for (let kk = 2; kk <= maxK; kk++) {
+          let best: ZonePlan | null = null;
+          for (let k1 = 1; k1 < kk; k1++) {
+            const k2 = kk - k1;
+            if (k1 >= pa.length || k2 >= pb.length) continue;
+            const value = pa[k1].value + pb[k2].value + deltaSS;
+            if (!best || value > best.value) {
+              best = { value, cuts: [...pa[k1].cuts, ...pb[k2].cuts, gap.get(id)!] };
+            }
+          }
+          out[kk] = best ?? { value: 0, cuts: [] };
+        }
       }
+      plans.set(id, out);
+      return out;
+    };
+
+    const rootPlans = solve(root);
+    const plan = rootPlans[Math.min(kMax, rootPlans.length - 1)];
+    const cuts = plan.cuts.slice().sort((a, b) => a - b);
+
+    // Zones are the contiguous ranges between the boundaries.
+    let start = 0, z = 0;
+    for (const g of cuts) {
+      for (let i = start; i <= g && i < n; i++) assignments[i] = z;
+      start = g + 1; z++;
     }
-    // Sort zones by their shallowest sample index so zone 0 = top of section
-    zones.sort((a, b) => Math.min(...a) - Math.min(...b));
-    for (let z = 0; z < zones.length; z++) {
-      for (const leaf of zones[z]) {
-        if (leaf >= 0 && leaf < n) assignments[leaf] = z;
-      }
-    }
+    for (let i = start; i < n; i++) assignments[i] = z;
+    nActualZones = z + 1;
   }
 
-  // Broken-stick test on merge heights (BD values = linkage col 2)
+  // Broken-stick test on the merge heights (linkage col 2 = sqrt(ΔSS), the
+  // Ward/ISS height — not the raw Bray-Curtis distance; see the note in
+  // StratExtended.brokenStickTest).
   let brokenStick: CONISSResult['brokenStick'] = null;
   if (computeBrokenStick && linkage.length > 0) {
-    // import lazily to avoid circular deps: StratExtended lives in same folder
-    const bd = linkage.map(row => row[2]);
-    brokenStick = brokenStickTest(bd, nPermutations);
+    const heights = linkage.map(row => row[2]);
+    brokenStick = brokenStickTest(heights, nPermutations);
   }
 
   return {
     linkageMatrix: linkage,
-    nZones,
+    nZones: nActualZones,
+    requestedZones: nZones,
     zoneAssignments: assignments,
     depthLabels: depths ? [...depths] : [],
     issTotal: linkage.length > 0 ? clusters[0].ss : 0,
@@ -235,7 +286,11 @@ export function markov(sequence: number[], faciesNames?: string[]): MarkovResult
   const differenceMatrix = T.map((row, i) => row.map((v, j) => v - expectedMatrix[i][j]));
   // df = (m-1)² where m = number of states (for full transition matrix)
   const df = (nStates - 1) * (nStates - 1);
-  const p = 1 - chi2CDF_approx(chi2, df);
+  // Upper tail of χ²: P(X > χ²) with X ~ χ²(df). The old code computed
+  // `1 - (1 - Q)` through a diverging continued fraction, which produced
+  // p-values outside [0, 1] (and even negative ones) for every chain with
+  // more than two states; the survival function is now evaluated directly.
+  const p = chi2Survival(chi2, df);
 
   // Stationary distribution via power iteration on transition matrix
   let pi = new Array(nStates).fill(1 / nStates);
@@ -263,30 +318,67 @@ export function markov(sequence: number[], faciesNames?: string[]): MarkovResult
   };
 }
 
-function chi2CDF_approx(x: number, k: number): number {
-  if (x <= 0) return 0;
-  // Regularized incomplete gamma P(k/2, x/2)
-  return gammainc_approx(k / 2, x / 2);
+/**
+ * Upper tail of the chi-square distribution: P(X > x) for X ~ χ²(k).
+ *
+ * Computed from the regularized incomplete gamma function:
+ *   P(X > x) = Q(k/2, x/2)
+ * The continued-fraction branch is used for x/2 ≥ a+1 (where Q is small and
+ * the subtraction 1 − P would cancel away every significant digit).
+ */
+function chi2Survival(x: number, k: number): number {
+  if (!(x > 0) || !(k > 0)) return 1;
+  const a = k / 2, xx = x / 2;
+  const q = xx < a + 1 ? 1 - _gammaincP(a, xx) : _gammaincQ(a, xx);
+  return Math.min(1, Math.max(0, q));
 }
 
-function gammainc_approx(a: number, x: number): number {
+/**
+ * Regularized lower incomplete gamma P(a, x) — series expansion.
+ * (Numerical Recipes `gser`.)
+ */
+function _gammaincP(a: number, x: number): number {
   if (x <= 0) return 0;
-  if (x < a + 1) {
-    let sum = 1 / a, term = 1 / a;
-    for (let n = 1; n < 200; n++) { term *= x / (a + n); sum += term; if (Math.abs(term) < 1e-14 * Math.abs(sum)) break; }
-    return sum * Math.exp(-x + a * Math.log(x) - lgamma_approx(a));
-  } else {
-    let f = 1e-30, c = 1e-30, d = 1 / (x + 1 - a);
-    f = d;
-    for (let n = 1; n < 200; n++) {
-      const an = n * (a - n), bn = x + 2 * n + 1 - a;
-      d = bn + an * d; if (Math.abs(d) < 1e-30) d = 1e-30; d = 1 / d;
-      c = bn + an / c; if (Math.abs(c) < 1e-30) c = 1e-30;
-      const delta = c * d; f *= delta;
-      if (Math.abs(delta - 1) < 1e-14) break;
-    }
-    return 1 - f * Math.exp(-x + a * Math.log(x) - lgamma_approx(a));
+  let sum = 1 / a, term = 1 / a;
+  for (let n = 1; n < 500; n++) {
+    term *= x / (a + n);
+    sum += term;
+    if (Math.abs(term) < 1e-16 * Math.abs(sum)) break;
   }
+  return sum * Math.exp(-x + a * Math.log(x) - lgamma_approx(a));
+}
+
+/**
+ * Regularized upper incomplete gamma Q(a, x) = 1 − P(a, x) — Lentz's
+ * continued fraction (Numerical Recipes `gammq`).
+ *
+ * The continued fraction REQUIRES the initial `c = 1/FPMIN = 1e30`. The
+ * old code started it at 1e-30, so the very first update `c = bn + an/c`
+ * was dominated by an/c ≈ −5e29 and the series diverged. That is why the
+ * Markov p-values could be negative or larger than 1, and why the bug hid
+ * for two-state chains: with a = df/2 = 0.5 the term an = n(a − n) vanishes
+ * for n = 1 and the divergence never starts.
+ */
+function _gammaincQ(a: number, x: number): number {
+  if (x <= 0) return 1;
+  const FPMIN = 1e-30;
+  let b = x + 1 - a;
+  let c = 1 / FPMIN;   // ← 1e30, not 1e-30 (the original defect)
+  let d = 1 / b;
+  let h = d;
+  for (let i = 1; i < 500; i++) {
+    const an = -i * (i - a);
+    b += 2;
+    d = an * d + b;
+    if (Math.abs(d) < FPMIN) d = FPMIN;
+    c = b + an / c;
+    if (Math.abs(c) < FPMIN) c = FPMIN;
+    d = 1 / d;
+    const del = d * c;
+    h *= del;
+    if (Math.abs(del - 1) < 1e-15) break;
+  }
+  return Math.exp(-x + a * Math.log(x) - lgamma_approx(a)) * h;
 }
 
 function lgamma_approx(x: number): number {
@@ -314,6 +406,7 @@ export interface DirectionalResult {
 
 export function directional(anglesDeg: number[]): DirectionalResult {
   const n = anglesDeg.length;
+  if (n === 0) throw new ComputationError('directional: no angles supplied (empty input has no mean direction)');
   const rad = anglesDeg.map(a => a * Math.PI / 180);
   let C = 0, S = 0;
   for (const r of rad) { C += Math.cos(r); S += Math.sin(r); }
@@ -370,11 +463,20 @@ export function extinctionCI(
     // Marshall (1990): gap = −ln(q)/r with r = −ln(1−p) the per-layer
     // recovery rate; the interval extends towards younger (smaller) positions:
     // [LAD − gap, LAD]. χ²_{1−q,2}/2 = −ln(q), so 95% → gap = 2.996/r.
-    let r = Infinity;
-    if (detectionProbability > 0 && detectionProbability < 1) {
-      r = -Math.log(1 - detectionProbability);
-    }
-    const gap = (isFinite(r) && r > 0) ? -Math.log(q) / r : 0;
+    //
+    // r = −ln(1−p):
+    //   p = 0    → r = 0     → no recovery at all → the extinction position is
+    //                          completely unconstrained (gap = +∞, the lower
+    //                          bound collapses to the base of the section).
+    //   0 < p < 1 → r = −ln(1−p) → finite gap.
+    //   p = 1    → r = ∞     → every layer is sampled → no gap.
+    // The old guard (`p > 0 && p < 1`) sent p = 0 down the p = 1 path and
+    // reported a zero-width interval for a taxon that was never recovered.
+    let r: number;
+    if (detectionProbability <= 0) r = 0;
+    else if (detectionProbability < 1) r = -Math.log(1 - detectionProbability);
+    else r = Infinity;
+    const gap = r === 0 ? Infinity : (isFinite(r) ? -Math.log(q) / r : 0);
     for (let i = 0; i < n; i++) {
       ciUpper.push(ladSorted[i]);
       trueExt.push(ladSorted[i]);
@@ -469,6 +571,12 @@ export function spectralAnalysis(
   times?: number[],
 ): SpectralResult {
   const n = timeSeries.length;
+  // A periodogram needs at least two samples: with a single sample the
+  // frequency grid is empty and the peak fields were `undefined`, which
+  // crashed the caller (result.peakPeriod.toFixed(2)).
+  if (n < 2) throw new ComputationError('spectralAnalysis: need at least 2 samples to build a periodogram');
+  if (times && times.length !== n)
+    throw new ComputationError('spectralAnalysis: times and timeSeries must have the same length');
 
   if (method === 'lomb-scargle') {
     return _lombScargle(timeSeries, times);
@@ -524,6 +632,9 @@ function _lombScargle(timeSeries: number[], times?: number[]): SpectralResult {
   const m = timeSeries.reduce((a, b) => a + b, 0) / n;
   const y = timeSeries.map(v => v - m);
   const sigma2 = y.reduce((s, v) => s + v * v, 0) / n;
+  // A constant series has no variance: the periodogram is 1/(2σ²)·(…) and
+  // therefore undefined (it used to return NaN power for every frequency).
+  if (!(sigma2 > 0)) throw new ComputationError('lomb-scargle: the series has zero variance — a constant series has no periodogram');
 
   // Real (possibly uneven) time axis; falls back to 0..n-1
   const t = (times && times.length === n) ? [...times] : Array.from({ length: n }, (_, i) => i);
@@ -584,6 +695,21 @@ export interface CorrelationResult {
   method: string;
 }
 
+/**
+ * Compare two or more stratigraphic sections.
+ *
+ * All methods compare the **value series** (`values`), never the height
+ * grids: the heights are the sampling grid, and comparing them would call
+ * two sections with the same grid "perfectly correlated" even when their
+ * measurements are mirror images.
+ *
+ *   - pearson  : Pearson r of the value series.
+ *   - spearman : Pearson r of the average ranks of the value series.
+ *   - euclidean: 1 / (1 + RMS difference of the value series) — a
+ *     similarity, not a correlation (it is 1 for identical series and
+ *     cannot be negative).
+ *   - dtw      : 1 / (1 + DTW/(n+m)) on the value series.
+ */
 export function stratigraphicCorrelation(
   sections: { name: string; heights: number[]; values: number[] }[],
   method: 'pearson' | 'spearman' | 'euclidean' | 'dtw' = 'pearson',
@@ -601,11 +727,12 @@ export function stratigraphicCorrelation(
         // Align on the value series; similarity = 1/(1 + DTW/(n+m))
         sim = dtwSimilarity(a.values, b.values);
       } else if (method === 'euclidean') {
-        const minLen = Math.min(a.heights.length, b.heights.length);
+        const v1 = a.values, v2 = b.values;
+        const minLen = Math.min(v1.length, v2.length);
         if (minLen === 0) sim = 0;
         else {
           let diff = 0;
-          for (let k = 0; k < minLen; k++) diff += (a.heights[k] - b.heights[k]) ** 2;
+          for (let k = 0; k < minLen; k++) diff += (v1[k] - v2[k]) ** 2;
           sim = 1 / (1 + Math.sqrt(diff) / minLen);
         }
       } else if (method === 'spearman') {
@@ -727,7 +854,14 @@ export interface IsotopeResult {
 }
 
 export function isotopeAnalysis(depths: number[], values: number[]): IsotopeResult {
+  // The two arrays are parallel: depth[i] belongs to values[i]. When they
+  // had different lengths the trend was silently computed over the first
+  // n depths while the mean/std were taken over all values, so a mismatch
+  // looked like "no trend" instead of an error.
+  if (depths.length !== values.length)
+    throw new ComputationError('isotopeAnalysis: depths and values must have the same length');
   const n = values.length;
+  if (n < 2) throw new ComputationError('isotopeAnalysis: need at least 2 samples');
   const m = values.reduce((a, b) => a + b, 0) / n;
   const s = Math.sqrt(values.reduce((sum, v) => sum + (v - m) ** 2, 0) / (n - 1));
 
@@ -938,6 +1072,10 @@ export function fitPolynomialTrend(x: number[], y: number[], degree: number = 2)
 // ═══════════════════════════════════════════════════════════════════
 
 export function movingAverage(data: number[], windowSize: number = 5): number[] {
+  // A window of 0 or less has no meaning: the old code divided by a
+  // non-positive count and returned NaN for every sample.
+  if (!Number.isFinite(windowSize) || windowSize < 1)
+    throw new ComputationError(`movingAverage: windowSize must be >= 1 (got ${windowSize})`);
   const n = data.length;
   const half = Math.floor(windowSize / 2);
   const result: number[] = [];
@@ -1045,7 +1183,11 @@ export interface ExcursionSegment {
 
 export interface ExcursionResult {
   excursions: { index: number; depth: number; value: number; direction: 'positive' | 'negative'; magnitude: number }[];
+  /** Number of excursion POINTS (not segments) — the old value reported the
+   *  number of merged segments, so 2 outliers in one run counted as 1. */
   nExcursions: number;
+  /** Number of merged consecutive-excursion segments. */
+  nSegments: number;
   threshold: number;
   /** Merged consecutive excursions as segments (isotope_analysis.py semantics). */
   segments: ExcursionSegment[];
@@ -1106,13 +1248,22 @@ export function detectExcursions(
   }
   flush();
 
-  return { excursions, nExcursions: segments.length, threshold, segments };
+  return { excursions, nExcursions: excursions.length, nSegments: segments.length, threshold, segments };
 }
 
 // ═══════════════════════════════════════════════════════════════════
 // Endemic Species Filter
 // ═══════════════════════════════════════════════════════════════════
 
+/**
+ * Split species into endemic and widespread.
+ *
+ * `minOccurrence` is the minimum number of sections a species has to occur
+ * in to count as widespread; a species found in fewer sections is endemic.
+ * The comparison was `<= minOccurrence`, which is off by one: with
+ * minOccurrence = 2 a species present in exactly 2 sections was still
+ * called endemic.
+ */
 export function filterEndemic(abundanceMatrix: number[][], minOccurrence: number = 1): { endemic: number[]; widespread: number[]; endemicCount: number; widespreadCount: number } {
   const nSpecies = abundanceMatrix[0]?.length ?? 0;
   const endemic: number[] = [];
@@ -1123,7 +1274,7 @@ export function filterEndemic(abundanceMatrix: number[][], minOccurrence: number
     for (let i = 0; i < abundanceMatrix.length; i++) {
       if (abundanceMatrix[i][j] > 0) occurrences++;
     }
-    if (occurrences <= minOccurrence) endemic.push(j);
+    if (occurrences < minOccurrence) endemic.push(j);
     else widespread.push(j);
   }
 
@@ -1186,6 +1337,15 @@ export function buildARMAModel(
   const n0 = timeSeries.length;
   const work = differenceSeries(timeSeries, Math.max(0, Math.floor(d)));
   const n = work.length;
+  if (n < 2) throw new ComputationError('buildARMAModel: need at least 2 observations');
+  // An AR(p)/MA(q) model needs p + q + 1 observations at least: with fewer
+  // points there is nothing to fit, and the forecast step (armaPredict)
+  // cannot even build its AR history.
+  if (p < 0 || q < 0) throw new ComputationError('buildARMAModel: p and q must be >= 0');
+  if (p + q > n - 1) {
+    throw new ComputationError(
+      `buildARMAModel: ARMA(${p},${q}) needs at least ${p + q + 1} observations, got ${n}`);
+  }
   const useMean = includeIntercept;
   const mean = useMean ? work.reduce((a, b) => a + b, 0) / Math.max(1, n) : 0;
   const y = work.map(v => v - mean);
@@ -1301,9 +1461,14 @@ export function armaCrossValidate(
   const grid: { order: [number, number, number]; aic: number; bic: number }[] = [];
   let best: ARMAResult | null = null;
   let bestOrder: [number, number, number] = [1, d, 0];
+  // The number of observations available after differencing — orders that
+  // cannot be fitted with that many points are skipped, not thrown on, so a
+  // short series still yields a grid of the orders that do exist.
+  const nDiff = Math.max(0, values.length - Math.max(0, Math.floor(d)));
   for (let pi = 0; pi <= maxP; pi++) {
     for (let qi = 0; qi <= maxQ; qi++) {
       if (pi === 0 && qi === 0) continue;
+      if (pi + qi > nDiff - 1) continue;
       const model = buildARMAModel(values, pi, qi, d, true);
       grid.push({ order: [pi, d, qi], aic: model.aic, bic: model.bic });
       if (!best || model.aic < best.aic) {
@@ -1333,6 +1498,14 @@ export function armaPredict(
   const p = arCoeffs.length;
   const q = maCoeffs.length;
   const predictions: number[] = [], lowerCI: number[] = [], upperCI: number[] = [], stdErrors: number[] = [];
+
+  // The forecast recursion needs p past observations. With p > n the index
+  // `fitted.length - p + i` went negative, `fitted[-1]` was undefined and
+  // the whole forecast came back as NaN — silently.
+  if (p > fitted.length) {
+    throw new ComputationError(
+      `armaPredict: AR order p=${p} needs at least ${p + 1} fitted observations, got ${fitted.length}`);
+  }
 
   // History in the demeaned/differenced modelling space
   const history: number[] = [];

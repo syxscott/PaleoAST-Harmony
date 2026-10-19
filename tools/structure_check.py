@@ -149,6 +149,7 @@ def check(path):
         problems.append(f'duplicate export: {nm}')
     problems.extend(check_redeclare(code, src))
     problems.extend(check_static_in_struct(src))
+    problems.extend(check_undefined_this_member(src))
     return problems
 
 
@@ -272,6 +273,88 @@ def check_static_in_struct(src):
             problems.append(
                 f'line {line}: `static {sm.group(1)}` inside struct {name} — '
                 f'move it to module scope or to a plain class')
+    return problems
+
+
+def _struct_bodies(src):
+    """Yield (struct_name, body, first_body_line) for every ArkTS struct."""
+    for m in re.finditer(r'(?:@Component\s*\n\s*)?export\s+struct\s+(\w+)\s*\{', src):
+        name = m.group(1)
+        start = m.end()
+        depth = 1
+        i = start
+        line = src.count('\n', 0, start) + 1
+        while i < len(src) and depth > 0:
+            ch = src[i]
+            if ch == '{':
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+            elif ch == '\n':
+                line += 1
+            elif ch == '/' and src[i:i + 2] == '//':
+                i = src.find('\n', i)
+                if i < 0:
+                    break
+            i += 1
+        yield name, src[start:i], line
+
+
+# Members the ArkUI framework provides on every component; `this.getUIContext()`
+# and friends are not declared in the struct and must not be reported.
+FRAMEWORK_MEMBERS = {
+    'getUIContext', 'getContext', 'updateData', 'animateTo', 'promptAction',
+    'router', 'getPromptAction', 'getRouter', 'measure', 'onAreaChange',
+    'getInspector', 'isAppearanceToDarkMode', 'getColorMode',
+}
+
+# A member declaration inside a struct: decorated or plain field, method,
+# accessor or constructor.
+_MEMBER_PATTERNS = [
+    re.compile(r'^\s*(?:@[\w.]+(?:\([^)]*\))?\s*)*'
+               r'(?:private\s+|public\s+|protected\s+|readonly\s+|static\s+)*'
+               r'([A-Za-z_$][\w$]*)\s*[:?]?\s*[^;{]*[;=]', re.M),
+    # A method: optional decorator (@Builder, @Watch, ...), then optional
+    # modifiers, then `name(`. The decorator may sit on the same line
+    # (`@Builder Toolbar() {`) or on its own line.
+    re.compile(r'^\s*(?:@[\w.]+(?:\([^)]*\))?\s*)?'
+               r'(?:private\s+|public\s+|protected\s+|readonly\s+)*'
+               r'(?:async\s+)?(?:get\s+|set\s+)?([A-Za-z_$][\w$]*)\s*\(', re.M),
+]
+
+
+def check_undefined_this_member(src):
+    """Flag `this.x` inside a struct where `x` is not a declared member.
+
+    A component that calls a method it does not have is a compile error
+    (TS2339) and, at runtime, a TypeError. Neither shows up in the unit
+    tests -- they never import an .ets file -- and the type checker in
+    tools/tscheck only covers core/**/*.ts, so an .ets file can carry the
+    bug all the way to a release.
+
+    The real instance this was written for: Index.ets imported the
+    module-level function `dataFingerprint` and then called
+    `this.dataFingerprint(dm)`, which crashed every dialog-routed analysis
+    before it ran.
+    """
+    problems = []
+    for name, body, base_line in _struct_bodies(src):
+        declared = set()
+        for pat in _MEMBER_PATTERNS:
+            for m in pat.finditer(body):
+                declared.add(m.group(1))
+        # `this.x = ...` inside a method declares the member too.
+        for m in re.finditer(r'\bthis\.([A-Za-z_$][\w$]*)\s*(?:=[^=]|\+=|-=|\*=|/=)', body):
+            declared.add(m.group(1))
+        for m in re.finditer(r'\bthis\.([A-Za-z_$][\w$]*)', body):
+            member = m.group(1)
+            if member in declared or member in FRAMEWORK_MEMBERS:
+                continue
+            line = base_line + body.count('\n', 0, m.start())
+            problems.append(
+                f'line {line}: `this.{member}` is not a member of struct {name} '
+                f'(no declaration found) -- either declare it or call the '
+                f'module-level function directly')
     return problems
 
 

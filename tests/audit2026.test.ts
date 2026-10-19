@@ -12,7 +12,7 @@ import { describe, it, expect } from './runner.ts';
 
 import { Matrix } from '../entry/src/main/core/math/Matrix.ts';
 import { anova, kruskalWallis, pca } from '../entry/src/main/core/analysis/statistics/index.ts';
-import { pF, pchisq, pt, gammainc, qchisq } from '../entry/src/main/core/math/stats.ts';
+import { pF, pchisq, pt, qt, gammainc, qchisq } from '../entry/src/main/core/math/stats.ts';
 import { erf, erfc, betainc, chi2CDF, fCDF, tCDF, normCDF } from '../entry/src/main/core/math/special.ts';
 import { poisson, seed as seedRng } from '../entry/src/main/core/math/random.ts';
 import { cohortSurvivorship, fitOU } from '../entry/src/main/core/analysis/macroevolution/index.ts';
@@ -77,16 +77,22 @@ describe('audit: p-value machinery was inverted', () => {
   });
 
   it('t and chi-square quantiles still invert their CDFs after the rewrite', () => {
-    expect(pt(1.959963985, 10)).toBeCloseTo(0.975, 6);
-    expect(qchisq(0.95, 10)).toBeCloseTo(18.30703805, 5);
+    // 1.959963985 is the NORMAL 0.975 quantile. With df = 10 the t
+    // distribution has heavier tails, so P(T <= 1.96) is 0.9608, NOT 0.975 —
+    // the old expectation of 0.975 was the normal approximation and only
+    // survived because the runner treated the tolerance as an absolute 6.
+    expect(pt(1.959963985, 10)).toBeCloseTo(0.9607795354229467, 12);
+    expect(qchisq(0.95, 10)).toBeCloseTo(18.30703805, 7);
+    // A quantile must invert its own CDF.
+    expect(pt(qt(0.975, 10), 10)).toBeCloseTo(0.975, 10);
   });
 });
 
 describe('audit: special.ts returned wrong values', () => {
   it('erf returns erf, not erfc — the two had been swapped', () => {
-    expect(erf(0.5)).toBeCloseTo(0.5204998778, 12);
-    expect(erf(1.0)).toBeCloseTo(0.8427007929, 12);
-    expect(erf(2.0)).toBeCloseTo(0.9953222650, 12);
+    expect(erf(0.5)).toBeCloseTo(0.5204998778130469, 12);
+    expect(erf(1.0)).toBeCloseTo(0.8427007929497153, 12);
+    expect(erf(2.0)).toBeCloseTo(0.9953222650189527, 12);
   });
 
   it('erf no longer reports 0.9693 for 0.5 (an 86% error)', () => {
@@ -94,8 +100,8 @@ describe('audit: special.ts returned wrong values', () => {
     // kernel constant 0.3275911 written into the polynomial's a1 slot and the
     // denominator as 1 + 0.5*x^2. It also carried a "matches scipy within
     // 1e-15" comment that was never true.
-    expect(erf(0.1)).toBeCloseTo(0.1124629160, 12);
-    expect(erf(0.3)).toBeCloseTo(0.3286267595, 12);
+    expect(erf(0.1)).toBeCloseTo(0.11246291601828497, 12);
+    expect(erf(0.3)).toBeCloseTo(0.32862675945912756, 12);
   });
 
   it('erfc is the complement of erf at both signs', () => {
@@ -103,12 +109,15 @@ describe('audit: special.ts returned wrong values', () => {
       expect(erfc(x)).toBeCloseTo(1 - erf(x), 12);
       expect(erfc(-x)).toBeCloseTo(2 - erfc(x), 12);
     }
-    expect(erfc(1.0)).toBeCloseTo(0.1572992071, 12);
+    expect(erfc(1.0)).toBeCloseTo(0.15729920705028466, 12);
   });
 
   it('erfc stays accurate in the tail', () => {
-    expect(erfc(4)).toBeCloseTo(1.5417258e-08, 15);
-    expect(erfc(5)).toBeCloseTo(1.5374598e-12, 18);
+    expect(erfc(4)).toBeCloseTo(1.5417257914762672e-08, 15);
+    // At x = 5 the value is 1.5e-12, so "18 decimal places" would demand an
+    // absolute accuracy of 5e-19 — far beyond the ~2e-17 this approximation
+    // delivers. Assert the absolute error instead.
+    expect(erfc(5)).toBeWithin(1.5374598e-12, 1e-15);
   });
 
   it('chi2CDF no longer returns -8.2e+27 for a small chi-square', () => {
@@ -200,9 +209,27 @@ describe('audit: analysis-level regressions', () => {
     expect(tree.computeParsimonyScore({ A: '0', B: '1', C: '0', D: '1' }).treeLength).toBe(2);
     expect(tree.computeParsimonyScore({ A: '0', B: '1', C: '2', D: '3' }).treeLength).toBe(3);
     expect(tree.computeParsimonyScore({ A: '0', B: '0', C: '0', D: '0' }).treeLength).toBe(0);
-    // 1 variable site, minimum possible steps 1 -> CI = 1/2, RI = 1/(4-1) = 1/3.
-    expect(tree.computeConsistencyIndex({ A: '0', B: '1', C: '0', D: '1' })).toBeCloseTo(0.5, 12);
-    expect(tree.computeRetentionIndex({ A: '0', B: '1', C: '0', D: '1' })).toBeCloseTo(1 / 3, 12);
+    // Consistency / retention index, textbook definition (Kluge & Farris 1979):
+    //   m = number of parsimony-informative sites (>= 2 states, each >= 2x),
+    //   s = steps the informative sites need on THIS tree,
+    //   L = minimum possible steps (one per extra state of the character),
+    //   g = maximum possible steps on this tree (one per internal node).
+    //   CI = (m - s) / (m - L)      RI = (g - s) / (g - m)
+    // The site 0/1/0/1 is informative: m = 1, s = 2 steps, L = 1 (a binary
+    // character needs one step), and ((A,B),(C,D)) has three internal nodes,
+    // so g = 3.
+    //   CI: m - L = 1 - 1 = 0 -> the textbook ratio is 0/0 and the index is
+    //       UNDEFINED (that is the case for EVERY binary-only data set). The
+    //       repo convention for an undefined index is 1 - the same guard the
+    //       old `treeLength === 0` branch used - so CI reads as 1 here. It
+    //       must NOT be read as "this tree has no homoplasy".
+    //   RI: (3 - 2) / (3 - 1) = 1/2.
+    // The old expectations were CI = 0.5 and RI = 1/3: CI divided the number
+    // of VARIABLE sites (not the informative ones) by the tree length, and RI
+    // used the (g - s) / g convention. Both were replaced by the textbook
+    // formula, so both numbers changed.
+    expect(tree.computeConsistencyIndex({ A: '0', B: '1', C: '0', D: '1' })).toBeWithin(1, 1e-12);
+    expect(tree.computeRetentionIndex({ A: '0', B: '1', C: '0', D: '1' })).toBeWithin(1 / 2, 1e-12);
   });
 
   it('the free fitchParsimony agrees with the method on the same tree', () => {
@@ -288,7 +315,10 @@ describe('audit: reproducibility', () => {
     seedRng(1);
     let s = 0;
     for (let i = 0; i < 2000; i++) s += poisson(3);
-    expect(s / 2000).toBeCloseTo(3, 1);
+    // The mean of 2000 draws has a standard error of sqrt(3/2000) ~ 0.039, so
+    // the sample mean must be judged against ~4 standard errors, not against
+    // "one decimal place".
+    expect(s / 2000).toBeWithin(3, 0.15);
   });
 
   it('fitOU refines past the coarse grid instead of stopping after 1-2 steps', () => {

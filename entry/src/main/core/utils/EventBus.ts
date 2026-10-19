@@ -23,10 +23,19 @@ export class EventBus{
     this._l.get(e)?.delete(c);
   }
 
+  /**
+   * Subscribe for exactly one emission.
+   *
+   * The wrapper unsubscribes BEFORE it calls the callback. It used to
+   * unsubscribe afterwards, so a callback that threw left the wrapper in the
+   * subscription table: the next `emit` called it again (measured: a once
+   * callback that throws ran twice instead of once). The exception is still
+   * swallowed by `emit` — it is logged, not propagated.
+   */
   once(e:string, c:EventCallback): void {
     const w: EventCallback = (...a: unknown[]) => {
-      c(...a);
       this.off(e, w);
+      c(...a);
     };
     this.on(e, w);
   }
@@ -42,16 +51,19 @@ export class EventBus{
   emit(e:string, ...a:unknown[]): void {
     this._h.push({e, a, t: Date.now()});
     if (this._h.length > EventBus.MAX_HISTORY) this._h.shift();
-    // Collect exact + wildcard listeners; iterate over shallow copies to be
-    // safe against modification during iteration; one listener throwing must
-    // not break the others.
-    const callbacks: EventCallback[] = [];
+    // Collect exact + wildcard listeners. The subscription set is re-checked
+    // immediately before each callback runs, so a listener that unsubscribes
+    // another listener during this emit does NOT get that listener called
+    // (the previous snapshot semantics called it anyway). One listener
+    // throwing must not break the others.
+    const callbacks: { pattern: string; cb: EventCallback }[] = [];
     for (const [pattern, listeners] of this._l) {
-      if (this._matches(pattern, e)) callbacks.push(...listeners);
+      if (this._matches(pattern, e)) for (const cb of listeners) callbacks.push({ pattern, cb });
     }
-    for (const c of callbacks) {
+    for (const { pattern, cb } of callbacks) {
+      if (!this._l.get(pattern)?.has(cb)) continue; // unsubscribed during this emit
       try {
-        c(...a);
+        cb(...a);
       } catch (x) {
         console.error(x);
       }

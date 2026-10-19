@@ -35,10 +35,28 @@ export class Assertion {
     const a = JSON.stringify(this.actual), b = JSON.stringify(expected);
     if (a !== b) throw new Error(`expected ${b}, got ${a}`);
   }
-  toBeCloseTo(expected: number, delta: number = 1e-6): void {
+  /**
+   * Jest semantics: `numDigits` is the number of DECIMAL PLACES.
+   *
+   * The suite was written this way (`toBeCloseTo(0.5, 10)` means "10 decimal
+   * places"), but this runner used to treat the second argument as an ABSOLUTE
+   * tolerance. That made 118 of the 145 numeric assertions vacuous: a p-value
+   * of 5.0 satisfied `toBeCloseTo(0.5, 10)`, because |5.0 - 0.5| = 4.5 <= 10.
+   * Use `toBeWithin` when a genuine absolute epsilon is meant.
+   */
+  toBeCloseTo(expected: number, numDigits: number = 2): void {
     const a = this.actual as number;
-    if (typeof a !== 'number' || !isFinite(a) || Math.abs(a - expected) > delta) {
-      throw new Error(`expected ≈ ${expected} (±${delta}), got ${this.actual}`);
+    const tolerance = Math.pow(10, -numDigits) / 2;
+    if (typeof a !== 'number' || !isFinite(a) || Math.abs(a - expected) > tolerance) {
+      throw new Error(
+        `expected ≈ ${expected} (±${tolerance} at ${numDigits} decimal places), got ${this.actual}`);
+    }
+  }
+  /** Absolute tolerance. Use this when the second argument is a real epsilon. */
+  toBeWithin(expected: number, absDelta: number): void {
+    const a = this.actual as number;
+    if (typeof a !== 'number' || !isFinite(a) || Math.abs(a - expected) > absDelta) {
+      throw new Error(`expected ≈ ${expected} (±${absDelta}), got ${this.actual}`);
     }
   }
   toBeGreaterThan(expected: number): void {

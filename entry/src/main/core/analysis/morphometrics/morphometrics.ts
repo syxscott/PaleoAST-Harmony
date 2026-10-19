@@ -93,6 +93,16 @@ function resolveShape(
     return { k: nLandmarks, d };
   }
   if (nDims !== undefined) {
+    if (nDims !== 2 && nDims !== 3) {
+      // Only 2D and 3D configurations exist.  A larger value used to be
+      // accepted here, and then `_detSmall` (which only knows the 2x2 and 3x3
+      // cases) silently computed the determinant of the leading 3x3 block of
+      // a 6x6 matrix -- so the reflection correction never fired and the
+      // rotation could come back with det < 0.
+      throw new MorphometricsError(
+        `nDims must be 2 or 3 (dimensions per landmark), got ${nDims}`,
+      );
+    }
     if (flatDim % nDims !== 0) {
       throw new MorphometricsError(`Flat dimension ${flatDim} not divisible by nDims=${nDims}`);
     }
@@ -127,6 +137,10 @@ function _centroidSize(cfg: number[][]): number {
  * R = V·Uᵀ from the SVD of H = targetᵀ·reference; when det(R) < 0 the last
  * row of Vt is flipped (proper-rotation correction; Bookstein 1989,
  * Dryden & Mardia 2016, Morpho::procSym).
+ *
+ * Convention: R is the COLUMN-vector rotation (p' = R·p).  Landmarks are
+ * stored as ROWS, so the superimposition is ``cfg @ Rᵀ`` — see
+ * {@link _rotateConfig}, which is where that transpose used to be lost.
  */
 function _findRotation(reference: number[][], target: number[][]): number[][] {
   const k = target.length, m = target[0].length;
@@ -168,8 +182,17 @@ function _rotateConfig(cfg: number[][], R: number[][]): number[][] {
   const out: number[][] = [];
   for (let i = 0; i < k; i++) {
     const p = new Array<number>(m).fill(0);
+    // cfg' = cfg @ Rᵀ, i.e. p[b] = Σ_a cfg[a] · R[b][a].
+    //
+    // The old code accumulated `cfg[i][a] * R[a][b]`, which is cfg @ R — the
+    // TRANSPOSE of the superimposition.  R comes out of the SVD as the
+    // column-vector rotation (p' = R·p), so applying it to row vectors needs
+    // Rᵀ.  With the transpose missing, every rotated specimen was mirrored
+    // back onto the consensus and the iteration never converged: a rigid
+    // pair (rotation + translation) came back with Procrustes distances
+    // 0.2370 / 0.2370 and `converged: false` after the full 100 iterations.
     for (let a = 0; a < m; a++)
-      for (let b = 0; b < m; b++) p[b] += cfg[i][a] * R[a][b];
+      for (let b = 0; b < m; b++) p[b] += cfg[i][a] * R[b][a];
     out.push(p);
   }
   return out;
@@ -190,6 +213,13 @@ function _rotateConfig(cfg: number[][], R: number[][]): number[][] {
  * @param nLandmarks     landmarks per specimen (optional)
  * @param nDims          dimensions per landmark, 2 or 3 (optional)
  * @param nComponents    alias for ``nDims`` (optional)
+ *
+ * NOTE on the two ``nComponents``: the ARGUMENT is an alias of ``nDims``
+ * (dimensions per landmark, 2 or 3), while the RESULT field
+ * ``GPAResult.nComponents`` is the total number of coordinates per specimen
+ * (n_landmarks × n_dims).  The two used to mean opposite things without
+ * either being flagged; passing 6 as the argument was silently read as
+ * "6 dimensions per landmark".  The argument is now validated to 2 or 3.
  */
 export function gpa(
   configurations: Matrix,
@@ -639,6 +669,20 @@ export function allometry(configurations: Matrix, nComponents?: number, nDims: n
       }
     }
     const s = Math.sqrt(size);
+    if (!(s > 0) || !Number.isFinite(s)) {
+      // A specimen whose landmarks all coincide has centroid size 0, so
+      // log(CS) = -Infinity.  That used to flow straight into the design
+      // matrix: XᵀX then contained ±Infinity, Gauss-Jordan produced
+      // Infinity - Infinity = NaN, the pivot check `Math.abs(pivot) < 1e-15`
+      // never fired (NaN comparisons are false), and the regression came
+      // back with rSquared = NaN, F = 0 and isometryPValue = 1.0 -- i.e. a
+      // confident "no allometry" for a fit that never happened.  Refuse the
+      // specimen instead.
+      throw new MorphometricsError(
+        `allometry: specimen ${i} has centroid size ${s} (all its landmarks coincide). ` +
+        `log(centroid size) is undefined, so the size-shape regression cannot be fitted.`,
+      );
+    }
     cs.push(s);
     logCS.push(Math.log(s));
   }
@@ -738,7 +782,11 @@ function inv_general(A: Matrix): Matrix {
         const t = aug.get(col, j); aug.set(col, j, aug.get(maxRow, j)); aug.set(maxRow, j, t);
       }
     const pivot = aug.get(col, col);
-    if (Math.abs(pivot) < 1e-15) throw new MorphometricsError('allometry: singular design matrix');
+    // `!Number.isFinite(pivot)` also catches NaN, which the magnitude test
+    // alone let through (NaN < 1e-15 is false).
+    if (!Number.isFinite(pivot) || Math.abs(pivot) < 1e-15) {
+      throw new MorphometricsError('allometry: singular design matrix');
+    }
     for (let j = 0; j < 2 * n; j++) aug.set(col, j, aug.get(col, j) / pivot);
     for (let row = 0; row < n; row++) {
       if (row === col) continue;
@@ -1064,6 +1112,28 @@ export interface TPSResult {
 export function tpsDeformation(sourceLandmarks: number[][], targetLandmarks: number[][], gridSize: number = 15): TPSResult {
   const n = sourceLandmarks.length;
   const dim = 2;
+  if (n === 0) throw new MorphometricsError('tpsDeformation requires at least one landmark');
+  if (sourceLandmarks.length !== targetLandmarks.length) {
+    throw new MorphometricsError(
+      `tpsDeformation: source has ${sourceLandmarks.length} landmarks, target has ${targetLandmarks.length}`,
+    );
+  }
+  // `dim` is hard-coded to 2 below (the affine basis is [1, x, y] and the
+  // kernel is the planar r^2 log r).  A 3D configuration used to be accepted
+  // and silently truncated: the z coordinates were dropped from the affine
+  // part and from the kernel distances, so the returned grid described a
+  // different, planar deformation than the one that was asked for.
+  const srcDim = sourceLandmarks[0]?.length ?? 0;
+  const tgtDim = targetLandmarks[0]?.length ?? 0;
+  if (srcDim !== 2 || tgtDim !== 2) {
+    throw new MorphometricsError(
+      `tpsDeformation only supports 2D landmarks (the source has ${srcDim} and the target ` +
+      `${tgtDim} coordinates per landmark). Use tpsAnalyze / tpsWarpGrid for 3D configurations.`,
+    );
+  }
+  if (gridSize < 2) {
+    throw new MorphometricsError(`tpsDeformation needs a grid of at least 2x2 points (got ${gridSize})`);
+  }
 
   // Build TPS weight matrix
   const K = Matrix.zeros(n, n);
@@ -1146,7 +1216,19 @@ function solveLinearSystem(A: Matrix, b: Float64Array): Float64Array {
     for (let row = col + 1; row < n; row++) if (Math.abs(aug.get(row, col)) > Math.abs(aug.get(maxRow, col))) maxRow = row;
     if (maxRow !== col) for (let j = 0; j <= n; j++) { const t = aug.get(col, j); aug.set(col, j, aug.get(maxRow, j)); aug.set(maxRow, j, t); }
     const pivot = aug.get(col, col);
-    if (Math.abs(pivot) < 1e-15) continue;
+    // A singular TPS block system (e.g. collinear source landmarks, whose
+    // affine basis [1, x, y] is linearly dependent) used to be SKIPPED --
+    // `continue` left the column un-eliminated and the solve returned a
+    // finite garbage solution: four collinear landmarks produced a
+    // deformation grid in which every point had x = -1.  The sibling
+    // implementations (PartialGPA._solveLinearSystem, TPSAnalyzer._solveBlock)
+    // both throw on a singular system; this one now does too.
+    if (!Number.isFinite(pivot) || Math.abs(pivot) < 1e-15) {
+      throw new MorphometricsError(
+        'tpsDeformation: singular TPS block system -- the source landmarks are degenerate ' +
+        '(e.g. collinear), so the thin-plate spline is not determined.',
+      );
+    }
     for (let j = 0; j <= n; j++) aug.set(col, j, aug.get(col, j) / pivot);
     for (let row = 0; row < n; row++) { if (row === col) continue; const f = aug.get(row, col); for (let j = 0; j <= n; j++) aug.set(row, j, aug.get(row, j) - f * aug.get(col, j)); }
   }
@@ -1247,16 +1329,44 @@ export function getShapeAtWarp(
 }
 
 /**
+ * Select an arbitrary subset of columns, in the given order.
+ *
+ * `Matrix.sliceCols` only takes a contiguous range, so the block split
+ * needed its own helper.  The definition of `_selectColumns` was deleted
+ * (commit 3a78612, "dropped the third, unverified eigendecomposition")
+ * while its two call sites stayed behind, so every non-'size_matched'
+ * division threw `ReferenceError: _selectColumns is not defined` — the
+ * default mode included, and the UI quick action
+ * "Centroid Configuration Blocks" hit it 100% of the time.  (TypeScript's
+ * TS2304 on the missing name shows the path was never compiled.)
+ */
+function _selectColumns(M: Matrix, cols: number[]): Matrix {
+  const out = Matrix.zeros(M.rows, cols.length);
+  for (let i = 0; i < M.rows; i++)
+    for (let j = 0; j < cols.length; j++) out.set(i, j, M.get(i, cols[j]));
+  return out;
+}
+
+/**
  * Divide landmark configurations into two blocks for PLS analysis.
+ *
+ * The input uses the module-wide COORDINATE-MAJOR layout — the one `gpa`
+ * produces and `allometry`/`efa` read: landmark j owns the columns
+ * j (x) and n_landmarks + j (y).  (The old column arithmetic assumed the
+ * landmark-major layout [x₀,y₀,x₁,y₁,…] and therefore picked the wrong
+ * columns of a GPA-aligned matrix: it read the x block of the second half
+ * of the landmarks as if it were their y coordinates.)
  *
  * @param alignedConfigs (n_specimens, n_landmarks*n_dims) aligned data
  * @param division       'anterior_posterior': contiguous split of landmarks
  *                       at the midpoint;
- *                       'size_matched': split of the flattened landmark
+ *                       'size_matched': split of the flattened coordinate
  *                       columns at the midpoint (API-compatible with the
  *                       Python mode of the same name; the size-partition
  *                       dead code of the original implementation has no
- *                       analogue here);
+ *                       analogue here).  Note that in the coordinate-major
+ *                       layout this separates the x block from the y block
+ *                       — it is NOT a landmark split;
  *                       'random': random permutation of landmarks, split
  *                       at the midpoint.
  * @param randomSeed     optional seed for the 'random' division (seeded
@@ -1268,11 +1378,21 @@ export function divideConfigurationIntoBlocks(
   division: 'anterior_posterior' | 'size_matched' | 'random' = 'anterior_posterior',
   randomSeed?: number,
 ): [Matrix, Matrix] {
-  const nLandmarks = alignedConfigs.cols / 2;
   const p = alignedConfigs.cols;
+  if (p % 2 !== 0) {
+    throw new MorphometricsError(
+      `divideConfigurationIntoBlocks needs an even number of columns (2 coordinates per landmark), got ${p}`,
+    );
+  }
+  const nLandmarks = p / 2;
+  if (nLandmarks < 2) {
+    throw new MorphometricsError(
+      `divideConfigurationIntoBlocks needs at least 2 landmarks (${p} columns), got ${nLandmarks}`,
+    );
+  }
 
   if (division === 'size_matched') {
-    // Split the flattened landmark columns at the midpoint
+    // Split the flattened coordinate columns at the midpoint
     const midCols = Math.floor(p / 2);
     return [alignedConfigs.sliceCols(0, midCols), alignedConfigs.sliceCols(midCols, p)];
   }
@@ -1294,19 +1414,23 @@ export function divideConfigurationIntoBlocks(
     secondHalf = Array.from({ length: nLandmarks - mid }, (_, i) => mid + i);
   }
 
-  // Convert landmark indices to flattened column indices (landmark-major)
-  const blockACols: number[] = [];
-  const blockBCols: number[] = [];
-  for (const lm of firstHalf) { for (let d = 0; d < 2; d++) blockACols.push(lm * 2 + d); }
-  for (const lm of secondHalf) { for (let d = 0; d < 2; d++) blockBCols.push(lm * 2 + d); }
-  blockACols.sort((a, b) => a - b);
-  blockBCols.sort((a, b) => a - b);
+  // Convert landmark indices to flattened column indices (coordinate-major:
+  // landmark j owns the columns j and nLandmarks + j).
+  const blockACols = _columnsOfLandmarks(firstHalf, nLandmarks);
+  const blockBCols = _columnsOfLandmarks(secondHalf, nLandmarks);
 
   // Select exactly the permuted columns (not a contiguous slice)
   const blockA = _selectColumns(alignedConfigs, blockACols);
   const blockB = _selectColumns(alignedConfigs, blockBCols);
 
   return [blockA, blockB];
+}
+
+/** Flattened column indices of the given landmarks (coordinate-major). */
+function _columnsOfLandmarks(landmarks: number[], nLandmarks: number): number[] {
+  const cols: number[] = [];
+  for (const lm of landmarks) { cols.push(lm); cols.push(nLandmarks + lm); }
+  return cols.sort((a, b) => a - b);
 }
 
 // ─── Re-exports: Eigenshape / 2B-PLS Integration / TPS basis ───────────────────

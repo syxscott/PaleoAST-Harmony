@@ -20,7 +20,7 @@
  * - Rohlf, F.J. & Slice, D. (1990). Syst. Zool. 39: 40-59.
  */
 
-import { buildKernelMatrix, bendingEnergy } from '../morphometrics/tpsKernel';
+import { buildKernelMatrix, buildKernelMatrix3D, bendingEnergy } from '../morphometrics/tpsKernel';
 import { Matrix } from '../../math/Matrix';
 import { svd } from '../../math/linalg';
 import { gpa3d } from './GPA3D';
@@ -67,7 +67,19 @@ export function slideLandmarks(
   // Clone landmarks to avoid mutation
   let currentLM = landmarks.map(p => [...p]);
   const nLM = currentLM.length;
-  const dim = 3;
+  // The dimensionality is taken from the data instead of being assumed to be
+  // 3.  A 2D configuration used to be fed through 3-component arithmetic
+  // (curve[i][2], landmarks[i][2], ...), which produced NaN tangents, NaN
+  // gradients and NaN landmark coordinates; the NaN then slipped through the
+  // "nearest curve point" search (NaN < minDist is false, so the search kept
+  // the first vertex) and every semi-landmark silently collapsed onto the
+  // FIRST point of the curve.
+  const dim = currentLM[0]?.length ?? 0;
+  if (dim !== 2 && dim !== 3) {
+    throw new Error(
+      `slideLandmarks needs 2D or 3D landmarks (got ${dim} coordinates per landmark)`,
+    );
+  }
   // Clamp alpha into the sane sliding range (mirrors the Python slider)
   const alpha = Math.max(0.01, Math.min(1.0, slidingAlpha));
 
@@ -91,28 +103,26 @@ export function slideLandmarks(
       // 4. Slide semi-landmark along tangent
 
       // Build curve parameterization with uniform spacing
-      const curveParams = _computeCurveParameters(curvePoints);
-      const tangents = _computeTangents(curvePoints);
+      const curveParams = _computeCurveParameters(curvePoints, dim);
+      const tangents = _computeTangents(curvePoints, dim);
 
       for (const idx of semiIndices) {
         // Find nearest curve point and parameter
-        const nearest = _findNearestCurvePoint(currentLM[idx], curvePoints);
-        const t = nearest.t; // parameter value
-        void t;
+        const nearest = _findNearestCurvePoint(currentLM[idx], curvePoints, curveParams);
         const tangent = tangents[nearest.idx];
 
         // Compute TPS kernel matrix using all semi-landmark positions
         const semiPositions = semiIndices.map(i => currentLM[i]);
-        const K = buildKernelMatrix(semiPositions, 2); // 2D curve, but positions are 3D
+        const K = _buildSlideKernel(semiPositions, dim);
 
         // Get the gradient direction from TPS bending energy
         const gradient = _computeBendingEnergyGradient(
-          currentLM, semiIndices, idx, curvePoints, K
+          currentLM, semiIndices, idx, curvePoints, K, dim
         );
 
         // Project gradient onto tangent direction (only tangent component slides)
         const tangentNorm = Math.sqrt(tangent[0]**2 + tangent[1]**2 + tangent[2]**2);
-        if (tangentNorm < 1e-10) continue;
+        if (!(tangentNorm >= 1e-10)) continue;
 
         const tangentUnit = [
           tangent[0] / tangentNorm,
@@ -137,9 +147,7 @@ export function slideLandmarks(
         totalGradientNorm += gradNorm;
 
         // Slide along tangent: step size = slidingAlpha (now actually used)
-        currentLM[idx][0] -= alpha * gradDotT * tangentUnit[0];
-        currentLM[idx][1] -= alpha * gradDotT * tangentUnit[1];
-        currentLM[idx][2] -= alpha * gradDotT * tangentUnit[2];
+        for (let d = 0; d < dim; d++) currentLM[idx][d] -= alpha * gradDotT * tangentUnit[d];
 
         // Snap back to curve (project onto nearest curve point)
         const onCurve = _projectOntoCurve(currentLM[idx], curvePoints, curveParams);
@@ -148,9 +156,15 @@ export function slideLandmarks(
 
       // Compute bending energy for convergence check
       const semiPositions = semiIndices.map(i => currentLM[i]);
-      const K = buildKernelMatrix(semiPositions, 2);
-      const weights = _estimateTPSWeights(semiPositions, curvePoints, K);
-      finalBE = bendingEnergy(K, weights, 2);
+      const K = _buildSlideKernel(semiPositions, dim);
+      const weights = _estimateTPSWeights(semiPositions, curvePoints, K, dim);
+      if (weights.length !== K.rows || weights[0]?.length !== dim) {
+        throw new Error(
+          `slideLandmarks: TPS weights (${weights.length}x${weights[0]?.length}) do not match ` +
+          `the kernel (${K.rows}x${K.rows}) and dim=${dim}`,
+        );
+      }
+      finalBE = bendingEnergy(K, weights, dim);
 
     } else {
       // PAM sliding: minimize Procrustes distance to reference
@@ -161,21 +175,22 @@ export function slideLandmarks(
         throw new Error('PAM sliding requires referenceLM (mean shape)');
       }
 
-      const tangents = _computeTangents(curvePoints);
+      const tangents = _computeTangents(curvePoints, dim);
+      const curveParams = _computeCurveParameters(curvePoints, dim);
 
       for (const idx of semiIndices) {
         // Find nearest curve point
-        const nearest = _findNearestCurvePoint(currentLM[idx], curvePoints);
+        const nearest = _findNearestCurvePoint(currentLM[idx], curvePoints, curveParams);
         const tangent = tangents[nearest.idx];
 
         // Compute Procrustes distance gradient
         const gradient = _computeProcrustesGradient(
-          currentLM, referenceLM, idx, nLM
+          currentLM, referenceLM, idx, nLM, dim
         );
 
         // Project onto tangent
         const tangentNorm = Math.sqrt(tangent[0]**2 + tangent[1]**2 + tangent[2]**2);
-        if (tangentNorm < 1e-10) continue;
+        if (!(tangentNorm >= 1e-10)) continue;
 
         const tangentUnit = [
           tangent[0] / tangentNorm,
@@ -191,12 +206,9 @@ export function slideLandmarks(
         totalGradientNorm += gradNorm;
 
         // Slide along tangent: step size = slidingAlpha (now actually used)
-        currentLM[idx][0] -= alpha * gradDotT * tangentUnit[0];
-        currentLM[idx][1] -= alpha * gradDotT * tangentUnit[1];
-        currentLM[idx][2] -= alpha * gradDotT * tangentUnit[2];
+        for (let d = 0; d < dim; d++) currentLM[idx][d] -= alpha * gradDotT * tangentUnit[d];
 
         // Project onto curve
-        const curveParams = _computeCurveParameters(curvePoints);
         const onCurve = _projectOntoCurve(currentLM[idx], curvePoints, curveParams);
         currentLM[idx] = [...onCurve];
       }
@@ -687,37 +699,37 @@ function _extendForward(points: number[][]): number[] {
 }
 
 /** Compute cumulative chord-length parameterization of a curve. */
-function _computeCurveParameters(curve: number[][]): number[] {
+function _computeCurveParameters(curve: number[][], dim: number = 3): number[] {
   const t: number[] = [0];
   for (let i = 1; i < curve.length; i++) {
     const dx = curve[i][0] - curve[i-1][0];
     const dy = curve[i][1] - curve[i-1][1];
-    const dz = curve[i][2] - curve[i-1][2];
+    const dz = dim === 3 ? curve[i][2] - curve[i-1][2] : 0;
     t.push(t[i-1] + Math.sqrt(dx*dx + dy*dy + dz*dz));
   }
   return t;
 }
 
 /** Compute unit tangent vectors at each curve point. */
-function _computeTangents(curve: number[][]): number[][] {
+function _computeTangents(curve: number[][], dim: number = 3): number[][] {
   const tangents: number[][] = [];
   for (let i = 0; i < curve.length; i++) {
     let tx: number, ty: number, tz: number;
     if (i === 0) {
       tx = curve[1][0] - curve[0][0];
       ty = curve[1][1] - curve[0][1];
-      tz = curve[1][2] - curve[0][2];
+      tz = dim === 3 ? curve[1][2] - curve[0][2] : 0;
     } else if (i === curve.length - 1) {
       tx = curve[i][0] - curve[i-1][0];
       ty = curve[i][1] - curve[i-1][1];
-      tz = curve[i][2] - curve[i-1][2];
+      tz = dim === 3 ? curve[i][2] - curve[i-1][2] : 0;
     } else {
       tx = curve[i+1][0] - curve[i-1][0];
       ty = curve[i+1][1] - curve[i-1][1];
-      tz = curve[i+1][2] - curve[i-1][2];
+      tz = dim === 3 ? curve[i+1][2] - curve[i-1][2] : 0;
     }
     const len = Math.sqrt(tx*tx + ty*ty + tz*tz);
-    if (len < 1e-10) {
+    if (!(len >= 1e-10)) {
       tangents.push([0, 0, 0]);
     } else {
       tangents.push([tx/len, ty/len, tz/len]);
@@ -726,57 +738,82 @@ function _computeTangents(curve: number[][]): number[][] {
   return tangents;
 }
 
-/** Find nearest point on curve and return its index and parameter value. */
+/**
+ * Find the nearest point on the curve.
+ *
+ * `t` is the CHORD-LENGTH parameter of that vertex (tParams[idx]), the same
+ * parameterization `_projectOntoCurve` works in.  It used to be the
+ * normalized INDEX (idx / (len - 1)) while the projection compared it
+ * against chord-length parameters — two different quantities in one
+ * formula, so `u = (t - tPrev) / (tCur - tPrev)` could go negative and
+ * extrapolated outside the segment.
+ */
 function _findNearestCurvePoint(
   point: number[],
-  curve: number[][]
+  curve: number[][],
+  tParams: number[]
 ): { idx: number; t: number } {
   let minDist = Infinity;
   let nearestIdx = 0;
   for (let i = 0; i < curve.length; i++) {
     const dx = point[0] - curve[i][0];
     const dy = point[1] - curve[i][1];
-    const dz = point[2] - curve[i][2];
+    const dz = (point[2] ?? 0) - (curve[i][2] ?? 0);
     const d = Math.sqrt(dx*dx + dy*dy + dz*dz);
     if (d < minDist) { minDist = d; nearestIdx = i; }
   }
-  return { idx: nearestIdx, t: nearestIdx / (curve.length - 1) };
+  return { idx: nearestIdx, t: tParams[nearestIdx] };
 }
 
-/** Project a point onto the nearest location on the curve. */
+/**
+ * Project a point onto the curve (the closest point of the polyline).
+ *
+ * The old version mixed two parameterizations — a normalized index from
+ * `_findNearestCurvePoint` against the chord-length parameters of the
+ * neighbouring vertices — so the semi-landmark was dropped onto an
+ * unrelated place of the curve: on a unit-spaced 5-point line, x = 0.5
+ * landed on 0.0, x = 1.5 on 0.25, x = 2.5 on 0.5 and x = 3.5 on 0.75.
+ * The projection is now the exact closest point of the polyline, expressed
+ * with the same chord-length parameterization.
+ */
 function _projectOntoCurve(
   point: number[],
   curve: number[][],
   tParams: number[]
 ): number[] {
-  const { idx, t } = _findNearestCurvePoint(point, curve);
+  if (curve.length === 0) throw new Error('slideLandmarks: the curve has no points');
+  if (curve.length === 1) return [...curve[0]].slice(0, point.length);
+  const d = point.length;
 
-  // Linear interpolation between neighboring curve points
-  if (idx === 0 || idx === curve.length - 1) {
-    return [...curve[idx]];
+  let best: number[] = [...curve[0]].slice(0, d);
+  let bestDist = Infinity;
+  for (let i = 0; i + 1 < curve.length; i++) {
+    const a = curve[i], b = curve[i + 1];
+    const segLen = tParams[i + 1] - tParams[i];
+    // Parameter of the point's projection onto the segment [a, b], in the
+    // same chord-length units as tParams.
+    let u = 0;
+    if (segLen > 1e-12) {
+      let dot = 0;
+      for (let c = 0; c < d; c++) dot += (point[c] - (a[c] ?? 0)) * ((b[c] ?? 0) - (a[c] ?? 0));
+      u = dot / (segLen * segLen);
+      if (u < 0) u = 0;
+      if (u > 1) u = 1;
+    }
+    const proj: number[] = [];
+    for (let c = 0; c < d; c++) proj.push((a[c] ?? 0) + u * ((b[c] ?? 0) - (a[c] ?? 0)));
+    let dist = 0;
+    for (let c = 0; c < d; c++) { const e = (point[c] ?? 0) - proj[c]; dist += e * e; }
+    if (dist < bestDist) { bestDist = dist; best = proj; }
   }
+  return best;
+}
 
-  // Interpolate based on parameter distance to neighbors
-  const tCur = tParams[idx];
-  const tPrev = tParams[idx - 1];
-  const tNext = tParams[idx + 1];
-
-  let u: number;
-  if (t >= tCur) {
-    u = (t - tCur) / (tNext - tCur);
-    return [
-      curve[idx][0] + u * (curve[idx+1][0] - curve[idx][0]),
-      curve[idx][1] + u * (curve[idx+1][1] - curve[idx][1]),
-      curve[idx][2] + u * (curve[idx+1][2] - curve[idx][2])
-    ];
-  } else {
-    u = (t - tPrev) / (tCur - tPrev);
-    return [
-      curve[idx-1][0] + u * (curve[idx][0] - curve[idx-1][0]),
-      curve[idx-1][1] + u * (curve[idx][1] - curve[idx-1][1]),
-      curve[idx-1][2] + u * (curve[idx][2] - curve[idx-1][2])
-    ];
-  }
+/** TPS kernel matrix for the sliding problem: planar r² log r, volumetric −|r|. */
+function _buildSlideKernel(semiPositions: number[][], dim: number): Matrix {
+  return dim === 2
+    ? buildKernelMatrix(semiPositions, 2)
+    : buildKernelMatrix3D(semiPositions);
 }
 
 /**
@@ -784,27 +821,42 @@ function _projectOntoCurve(
  * Uses a true Moore–Penrose pseudoinverse (the previous implementation
  * returned a diagonal-only approximation, which is wrong for any
  * non-diagonal kernel matrix).
+ *
+ * Layout: n × dim (one row per landmark, one column per coordinate) —
+ * `weights[j][c]` is the weight of landmark j on coordinate c.  The
+ * previous version returned dim-major (3 × n), but `bendingEnergy` indexes
+ * the weights as weights[j][c]; the two disagreed, so the energy was taken
+ * from the wrong coordinate components and, with four or more
+ * semi-landmarks, the index ran off the end of the array and threw
+ * "Cannot read properties of undefined (reading '0')".
  */
 function _estimateTPSWeights(
   semiPositions: number[][],
   curvePoints: number[][],
-  K: Matrix
+  K: Matrix,
+  dim: number
 ): number[][] {
   const n = semiPositions.length;
   const Kinv = _pseudoInverse(K, 1e-8);
   const weights: number[][] = [];
+  for (let j = 0; j < n; j++) weights.push(new Array<number>(dim).fill(0));
 
-  for (let d = 0; d < 3; d++) {
-    const target = curvePoints.slice(0, n).map(p => p[d]);
-    const w: number[] = [];
+  for (let c = 0; c < dim; c++) {
+    const target = curvePoints.slice(0, n).map(p => p[c] ?? 0);
     for (let i = 0; i < n; i++) {
       let s = 0;
       for (let j = 0; j < n; j++) s += Kinv.get(i, j) * target[j];
-      w.push(s);
+      weights[i][c] = s;
     }
-    weights.push(w);
   }
 
+  // Guard the layout contract the caller relies on.
+  if (weights.length !== n || weights.some(w => w.length !== dim)) {
+    throw new Error(
+      `slideLandmarks: internal TPS weight layout mismatch ` +
+      `(expected ${n}x${dim}, got ${weights.length}x${weights[0]?.length ?? 0})`,
+    );
+  }
   return weights;
 }
 
@@ -814,7 +866,8 @@ function _computeBendingEnergyGradient(
   semiIndices: number[],
   semiIdx: number,
   curvePoints: number[][],
-  K: Matrix
+  K: Matrix,
+  dim: number = 3
 ): number[] {
   // ∂E/∂x_i = sum_j K_ij * w_j (for each coordinate)
   // Simplified: gradient at semi-landmark i is proportional to
@@ -833,13 +886,14 @@ function _computeBendingEnergyGradient(
 
     const dx = landmarks[semiIndices[j]][0] - landmarks[semiIdx][0];
     const dy = landmarks[semiIndices[j]][1] - landmarks[semiIdx][1];
-    const dz = landmarks[semiIndices[j]][2] - landmarks[semiIdx][2];
+    const dz = dim === 3 ? landmarks[semiIndices[j]][2] - landmarks[semiIdx][2] : 0;
 
-    // Gradient of bending energy: d/dr (r² log r) = 2r log r + r
+    // Gradient of bending energy: d/dr (r² log r) = 2r log r + r  (2D kernel)
+    //                               d/dr (−|r|)   = −1         (3D kernel)
     const r = Math.sqrt(dx*dx + dy*dy + dz*dz);
-    if (r < 1e-10) continue;
+    if (!(r >= 1e-10)) continue;
 
-    const dUdr = 2 * r * Math.log(r) + r;
+    const dUdr = dim === 2 ? 2 * r * Math.log(r) + r : -1;
     const scale = kij / r;
 
     gradient[0] += scale * dUdr * dx;
@@ -856,7 +910,8 @@ function _computeProcrustesGradient(
   landmarks: number[][],
   reference: number[][],
   idx: number,
-  nLM: number
+  nLM: number,
+  dim: number = 3
 ): number[] {
   // Gradient of squared Procrustes distance w.r.t. landmark position:
   // ∂/∂x_i (d²) = -2 * (ref_i - specimen_i) / nLM
@@ -864,7 +919,7 @@ function _computeProcrustesGradient(
   const gradient = [
     (landmarks[idx][0] - reference[idx][0]) * 2 / nLM,
     (landmarks[idx][1] - reference[idx][1]) * 2 / nLM,
-    (landmarks[idx][2] - reference[idx][2]) * 2 / nLM
+    (dim === 3 ? (landmarks[idx][2] ?? 0) - (reference[idx][2] ?? 0) : 0) * 2 / nLM
   ];
 
   return gradient;

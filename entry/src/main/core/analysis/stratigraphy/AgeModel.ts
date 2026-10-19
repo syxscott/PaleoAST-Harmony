@@ -6,6 +6,7 @@
  */
 import { lowess } from '../../math/LOWESS';
 import { pchipInterpolate } from './StratExtended';
+import { ComputationError } from '../../utils/Exceptions';
 export interface StratigraphicSection {
   name: string;
   heights: number[];
@@ -22,6 +23,9 @@ export interface AgeModelResult {
   confidenceIntervals: [number[], number[]];
   sedimentationRates: number[];
   modelType: 'linear' | 'spline';
+  /** True for the samples that lie outside the constrained height interval
+   *  (their age is extrapolated, not interpolated). */
+  extrapolated: boolean[];
 }
 
 export function buildAgeModel(
@@ -35,33 +39,54 @@ export function buildAgeModel(
   const ca = sorted.map(c => c[1]);
   const ce = sorted.map(c => c[2]);
 
+  // A repeated height makes the interpolation grid ambiguous: the PCHIP
+  // secant became 0/0 = NaN and the whole age curve turned into NaN. The
+  // duplicate is reported instead of being silently interpolated.
+  for (let i = 1; i < ch.length; i++) {
+    if (ch[i] === ch[i - 1]) {
+      throw new ComputationError(
+        `buildAgeModel: duplicate age constraint at height ${ch[i]} — ` +
+        'the constraint heights must be distinct');
+    }
+  }
+
   // 'spline' uses PCHIP (monotone cubic Hermite, Fritsch-Carlson 1980):
   // sparse age constraints make natural cubic splines oscillate and can
   // produce negative sedimentation rates; PCHIP is shape-preserving
   // (2026-09 review H9, matches scipy PchipInterpolator).
+  // Outside the constrained interval both models now behave the same way:
+  // the age is linearly extrapolated along the end segment and flagged.
   const modeled = modelType === 'linear'
     ? _linearInterp(section.heights, ch, ca)
     : section.heights.map(h => pchipInterpolate(ch, ca, h));
+
+  const lo = ch[0], hi = ch[ch.length - 1];
+  const extrapolated = section.heights.map(h => h < lo || h > hi);
+  // Ages are Ma before present, so an extrapolated age can never be
+  // younger than the present: clamp it at 0 rather than reporting a
+  // negative age. (The 'linear' model truncates and never goes negative.)
+  const modeledAges = modeled.map((a, i) => (extrapolated[i] ? Math.max(0, a) : a));
 
   // Sedimentation rate (geological convention: age decreases with height)
   const rates = new Array(section.heights.length).fill(0);
   for (let i = 1; i < section.heights.length; i++) {
     const dh = section.heights[i] - section.heights[i - 1];
-    const da = modeled[i] - modeled[i - 1];
+    const da = modeledAges[i] - modeledAges[i - 1];
     if (Math.abs(da) > 1e-12) rates[i] = Math.abs(dh / da);  // Always positive, magnitude only
     // Note: using Math.abs() because geological age convention is "Ma before present" (decreasing upward)
     else rates[i] = rates[i - 1];
   }
 
   const meanErr = ce.reduce((s, e) => s + e, 0) / ce.length;
-  const ciLower = modeled.map(a => a - 1.96 * meanErr);
-  const ciUpper = modeled.map(a => a + 1.96 * meanErr);
+  const ciLower = modeledAges.map(a => a - 1.96 * meanErr);
+  const ciUpper = modeledAges.map(a => a + 1.96 * meanErr);
 
   return {
-    section, modeledAges: modeled,
+    section, modeledAges,
     confidenceIntervals: [ciLower, ciUpper],
     sedimentationRates: rates,
-    modelType
+    modelType,
+    extrapolated
   };
 }
 
@@ -86,7 +111,14 @@ export function computeSedimentationRate(
   let smoothed = rates.slice();
   if (smooth && h.length > 4) {
     try {
-      smoothed = lowess(h, rates, frac, 0);
+      // rates[0] is a placeholder: there is no interval above the first
+      // sample, so it stays 0. Feeding that 0 to the smoother dragged the
+      // top of the curve down (a constant rate of 5 came back as
+      // 1.86/3.04/4.14 for the first three samples). The fit therefore
+      // runs on the real rates only, and the first entry of the smoothed
+      // series is the first smoothed rate.
+      const sub = lowess(h.slice(1), rates.slice(1), frac, 0);
+      smoothed = [sub[0], ...sub];
     } catch {
       smoothed = rates;
     }

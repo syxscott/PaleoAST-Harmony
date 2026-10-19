@@ -4,6 +4,10 @@
 import { Matrix } from '../../math/Matrix';
 import * as linalg from '../../math/linalg';
 import { seed, rand, randint } from '../../math/random';
+// Only `qnorm` is used from stats: the standard-normal quantile is the only
+// correct way to turn a confidence level into a z multiplier.
+import { qnorm } from '../../math/stats';
+import { ComputationError } from '../../utils/Exceptions';
 
 /**
  * Diversity indices for a single sample.
@@ -129,10 +133,23 @@ export function chao1ConfidenceInterval(
   }
 
   // Log-transformed CI (Chao & Jost 2012): K = exp(z·sqrt(ln(1 + var/ĉ²)))
-  const z = 1.959963984540054; // two-sided 95%; scaled for other levels below
-  const zLevel = z * Math.sqrt(1 / 0.95 === 1 ? 1 : confidenceLevel / 0.95); // linear approximation for non-95 levels
+  //
+  // `z` must be the two-sided standard-normal quantile of the requested
+  // confidence level: z = Φ⁻¹(1 − (1 − cl)/2).
+  //
+  // The previous expression `z95 · √(cl/0.95)` was not a quantile function at
+  // all: it produced a 90% interval WIDER than the true 90% one (z = 1.908
+  // instead of 1.645) and a 99% interval NARROWER than the true 99% one
+  // (z = 2.001 instead of 2.576). Only 0.95 came out right, and only because
+  // √1 = 1 — so every other confidence level silently mis-stated the
+  // uncertainty of an estimator that ends up in a paper.
+  if (!(confidenceLevel > 0 && confidenceLevel < 1)) {
+    throw new ComputationError(
+      `chao1ConfidenceInterval: confidenceLevel must lie strictly between 0 and 1, got ${confidenceLevel}`);
+  }
+  const z = qnorm(1 - (1 - confidenceLevel) / 2);
   const logTerm = Math.log(1 + varChao1 / (chao1 * chao1));
-  const K = Math.exp(zLevel * Math.sqrt(Math.max(0, logTerm)));
+  const K = Math.exp(z * Math.sqrt(Math.max(0, logTerm)));
   return { chao1, ciLower: chao1 / K, ciUpper: chao1 * K };
 }
 
@@ -314,6 +331,9 @@ export function nullModel(
   algorithm: 'swap' | 'shuffle' = 'swap'
 ): NullModelResult {
   const nSpecies = presenceMatrix.length, nSites = presenceMatrix[0].length;
+  if (!Number.isFinite(nPermutations) || nPermutations < 1) {
+    throw new ComputationError(`nullModel: nPermutations must be a finite number >= 1, got ${nPermutations}`);
+  }
   const presence: number[][] = presenceMatrix.map(row => row.map(v => v > 0 ? 1 : 0));
   seed(rngSeed ?? 42); // seed the global PRNG (fixed: parameter no longer shadows seed())
 
@@ -365,6 +385,22 @@ export function nullModel(
     }
   }
 
+  // Degenerate guard: a row that holds only presences (or only absences)
+  // cannot be changed by a within-row swap, and a matrix whose rows are all
+  // constant cannot be changed by any algorithm implemented here. The null
+  // distribution would then be a single repeated value (std = 0, SES = 0,
+  // p = 1) — a silent "no co-occurrence structure" verdict that no data
+  // supports. Fail loudly instead.
+  let hasSwappableRow = false;
+  for (let r = 0; r < nSpecies; r++) {
+    if (presIdx[r].length > 0 && absIdx[r].length > 0) { hasSwappableRow = true; break; }
+  }
+  if (!hasSwappableRow) {
+    throw new ComputationError(
+      'nullModel: every row of the presence matrix is constant (all presences or all absences), '
+      + 'so no null matrix can differ from the observed one and the null distribution / p-value would be meaningless');
+  }
+
   const simulated: number[] = [];
 
   for (let perm = 0; perm < nPermutations; perm++) {
@@ -398,10 +434,14 @@ export function nullModel(
         mat[r] = flat;
       }
     } else {
-      // SIM9: swap within rows (preserves row sums)
       const pIdx = presIdx.map(row => [...row]);
       const aIdx = absIdx.map(row => [...row]);
-      const nSwaps = Math.floor(nSpecies * nSites * 0.1);
+      // SIM9: swap within rows (preserves row sums).
+      // The swap count must never be 0: with 0 swaps every "permuted" matrix
+      // is the observed matrix, so the null distribution collapsed to a single
+      // value (std = 0, p = 1) for any matrix with nSpecies·nSites < 10 —
+      // a 3×3 presence/absence table always answered "no structure".
+      const nSwaps = Math.max(1, Math.floor(nSpecies * nSites * 0.1));
       for (let s = 0; s < nSwaps; s++) {
         const r = randint(0, nSpecies);
         if (pIdx[r].length === 0 || aIdx[r].length === 0) continue;
@@ -417,7 +457,21 @@ export function nullModel(
 
   const meanSim = simulated.reduce((a, b) => a + b, 0) / simulated.length;
   const stdSim = Math.sqrt(simulated.reduce((s, v) => s + (v - meanSim) ** 2, 0) / simulated.length);
-  const ses = stdSim > 0 ? (observed - meanSim) / stdSim : 0;
+
+  // A null distribution without spread cannot support a standardised effect
+  // size: SES = (observed − mean)/std is then 0/0, or an astronomically large
+  // number (4.3e13 was observed when std came out as 7.8e-16). A permutation
+  // test that cannot separate the observed matrix from its null is not a
+  // result — report the degeneracy instead of a number nobody can use.
+  if (!(stdSim > 1e-12 * Math.max(1, Math.abs(meanSim)))) {
+    throw new ComputationError(
+      `nullModel: all ${nPermutations} simulated ${metric} scores are identical `
+      + `(${simulated[0]}) — the null distribution has no spread, so the SES and the p-value are meaningless. `
+      + `The presence matrix is too small or too symmetric for the `
+      + `${algorithm === 'swap' ? 'SIM9 swap' : 'shuffle'} null model to sample.`);
+  }
+
+  const ses = (observed - meanSim) / stdSim;
 
   // One-sided p-value: P(simulated >= observed) with add-one correction
   const tailCount = simulated.filter(s => s >= observed).length;
@@ -489,13 +543,35 @@ export function dtw(
   const D = Array.from({ length: n1 }, () => new Array(n2).fill(Infinity));
   D[0][0] = localCost(seqAt(seq1, 0), seqAt(seq2, 0), metric);
 
-  for (let i = 1; i < n1; i++) D[i][0] = D[i - 1][0] + localCost(seqAt(seq1, i), seqAt(seq2, 0), metric);
-  for (let j = 1; j < n2; j++) D[0][j] = D[0][j - 1] + localCost(seqAt(seq1, 0), seqAt(seq2, j), metric);
+  // Sakoe-Chiba band: cells outside |i − j| ≤ window are UNREACHABLE and stay
+  // at Infinity. The previous code wrote a constant 1e10 penalty there, which
+  // is not a path cost at all: the end cell became 1e10 whenever the band was
+  // too narrow to reach it, and the reported "distance" was a fabricated
+  // 100000. Infinity is the honest marker — the caller is told the band does
+  // not reach (see the explicit error below).
+  const inBand = (i: number, j: number): boolean =>
+    window === undefined || Math.abs(i - j) <= window;
+
+  for (let i = 1; i < n1; i++) {
+    if (!inBand(i, 0)) continue; // stays Infinity
+    D[i][0] = D[i - 1][0] + localCost(seqAt(seq1, i), seqAt(seq2, 0), metric);
+  }
+  for (let j = 1; j < n2; j++) {
+    if (!inBand(0, j)) continue; // stays Infinity
+    D[0][j] = D[0][j - 1] + localCost(seqAt(seq1, 0), seqAt(seq2, j), metric);
+  }
 
   for (let i = 1; i < n1; i++) for (let j = 1; j < n2; j++) {
-    // Sakoe-Chiba band: finite penalty outside the window keeps backtracking sane
-    if (window !== undefined && Math.abs(i - j) > window) { D[i][j] = 1e10; continue; }
+    if (!inBand(i, j)) continue; // stays Infinity
     D[i][j] = localCost(seqAt(seq1, i), seqAt(seq2, j), metric) + Math.min(D[i - 1][j], D[i][j - 1], D[i - 1][j - 1]);
+  }
+
+  const rawDistance = D[n1 - 1][n2 - 1];
+  if (!isFinite(rawDistance)) {
+    const minWindow = Math.abs((n1 - 1) - (n2 - 1));
+    throw new ComputationError(
+      `dtw: the Sakoe-Chiba band (window=${window}) does not reach the end cell `
+      + `(${n1 - 1}, ${n2 - 1}) — a window of at least ${minWindow} is required`);
   }
 
   // Backtrack
@@ -592,8 +668,16 @@ export function fitAbundanceModels(abundances: number[]): AbundanceModelFit[] {
       const reg = linearRegression(validR.map(r => r * r), validLnS);
       const a = -reg.slope;
       const S0 = Math.exp(reg.intercept);
-      const predictedOct = validR.map(r => S0 * Math.exp(-a * r * r));
-      const ssRes = validLnS.reduce((s, v, i) => s + (v - predictedOct[i]) ** 2, 0);
+      // The log-normal (Preston veil line) model predicts a COUNT of species
+      // per octave, so its residual has to be measured against the observed
+      // octave COUNTS. The previous code compared the count-scale prediction
+      // S0·exp(−a·r²) with the LOGARITHM of the observed count, mixing two
+      // scales inside one sum of squares; the resulting SSE was inflated by
+      // orders of magnitude and the AIC was off by ~100 units, so the model
+      // could win (or lose) the ranking for a numerical reason that has
+      // nothing to do with how well it fits.
+      const predictedCount = validR.map(r => S0 * Math.exp(-a * r * r));
+      const ssRes = validR.reduce((s, r, i) => s + (hist[r] - predictedCount[i]) ** 2, 0);
       results.push({
         name: 'Log-Normal (Preston)',
         params: { S0, a, sigma: a > 0 ? 1 / Math.sqrt(2 * a) : Infinity },
@@ -601,11 +685,21 @@ export function fitAbundanceModels(abundances: number[]): AbundanceModelFit[] {
         aic: S * Math.log(ssRes / S + 1e-10) + 4,
       });
     } else {
-      // fallback: rank-abundance Zipf form when too few octaves
+      // Fallback: rank-abundance Zipf form when too few octaves.
+      // The residual must also live on the raw-count scale — `mse` is a
+      // log-space quantity and cannot be compared with the count-scale SSE of
+      // the other models.
       const logRanks = sorted.map((_, i) => Math.log(i + 1));
       const logAbund2 = sorted.map(v => Math.log(v));
       const lrResult = linearRegression(logRanks, logAbund2);
-      results.push({ name: 'Log-Normal', params: { slope: lrResult.slope, intercept: lrResult.intercept }, rSquared: lrResult.r2, aic: S * Math.log(lrResult.mse || 1) + 4 });
+      const predicted = sorted.map((_, i) => Math.exp(lrResult.intercept + lrResult.slope * logRanks[i]));
+      const ssResFb = sorted.reduce((s, v, i) => s + (v - predicted[i]) ** 2, 0);
+      results.push({
+        name: 'Log-Normal',
+        params: { slope: lrResult.slope, intercept: lrResult.intercept },
+        rSquared: lrResult.r2,
+        aic: S * Math.log(ssResFb / S + 1e-10) + 4,
+      });
     }
   }
 
@@ -677,6 +771,11 @@ export function sheAnalysis(abundanceMatrix: number[][], sampleNames?: string[])
   const n = abundanceMatrix.length;
   const names = sampleNames ?? Array.from({ length: n }, (_, i) => `Sample_${i + 1}`);
   const logS: number[] = [], logH: number[] = [], logE: number[] = [];
+  // A sample with no individuals has no logarithm at all. The previous code
+  // wrote -Infinity into logS for such a sample while logH/logE used the -999
+  // sentinel, so ONE empty sample carried TWO different encodings and JSON
+  // serialisation turned the -Infinity into null. One sentinel now.
+  const NO_DATA = -999;
 
   // Sort samples by total abundance (ascending)
   const totals = abundanceMatrix.map((row, i) => ({ total: row.reduce((a, b) => a + b, 0), idx: i }));
@@ -691,10 +790,9 @@ export function sheAnalysis(abundanceMatrix: number[][], sampleNames?: string[])
     for (const c of counts) { const p = c / N; if (p > 0) H -= p * Math.log(p); }
     const E = S > 1 ? H / Math.log(S) : 0;
     // Standard SHE: log(S), H, E — no offset (S ≥ 1, H ≥ 0, E ≥ 0)
-    // Guard H = 0 or E = 0 which give -Inf; map to -999 (sentinel for -∞)
-    logS.push(Math.log(S));
-    logH.push(H > 0 ? H : -999);
-    logE.push(E > 0 ? E : -999);
+    logS.push(S > 0 ? Math.log(S) : NO_DATA);
+    logH.push(H > 0 ? H : NO_DATA);
+    logE.push(E > 0 ? E : NO_DATA);
   }
 
   return { logS, logH, logE, sampleNames: totals.map(t => names[t.idx]) }; // Fixed: use totals[i].idx correctly
@@ -740,8 +838,21 @@ export function paleoEnvironment(abundanceMatrix: number[][], heights: number[])
   const scores = [...axis1];
   if (pearson < 0) { for (let i = 0; i < scores.length; i++) scores[i] = -scores[i]; wasFlipped = true; }
 
-  // Species (column) scores: Ystd · v₁, flipped consistently with site scores
-  const speciesScoresRaw = Ymat.matmul(eigenvectors.sliceCols(0, 1)).col(0);
+  // Species (column) scores on CA axis 1.
+  //
+  // The eigenvectors come from YᵀY, so they live in the SPECIES space
+  // (length nSpecies) and Y·v₁ (used above) is the SITE score. The CA column
+  // principal coordinates are therefore v₁ scaled by √λ₁ — the standard
+  // "species scores" of a correspondence analysis (vegan::cca reports exactly
+  // this). The previous code used Y·v₁ here as well, which made
+  // `columnSpeciesAxis` a bit-for-bit copy of `axis1Scores`.
+  //
+  // (Yᵀ·v₁ would be the form for eigenvectors of Y·Yᵀ, i.e. for the SITE
+  // space; with the nSites×nSpecies layout used here it is not even
+  // dimensionally defined unless nSites = nSpecies.)
+  const lambda1 = Math.max(0, eigenvalues[0] ?? 0);
+  const scale1 = Math.sqrt(lambda1);
+  const speciesScoresRaw = eigenvectors.sliceCols(0, 1).col(0).map((v: number) => v * scale1);
   const speciesScores = wasFlipped ? speciesScoresRaw.map((v: number) => -v) : [...speciesScoresRaw];
 
   // Singular values = sqrt(eigenvalues) (paleoenv.py singular_values)
@@ -921,6 +1032,6 @@ export function sampleBasedRarefaction(
 }
 
 // ─── Re-exports: Coverage-based Rarefaction ────────────────────────────────────
-export { coverageRarefaction, type CoverageRarefactionResult } from './CoverageRarefaction';
+export { coverageRarefaction, rarefaction, type CoverageRarefactionResult } from './CoverageRarefaction';
 // ─── Re-exports: SQS ──────────────────────────────────────────────────────────
 export { sqs, type SQSResult } from './SQS';

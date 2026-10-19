@@ -14,6 +14,8 @@ import { ChartHighlighter } from './plot/ChartHighlighter';
 import { ChartComputator } from './plot/ChartComputator';
 import { AdaptiveFormatter, autoFormatter } from './plot/ValueFormatter';
 import type { IValueFormatter } from './plot/ValueFormatter';
+import { computeBoxPrimitives } from './plot/boxGeometry';
+import type { BoxGroup } from './plot/boxGeometry';
 
 /**
  * Pick radius (in vp) shared by hover and tap selection, and the grid
@@ -765,44 +767,42 @@ export struct PlotCanvas {
   private drawBoxPlot(ctx: CanvasRenderingContext2D, pw: number, ph: number): void {
     const data = this.plotData!;
     const groups = data.boxGroups!;
-    const allVals = groups.flatMap(g => g.values);
-    const yMin = allVals.reduce((a, b) => Math.min(a, b), Infinity);
-    const yMax = allVals.reduce((a, b) => Math.max(a, b), -Infinity);
-    const yPad = (yMax - yMin) * 0.1 || 1;
-    const mapY = (v: number) => this.vp.margin.top + ph - ((v - (yMin - yPad)) / ((yMax + yPad) - (yMin - yPad))) * ph;
-    const boxW = pw / groups.length * 0.6;
-    const gap = pw / groups.length * 0.4;
+    // The geometry comes from the SHARED implementation (plot/boxGeometry.ts),
+    // which the SVG exporter calls as well. This method used to compute its
+    // own: a local Y formula without zoom/pan, a hand-rolled X layout, the
+    // upper of the two middle values as the median of an even-sized sample,
+    // and Tukey whiskers the exporter never drew. The exported figure was
+    // therefore not the figure on screen.
+    const boxes = computeBoxPrimitives(this.vp, toBoxGroups(groups));
     const colors = ['#3498DB', '#E74C3C', '#27AE60', '#F39C12', '#9B59B6'];
 
-    for (let i = 0; i < groups.length; i++) {
-      const sorted = [...groups[i].values].sort((a, b) => a - b);
-      const n = sorted.length;
-      if (n === 0) continue;
-      const q1 = sorted[Math.floor(n * 0.25)];
-      const med = sorted[Math.floor(n * 0.5)];
-      const q3 = sorted[Math.floor(n * 0.75)];
-      const iqr = q3 - q1;
-      const wLo = Math.max(sorted[0], q1 - 1.5 * iqr);
-      const wHi = Math.min(sorted[n - 1], q3 + 1.5 * iqr);
-      const cx = this.vp.margin.left + (i * (boxW + gap)) + gap / 2 + boxW / 2;
+    for (const box of boxes) {
+      const color = colors[box.index % colors.length];
+      const left = box.centerX - box.boxWidth / 2;
+      const right = box.centerX + box.boxWidth / 2;
+      const capHalf = box.capWidth / 2;
 
-      ctx.strokeStyle = colors[i % colors.length]; ctx.lineWidth = 1.5;
-      ctx.beginPath(); ctx.moveTo(cx, mapY(wLo)); ctx.lineTo(cx, mapY(q1)); ctx.stroke();
-      ctx.beginPath(); ctx.moveTo(cx, mapY(q3)); ctx.lineTo(cx, mapY(wHi)); ctx.stroke();
-      ctx.beginPath(); ctx.moveTo(cx - boxW * 0.2, mapY(wLo)); ctx.lineTo(cx + boxW * 0.2, mapY(wLo)); ctx.stroke();
-      ctx.beginPath(); ctx.moveTo(cx - boxW * 0.2, mapY(wHi)); ctx.lineTo(cx + boxW * 0.2, mapY(wHi)); ctx.stroke();
+      // Whisker stems and caps
+      ctx.strokeStyle = color; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.moveTo(box.centerX, box.yLower); ctx.lineTo(box.centerX, box.yQ1); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(box.centerX, box.yQ3); ctx.lineTo(box.centerX, box.yUpper); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(box.centerX - capHalf, box.yLower); ctx.lineTo(box.centerX + capHalf, box.yLower); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(box.centerX - capHalf, box.yUpper); ctx.lineTo(box.centerX + capHalf, box.yUpper); ctx.stroke();
 
-      ctx.fillStyle = colors[i % colors.length] + '40';
-      ctx.strokeStyle = colors[i % colors.length]; ctx.lineWidth = 2;
-      ctx.fillRect(cx - boxW / 2, mapY(q3), boxW, mapY(q1) - mapY(q3));
-      ctx.strokeRect(cx - boxW / 2, mapY(q3), boxW, mapY(q1) - mapY(q3));
+      // Box
+      ctx.fillStyle = color + '40';
+      ctx.strokeStyle = color; ctx.lineWidth = 2;
+      ctx.fillRect(left, box.yQ3, box.boxWidth, box.yQ1 - box.yQ3);
+      ctx.strokeRect(left, box.yQ3, box.boxWidth, box.yQ1 - box.yQ3);
 
+      // Median
       ctx.strokeStyle = '#E74C3C'; ctx.lineWidth = 2.5;
-      ctx.beginPath(); ctx.moveTo(cx - boxW / 2, mapY(med)); ctx.lineTo(cx + boxW / 2, mapY(med)); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(left, box.yMedian); ctx.lineTo(right, box.yMedian); ctx.stroke();
 
+      // Group label
       ctx.fillStyle = this.darkMode ? '#ccc' : '#2C3E50';
       ctx.font = '11px sans-serif'; ctx.textAlign = 'center';
-      ctx.fillText(groups[i].label, cx, this.vp.margin.top + ph + 15);
+      ctx.fillText(box.label, box.centerX, this.vp.margin.top + ph + 15);
     }
   }
 
@@ -1089,37 +1089,43 @@ export struct PlotCanvas {
             }
           }
           break;
-        case 'boxplot':
+        case 'boxplot': {
           if (this.plotData.boxGroups) {
-            const groups = this.plotData.boxGroups;
-            const gw = ChartComputator.barLayout(this.vp, groups.length, 0.4).barWidth;
+            // The SAME primitives the canvas renderer uses (see
+            // drawBoxPlot): identical quartiles, whiskers and pixel
+            // positions, so the exported figure IS the figure on screen.
+            // The exporter used to draw its own R-7 quartiles with min/max
+            // whiskers at `mapX(group)` centres, while the canvas drew
+            // Tukey whiskers with the upper median at a hand-computed X.
+            const boxes = computeBoxPrimitives(this.vp, toBoxGroups(this.plotData.boxGroups));
             const stroke = this.darkMode ? '#ccc' : '#2C3E50';
-            for (let g = 0; g < groups.length; g++) {
-              const vals = groups[g].values.slice().sort((a, b) => a - b);
-              if (vals.length === 0) continue;
-              const q = (f: number): number => {
-                const idx = (vals.length - 1) * f;
-                const lo = Math.floor(idx), hi = Math.ceil(idx);
-                return vals[lo] + (vals[hi] - vals[lo]) * (idx - lo);
-              };
-              const q1 = q(0.25), med = q(0.5), q3 = q(0.75);
-              const lo = vals[0], hi = vals[vals.length - 1];
-              const centre = this.mapX(g);
-              const x = centre - gw / 2;
-              const yTop = this.mapY(hi), yBot = this.mapY(lo);
-              svg += '<rect x="' + x.toFixed(1) + '" y="' + Math.min(yTop, this.mapY(q3)).toFixed(1)
-                + '" width="' + gw.toFixed(1) + '" height="' + Math.abs(this.mapY(q3) - this.mapY(q1)).toFixed(1)
+            for (const box of boxes) {
+              const left = box.centerX - box.boxWidth / 2;
+              const right = box.centerX + box.boxWidth / 2;
+              const capHalf = box.capWidth / 2;
+              const cx = box.centerX.toFixed(1);
+              svg += '<rect x="' + left.toFixed(1) + '" y="' + box.yQ3.toFixed(1)
+                + '" width="' + box.boxWidth.toFixed(1) + '" height="' + (box.yQ1 - box.yQ3).toFixed(1)
                 + '" fill="none" stroke="' + stroke + '" stroke-width="1.5"/>';
-              svg += '<line x1="' + x.toFixed(1) + '" y1="' + yTop.toFixed(1) + '" x2="' + (x + gw).toFixed(1)
-                + '" y2="' + yTop.toFixed(1) + '" stroke="' + stroke + '" stroke-width="1.5"/>';
-              svg += '<line x1="' + x.toFixed(1) + '" y1="' + yBot.toFixed(1) + '" x2="' + (x + gw).toFixed(1)
-                + '" y2="' + yBot.toFixed(1) + '" stroke="' + stroke + '" stroke-width="1.5"/>';
+              // Whisker stems
+              svg += '<line x1="' + cx + '" y1="' + box.yLower.toFixed(1) + '" x2="' + cx
+                + '" y2="' + box.yQ1.toFixed(1) + '" stroke="' + stroke + '" stroke-width="1.5"/>';
+              svg += '<line x1="' + cx + '" y1="' + box.yQ3.toFixed(1) + '" x2="' + cx
+                + '" y2="' + box.yUpper.toFixed(1) + '" stroke="' + stroke + '" stroke-width="1.5"/>';
+              // Whisker caps
+              svg += '<line x1="' + (box.centerX - capHalf).toFixed(1) + '" y1="' + box.yLower.toFixed(1)
+                + '" x2="' + (box.centerX + capHalf).toFixed(1) + '" y2="' + box.yLower.toFixed(1)
+                + '" stroke="' + stroke + '" stroke-width="1.5"/>';
+              svg += '<line x1="' + (box.centerX - capHalf).toFixed(1) + '" y1="' + box.yUpper.toFixed(1)
+                + '" x2="' + (box.centerX + capHalf).toFixed(1) + '" y2="' + box.yUpper.toFixed(1)
+                + '" stroke="' + stroke + '" stroke-width="1.5"/>';
               // Median line across the box.
-              svg += '<line x1="' + x.toFixed(1) + '" y1="' + this.mapY(med).toFixed(1) + '" x2="' + (x + gw).toFixed(1)
-                + '" y2="' + this.mapY(med).toFixed(1) + '" stroke="' + stroke + '" stroke-width="2"/>';
+              svg += '<line x1="' + left.toFixed(1) + '" y1="' + box.yMedian.toFixed(1) + '" x2="' + right.toFixed(1)
+                + '" y2="' + box.yMedian.toFixed(1) + '" stroke="' + stroke + '" stroke-width="2"/>';
             }
           }
           break;
+        }
         case 'heatmap':
           if (this.plotData.matrix) {
             const m = this.plotData.matrix;
@@ -1199,7 +1205,12 @@ export struct PlotCanvas {
     // Keep ASCII word characters, dots, dashes AND CJK: this project's UI is
     // bilingual, and `\w` alone is ASCII-only, so a Chinese analysis title would
     // have every character replaced and yield "paleoast_______.png".
-    const safe = label.replace(/[^\w.\-\u4e00-\u9fa5]+/g, '_').replace(/^_+|_+$/g, '');
+    const safe = label.replace(/[^\w.\-\u4e00-\u9fa5]+/g, '_').replace(/^_+|_+$/g, '') || 'plot';
+    // The file name the system save dialog pre-fills. It MUST carry the
+    // extension, otherwise the picker suggests an extension-less file.
+    // (The old code computed `safe` and then referenced an undeclared
+    // `suggested`, which is a compile error — TS2304.)
+    const suggested = safe + '.' + format;
     try {
       if (format === 'svg') {
         const svg = this.buildSVG();
@@ -1300,6 +1311,20 @@ export struct PlotCanvas {
 interface BoxGroupData {
   label: string;
   values: number[];
+}
+
+/**
+ * The plot's box groups in the shape the shared geometry expects.
+ *
+ * Module level (not a struct member): ArkTS structs do not support `static`,
+ * and a free function keeps the renderer free of type gymnastics.
+ */
+function toBoxGroups(groups: BoxGroupData[]): BoxGroup[] {
+  const out: BoxGroup[] = [];
+  for (const g of groups) {
+    out.push({ label: g.label, values: g.values });
+  }
+  return out;
 }
 
 interface PlotData {

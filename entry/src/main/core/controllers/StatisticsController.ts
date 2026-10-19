@@ -121,8 +121,26 @@ export class StatisticsController {
     return permanova(D, groups, nPerm);
   }
 
+  /**
+   * SIMPER (similarity percentages) with the metric the user actually chose.
+   *
+   * The `metric` parameter used to be accepted and then DROPPED: the call was
+   * `simper(this.getData(), groups)`, so `simper` fell back to its default
+   * 'bray_curtis' and every SIMPER run — whatever the dialog had selected —
+   * was a Bray-Curtis analysis (measured: overallDissimilarity 0.5065 where
+   * the Euclidean result is 20.999). The exported "reproducible analysis
+   * script" recorded the metric the user had picked, so the script and the
+   * result disagreed.
+   *
+   * `simper(data, groups, variableNames?, metric)` takes the metric in the
+   * FOURTH position, hence the explicit `undefined` for the variable names.
+   */
   runSIMPER(groups: number[], metric = 'bray_curtis') {
-    return simper(this.getData(), groups);
+    const m = String(metric);
+    if (m !== 'bray_curtis' && m !== 'euclidean') {
+      throw new Error(`SIMPER: unsupported metric "${m}". Use "bray_curtis" or "euclidean".`);
+    }
+    return simper(this.getData(), groups, undefined, m);
   }
 
   runClustering(nc = 3, method = 'ward', metric = 'euclidean') {
@@ -248,6 +266,18 @@ export class StatisticsController {
     return waveletTransform(this.getData().col(0), scales);
   }
 
+  /**
+   * Stratigraphic correlation (L-curve / GLS) of a set of measured sections.
+   *
+   * This is NOT the same analysis as `runComputeCorrelation` (a plain
+   * Pearson/Spearman correlation between two columns). The "Stratigraphic
+   * Correlation" DIALOG path in `ets/pages/Index.ets` dispatches to
+   * `runComputeCorrelation` while the shortcut menu item of the same name
+   * dispatches here — so the two paths of one menu entry produce two
+   * different analyses, and this algorithm is unreachable from the dialog.
+   * The dispatch lives in `ets/`, outside the controller's scope; it has to
+   * call `runStratCorr` for the paths to agree.
+   */
   runStratCorr(sections: { name: string; heights: number[]; values: number[] }[]) {
     return stratigraphicCorrelation(sections);
   }
@@ -352,10 +382,21 @@ export class StatisticsController {
    * The dialog says the layout is [x1..xN, y1..yN] and that the first row is
    * the contour specimen, so using row 0 is intentional -- it is documented in
    * the dialog rather than guessed here.
+   *
+   * The row length must therefore be EVEN. With an odd number of columns
+   * `row.length / 2` is not an integer, `row[n + i]` is `undefined` for every
+   * point, and the function returned a "successful" result whose harmonics,
+   * coefficients and reconstruction were all NaN — an empty plot and no
+   * error at all. That is now a loud failure.
    */
   runEFA(nh?: number, np?: number) {
     const dm = this.getDM();
     const row = dm.data.row(0);
+    if (row.length === 0 || row.length % 2 !== 0) {
+      throw new Error(
+        `EFA needs an even number of columns: the contour layout is [x1..xN, y1..yN] ` +
+        `(got ${row.length} columns).`);
+    }
     const n = row.length / 2;
     const contour: number[][] = [];
     for (let i = 0; i < n; i++) contour.push([row[i], row[n + i]]);
@@ -401,7 +442,37 @@ export class StatisticsController {
     return phylogeneticSignal(tree, traits, np);
   }
 
+  /**
+   * Phylogenetic ANOVA (Garland 1993 rule-classification scheme).
+   *
+   * The `groups` argument used to be passed straight through, and the UI
+   * called this method with an EMPTY object (`{}`) from BOTH the dialog path
+   * and the shortcut path. `phyloANOVA` answers "fewer than two groups" with
+   * `{fStatistic: 0, pValue: 1, ssBetween: 0, ssWithin: 0, groups: [],
+   * nGroups: 0}` — so an analysis that never happened was reported to the
+   * user as "no significant difference between groups".
+   *
+   * The groups are therefore checked here: a Phylo ANOVA needs at least two
+   * distinct labels on tips that actually carry a trait value. Failing loudly
+   * is the correct behaviour (docs/architecture.md: silently wrong numbers are
+   * worse than a crash). A tree without any tips has no contrasts and no test
+   * at all — that degenerate case keeps its historical answer.
+   */
   runPhyloANOVA(root: PhyloNode, traits: Record<string, number>, groups: Record<string, string>, np = 999) {
+    const labels = new Set<string>();
+    for (const tip of Object.keys(groups ?? {})) {
+      if (traits && tip in traits) labels.add(String(groups[tip]));
+    }
+    // A tree WITHOUT tips has no contrasts and therefore no test to run at
+    // all; `phyloANOVA` has always answered that degenerate case with
+    // p = 1. A tree WITH tips and an unusable group assignment is a real
+    // request that cannot be answered, and that is a loud failure.
+    const nTips = root && typeof root.getLeaves === 'function' ? root.getLeaves().length : 0;
+    if (nTips > 0 && labels.size < 2) {
+      throw new Error(
+        'Phylo ANOVA needs at least 2 group labels on the tips that carry a trait value ' +
+        `(got ${labels.size}). Without groups there is no test to run.`);
+    }
     return phyloANOVA(root, traits, groups, np);
   }
 

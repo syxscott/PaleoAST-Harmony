@@ -49,6 +49,11 @@ export function rarefaction(abundances: number[], m: number): number {
 
   let E = 0;
   for (const ni of counts) {
+    // A species with ni > N − m can never be missed by a sub-sample of m
+    // individuals (C(N − ni, m) is 0 there). Without this guard the log-sum
+    // below evaluates log(N − ni − k) on a negative argument and returns
+    // NaN — the same protection computeRarefaction in ecology.ts carries.
+    if (N - ni < m) { E += 1; continue; }
     // P(species excluded when drawing m from N) = C(N-ni, m) / C(N, m)
     // Use log-sum to avoid overflow
     let logP = 0;
@@ -95,6 +100,17 @@ export function extrapolation(abundances: number[], c: number, chao1: number): n
   // f1 = number of singletons → observed sample coverage c_obs = 1 − f1/N
   const f1 = counts.filter(v => v === 1).length;
   const cObs = 1 - f1 / N;
+  return extrapolateFromStats(Sobs, chao1, cObs, c);
+}
+
+/**
+ * Core of the Chao & Jost (2012) coverage extrapolation, expressed through
+ * the four summary statistics the estimator needs. Kept separate from
+ * `extrapolation()` so that a bootstrap replicate of a sample — which has its
+ * own S_obs / f1 / f2 / N — can reuse exactly the same formula.
+ */
+function extrapolateFromStats(Sobs: number, chao1: number, cObs: number, c: number): number {
+  if (c >= 1) return chao1;
   if (c <= cObs) return Sobs;
 
   // Pool of undetected species carried by the Chao1 asymptote.
@@ -114,9 +130,10 @@ export function extrapolation(abundances: number[], c: number, chao1: number): n
  *
  * @param abundanceMatrix  samples × species
  * @param coverageLevels   target coverage (0–1) values to evaluate (default 0.5..0.99)
- * @param nIterations      bootstrap iterations for CI (default 200)
+ * @param nIterations      number of individual-level replicates used for the
+ *                         point estimate and the CI (default 200)
  * @param sampleNames      optional names for samples
- * @param rngSeed          seed for reproducible bootstrap (default 42)
+ * @param rngSeed          seed for reproducible sampling (default 42)
  */
 export function coverageRarefaction(
   abundanceMatrix: number[][],
@@ -135,8 +152,10 @@ export function coverageRarefaction(
   const names = sampleNames ?? Array.from({ length: nSamples }, (_, i) => `Sample_${i + 1}`);
 
   // ─── Chao1 abundance-based estimator (asymptotic richness) ─────────────────
-  //   S_chao1 = S_obs + f1(f1-1) / (2(f2+1))  when f2 > 0
-  //             S_obs + f1(f1-1) / 2           when f2 = 0, f1 > 0
+  //   S_chao1 = S_obs + f1^2 / (2 f2)   when f2 > 0
+  //             S_obs + f1(f1-1) / 2    when f2 = 0, f1 > 0
+  // (The comment above used to advertise f1(f1-1) / (2(f2+1)); the code has
+  // always used the classic Chao (1984) form f1^2 / (2 f2).)
   // Reference: Chao, A. (1984). "Nonparametric estimation of the number of
   //            classes in a population." Scand. J. Stat. 11: 265-270.
   const asymptote: number[] = [];
@@ -160,8 +179,10 @@ export function coverageRarefaction(
   }
 
   const coverage = coverageLevels.slice();
+  const nCov = coverage.length;
+  const nIter = Math.max(1, Math.floor(nIterations));
 
-  // Individual-level species pools (for the rarefaction bootstrap)
+  // Individual-level species pools (for the sub-sampling replicates)
   const pools: number[][] = abundanceMatrix.map(row => {
     const pool: number[] = [];
     for (let j = 0; j < nSpecies; j++) for (let k = 0; k < Math.floor(row[j]); k++) pool.push(j);
@@ -185,49 +206,115 @@ export function coverageRarefaction(
   };
 
   // ─── Expected qD(coverage): rarefaction (c ≤ c_obs) vs extrapolation ────────
-  // Point estimates AND confidence intervals come from the same individual-level
-  // bootstrap (sub-sampling m = floor(c·N) individuals without replacement,
-  // matching the iNEXT convention Python follows).
-  const expectedR: number[] = [];
-  const lo: number[] = [], hi: number[] = [];
-  for (const c of coverage) {
-    const drawStats: number[] = [];
-    for (let s = 0; s < nSamples; s++) {
-      const row = abundanceMatrix[s];
-      const N = sampleSizes[s];
-      const f1 = row.filter(v => v === 1).length;
-      const c_obs = N > 0 ? 1 - f1 / N : 1;
-      if (c <= c_obs) {
-        const m = Math.max(1, Math.floor(c * N));
-        const pool = pools[s];
-        if (m >= pool.length) {
-          const cnt = new Map<number, number>();
-          for (const sp of pool) cnt.set(sp, (cnt.get(sp) ?? 0) + 1);
-          drawStats.push(hillOf(cnt, pool.length));
-        } else {
-          // Partial Fisher-Yates: draw m without replacement
-          const idxs = pool.map((_, i) => i);
-          for (let i = 0; i < m; i++) {
-            const j = i + Math.floor(rand() * (idxs.length - i));
-            const t = idxs[i]; idxs[i] = idxs[j]; idxs[j] = t;
-          }
-          const cnt = new Map<number, number>();
-          for (let i = 0; i < m; i++) {
-            const sp = pool[idxs[i]];
-            cnt.set(sp, (cnt.get(sp) ?? 0) + 1);
-          }
-          drawStats.push(hillOf(cnt, m));
+  //
+  // Point estimates AND confidence intervals come from the SAME set of
+  // individual-level replicates, and `nIterations` is the number of those
+  // replicates:
+  //
+  //   * rarefaction branch (c ≤ c_obs): every replicate draws
+  //     m = floor(c·N) individuals WITHOUT replacement from the sample's
+  //     individual pool and reports the Hill number of that sub-sample. The
+  //     mean over replicates converges to the exact Hurlbert expectation
+  //     E[S(m)], and the 2.5 % / 97.5 % percentiles give the sampling
+  //     interval of the sub-sample.
+  //   * extrapolation branch (c > c_obs): every replicate resamples N
+  //     individuals WITH replacement (bootstrap), recomputes S_obs / f1 / f2
+  //     → the Chao1 asymptote and the observed coverage OF THE REPLICATE, and
+  //     applies the Chao & Jost (2012) extrapolation formula to it.
+  //
+  // The previous implementation drew ONE random sub-sample per
+  // (coverage, sample) pair and then took the mean / percentiles ACROSS
+  // SAMPLES: `nIterations` had no effect whatsoever (1 and 1000 iterations
+  // returned bit-identical numbers) and a single sample produced a zero-width
+  // "95 % CI".
+  const reps: number[][][] = [];
+  for (let s = 0; s < nSamples; s++) reps.push(coverage.map(() => [] as number[]));
+
+  for (let s = 0; s < nSamples; s++) {
+    const N = sampleSizes[s];
+    const pool = pools[s];
+    const f1 = abundanceMatrix[s].filter(v => v === 1).length;
+    const c_obs = N > 0 ? 1 - f1 / N : 1;
+
+    if (pool.length === 0) {
+      // Empty sample: no individuals at all, so every replicate is 0.
+      for (let ci = 0; ci < nCov; ci++) for (let it = 0; it < nIter; it++) reps[s][ci].push(0);
+      continue;
+    }
+
+    // Which coverage levels are answered by sub-sampling and which by
+    // extrapolation (decided once — both branches are deterministic given c).
+    const needs: { ci: number; m: number }[] = [];
+    const extrap: { ci: number; c: number }[] = [];
+    for (let ci = 0; ci < nCov; ci++) {
+      const c = coverage[ci];
+      if (c <= c_obs) needs.push({ ci, m: Math.min(pool.length, Math.max(1, Math.floor(c * N))) });
+      else extrap.push({ ci, c });
+    }
+    needs.sort((a, b) => a.m - b.m);
+
+    for (let iter = 0; iter < nIter; iter++) {
+      // (1) One random permutation of the individual pool; its prefix of
+      //     length m is the sub-sample at coverage c.
+      const order = pool.map((_, i) => i);
+      for (let i = order.length - 1; i > 0; i--) {
+        const j = Math.floor(rand() * (i + 1));
+        const t = order[i]; order[i] = order[j]; order[j] = t;
+      }
+      // Walk the permutation once and snapshot the Hill number whenever the
+      // number of drawn individuals reaches one of the requested m values.
+      const snapshot = new Array<number>(needs.length).fill(0);
+      const drawnCounts = new Map<number, number>();
+      let ti = 0;
+      for (let i = 0; i < pool.length && ti < needs.length; i++) {
+        const sp = pool[order[i]];
+        drawnCounts.set(sp, (drawnCounts.get(sp) ?? 0) + 1);
+        const drawn = i + 1;
+        while (ti < needs.length && needs[ti].m === drawn) {
+          snapshot[ti] = hillOf(drawnCounts, drawn);
+          ti++;
         }
-      } else {
-        // Extrapolation branch: Chao & Jost (2012) asymptotic form
-        drawStats.push(extrapolation(row, c, asymptote[s]));
+      }
+      for (let k = 0; k < needs.length; k++) reps[s][needs[k].ci].push(snapshot[k]);
+
+      // (2) One with-replacement bootstrap replicate, shared by all
+      //     extrapolated coverage levels of this iteration.
+      if (extrap.length > 0) {
+        const boot = new Map<number, number>();
+        for (let i = 0; i < N; i++) {
+          const sp = pool[Math.floor(rand() * pool.length)];
+          boot.set(sp, (boot.get(sp) ?? 0) + 1);
+        }
+        let bF1 = 0, bF2 = 0;
+        for (const cnt of boot.values()) {
+          if (cnt === 1) bF1++;
+          else if (cnt === 2) bF2++;
+        }
+        const bS = boot.size;
+        let bChao1 = bS;
+        if (bF2 > 0) bChao1 = bS + (bF1 * bF1) / (2 * bF2);
+        else if (bF1 > 0) bChao1 = bS + bF1 * (bF1 - 1) / 2;
+        const bCObs = N > 0 ? 1 - bF1 / N : 1;
+        for (const e of extrap) {
+          reps[s][e.ci].push(extrapolateFromStats(bS, bChao1, bCObs, e.c));
+        }
       }
     }
-    drawStats.sort((a, b) => a - b);
-    const mean = drawStats.reduce((a, b) => a + b, 0) / drawStats.length;
-    expectedR.push(mean);
-    lo.push(drawStats[Math.max(0, Math.floor(nSamples * 0.025))]);
-    hi.push(drawStats[Math.min(drawStats.length - 1, Math.floor(nSamples * 0.975))]);
+  }
+
+  // Pool the replicates of every sample: the point estimate is their mean and
+  // the interval their 2.5 % / 97.5 % percentiles (so it also carries the
+  // spread BETWEEN samples, not just the within-sample sampling error).
+  const expectedR: number[] = [];
+  const lo: number[] = [], hi: number[] = [];
+  for (let ci = 0; ci < nCov; ci++) {
+    const pooled: number[] = [];
+    for (let s = 0; s < nSamples; s++) for (const v of reps[s][ci]) pooled.push(v);
+    pooled.sort((a, b) => a - b);
+    if (pooled.length === 0) { expectedR.push(0); lo.push(0); hi.push(0); continue; }
+    expectedR.push(pooled.reduce((a, b) => a + b, 0) / pooled.length);
+    lo.push(pooled[Math.max(0, Math.floor(pooled.length * 0.025))]);
+    hi.push(pooled[Math.min(pooled.length - 1, Math.floor(pooled.length * 0.975))]);
   }
 
   return {

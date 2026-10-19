@@ -17,6 +17,13 @@ export interface SurvivalResult {
   nAtRisk: number[];
   nEvents: number[];
   medianSurvival: number | null;
+  /**
+   * Event indicator (1 = event, 0 = censored) in the SAME order as
+   * `timesFull`, i.e. sorted by time. The old version returned the event
+   * flags in INPUT order next to a sorted `timesFull`, so the two arrays
+   * could not be read off each other (kaplanMeier([5,1,3],[0,1,1]) gave
+   * events = [0,1,1] and timesFull = [1,3,5]).
+   */
   events: number[];
   timesFull: number[];
 }
@@ -76,11 +83,28 @@ export function kaplanMeier(
     outSE.push(cumSurv * Math.sqrt(greenwoodSum));
   }
 
-  // If no events, return trivial
+  // If no events, return trivial.
+  //
+  // Every array has to describe the same set of time points. The old
+  // version returned `times` with one entry per observed time but
+  // `survivalProb` (and the rest) with a single entry, so
+  // kaplanMeier([1,2,3],[0,0,0]) came back with times.length = 3 and
+  // survivalProb.length = 1 — a caller that zips the arrays silently
+  // reads the wrong values. With no event the survival curve is 1
+  // everywhere, so it is reported at every observed time.
   if (outS.length === 0) {
+    const nTimes = uniqueTimes.length;
     return {
-      times: uniqueTimes, survivalProb: [1], stdError: [0], lowerCI: [1], upperCI: [1],
-      nAtRisk: [tS.length], nEvents: [0], medianSurvival: null, events: e, timesFull: tS
+      times: uniqueTimes,
+      survivalProb: new Array(nTimes).fill(1),
+      stdError: new Array(nTimes).fill(0),
+      lowerCI: new Array(nTimes).fill(1),
+      upperCI: new Array(nTimes).fill(1),
+      nAtRisk: new Array(nTimes).fill(tS.length),
+      nEvents: new Array(nTimes).fill(0),
+      medianSurvival: null,
+      events: eS,
+      timesFull: tS
     };
   }
 
@@ -119,7 +143,8 @@ export function kaplanMeier(
     nAtRisk: outNAR,
     nEvents: outNE,
     medianSurvival,
-    events: e,
+    // sorted with timesFull, so the two arrays line up element by element
+    events: eS,
     timesFull: tS
   };
 }

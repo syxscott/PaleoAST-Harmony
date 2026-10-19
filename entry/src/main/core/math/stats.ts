@@ -1,6 +1,6 @@
 import { Matrix } from './Matrix';
-import { normCDF } from './special';
 import { tCDF } from './special';
+import { erfc, gammaincc } from './special';
 
 /**
  * Basic statistics functions replacing NumPy/SciPy.stats core.
@@ -124,10 +124,30 @@ export function dnorm(x: number, mu: number = 0, sigma: number = 1): number {
  * Standard normal CDF.
  * @deprecated Use normCDF from special.ts directly for standard normal,
  *            or use this with mu/sigma for shifted/scaled normal.
+ *
+ * Computed as ½·erfc(-z/√2) instead of the Abramowitz & Stegun 7.1.26
+ * rational approximation (error up to 1.5e-07) that used to live here. The
+ * erfc form is exact to ~1e-15 AND stays accurate in the LOWER tail: for
+ * z = -8 the old approximation returned 6.106226635438361e-16 while the true
+ * value is 6.22096057427174e-16, whereas `1 - Φ(z)` on the other side would
+ * have returned exactly 0.
  */
 export function pnorm(x: number, mu: number = 0, sigma: number = 1): number {
   if (sigma <= 0) throw new Error('pnorm: sigma must be positive');
-  return normCDF((x - mu) / sigma);
+  return 0.5 * erfc(-(x - mu) / (sigma * Math.SQRT2));
+}
+
+/**
+ * Standard normal UPPER tail: P(Z > x).
+ *
+ * The numerically stable counterpart of `1 - pnorm(x)`: `1 - Φ(x)` collapses
+ * to exactly 0 as soon as the tail falls below the resolution of 1 - x
+ * (~1e-16), which is precisely the range where a p-value still matters.
+ * Follows the pattern already used in core/analysis/statistics/Normality.ts.
+ */
+export function pnormUpper(x: number, mu: number = 0, sigma: number = 1): number {
+  if (sigma <= 0) throw new Error('pnormUpper: sigma must be positive');
+  return 0.5 * erfc((x - mu) / (sigma * Math.SQRT2));
 }
 
 /**
@@ -180,11 +200,38 @@ export function pchisq(x: number, df: number): number {
   return gammainc(df / 2, x / 2);
 }
 
-/** Log gamma (Lanczos approximation). */
+/**
+ * Chi-square UPPER tail: P(χ² > x) = Q(df/2, x/2).
+ *
+ * The stable counterpart of `1 - pchisq(x, df)`. Once the CDF saturates at 1
+ * (which happens around x = 30 for df = 2), `1 - pchisq(...)` returns exactly
+ * 0 and the p-value of a significant test is destroyed. Here the upper
+ * incomplete gamma is evaluated directly, so the tail keeps its magnitude.
+ */
+export function pchisqUpper(x: number, df: number): number {
+  if (x <= 0) return 1;
+  return gammaincc(df / 2, x / 2);
+}
+
+/**
+ * Log gamma (Lanczos approximation).
+ *
+ * The reflection formula needs `|sin(πz)|`: the previous body used
+ * `Math.sin(Math.PI * z)` without the absolute value, so for z in (-1, 0)
+ * the sine is negative and the logarithm of a negative number returned NaN.
+ * Measured: lgamma(-0.5) returned NaN while scipy's gammaln(-0.5) is
+ * 1.2655121234846454. (lgamma(-1.5) happened to work because sin(-1.5π) is
+ * +1, which is why the defect only showed up on part of the negative axis.)
+ * Now aligned with special.lgamma, including the pole at non-positive
+ * integers.
+ */
 export function lgamma(z: number): number {
+  if (z <= 0 && Number.isInteger(z)) return Infinity; // pole at non-positive integers
   if (z < 0.5) {
     // Reflection formula
-    return Math.log(Math.PI / Math.sin(Math.PI * z)) - lgamma(1 - z);
+    const sinTerm = Math.sin(Math.PI * z);
+    if (!Number.isFinite(sinTerm) || sinTerm === 0) return NaN;
+    return Math.log(Math.PI / Math.abs(sinTerm)) - lgamma(1 - z);
   }
   z -= 1;
   const g = 7;
@@ -243,12 +290,20 @@ export function gammainc(s: number, x: number): number {
   return 1 - q;
 }
 
-/** Quantile of chi-square (inverse CDF) — root-finding on pchisq. */
+/**
+ * Quantile of chi-square (inverse CDF) — root-finding on pchisq.
+ *
+ * The iteration now checks that it converged: previously the loop could fall
+ * through after `maxIter` iterations (or after the density underflowed) and
+ * the last iterate was returned as if it were the answer. A quantile that
+ * was never reached is worse than an error (docs/code-style.md 1.3).
+ */
 export function qchisq(p: number, df: number, tol: number = 1e-8, maxIter: number = 200): number {
   // Initial guess via Wilson-Hilferty approx
   const z = qnorm(p);
   let x = df * Math.pow(1 - 2 / (9 * df) + z * Math.sqrt(2 / (9 * df)), 3);
   if (!isFinite(x) || x <= 0) x = Math.max(0.01, df);
+  let converged = false;
   // Newton-Raphson
   for (let i = 0; i < maxIter; i++) {
     const f = pchisq(x, df) - p;
@@ -258,7 +313,12 @@ export function qchisq(p: number, df: number, tol: number = 1e-8, maxIter: numbe
     const step = f / fp;
     x -= step;
     if (x <= 0) x = 1e-10;
-    if (Math.abs(step) < tol * Math.max(1, x)) break;
+    if (Math.abs(step) < tol * Math.max(1, x)) { converged = true; break; }
+  }
+  if (!converged) {
+    throw new Error(
+      `qchisq: the Newton iteration did not converge for p=${p}, df=${df} ` +
+      `within ${maxIter} iterations`);
   }
   return x;
 }
@@ -268,6 +328,19 @@ export function pF(f: number, d1: number, d2: number): number {
   if (f <= 0) return 0;
   const x = (d1 * f) / (d1 * f + d2);
   return betaincRegularized(d1 / 2, d2 / 2, x);
+}
+
+/**
+ * F-distribution UPPER tail: P(F > f) = I_{d2/(d1·f + d2)}(d2/2, d1/2).
+ *
+ * The stable counterpart of `1 - pF(f, d1, d2)`. The complement identity
+ * I_{1-x}(b, a) = 1 - I_x(a, b) is used with the SMALL argument, so the
+ * result never comes from subtracting two nearly equal numbers.
+ */
+export function pFUpper(f: number, d1: number, d2: number): number {
+  if (f <= 0) return 1;
+  const x = d2 / (d1 * f + d2);
+  return betaincRegularized(d2 / 2, d1 / 2, x);
 }
 
 /**
@@ -336,10 +409,36 @@ export function pt(t: number, df: number): number {
   return tCDF(t, df);
 }
 
-/** t-distribution quantile. */
+/**
+ * t-distribution UPPER tail: P(T > t | df) = ½·I_{df/(df+t²)}(df/2, ½).
+ *
+ * The stable counterpart of `1 - pt(t, df)`. Measured against scipy 1.15.3:
+ * for df = 1000, t = 9, scipy's `2·(1 - t.cdf(9, 1000))` is exactly 0 while
+ * `2·t.sf(9, 1000)` is 1.1129077171871438e-18. The t CDF saturates at 1 long
+ * before the tail stops mattering, so any p-value computed as `1 - pt(...)`
+ * is silently reported as 0.
+ *
+ * For t < 0 the tail is larger than 1/2, so `1 - ptUpper(-t)` loses nothing.
+ */
+export function ptUpper(t: number, df: number): number {
+  if (t === 0) return 0.5;
+  if (t < 0) return 1 - ptUpper(-t, df);
+  const x = df / (df + t * t);
+  return 0.5 * betaincRegularized(df / 2, 0.5, x);
+}
+
+/**
+ * t-distribution quantile.
+ *
+ * Like qchisq(), the iteration now verifies that it converged instead of
+ * returning the last iterate after the iteration cap (docs/code-style.md
+ * 1.3). The initial guess is the normal quantile (Hill's approximation),
+ * followed by Newton steps on the t CDF.
+ */
 export function qt(p: number, df: number, tol: number = 1e-8, maxIter: number = 100): number {
   // Hill's algorithm initial guess then Newton-Raphson
   let x = qnorm(p);
+  let converged = false;
   for (let i = 0; i < maxIter; i++) {
     const cdf = pt(x, df);
     const pdf = Math.exp(lgamma((df + 1) / 2) - lgamma(df / 2)) / Math.sqrt(df * Math.PI) *
@@ -347,7 +446,12 @@ export function qt(p: number, df: number, tol: number = 1e-8, maxIter: number = 
     const f = cdf - p;
     const step = f / Math.max(pdf, 1e-300);
     x -= step;
-    if (Math.abs(step) < tol * Math.max(1, Math.abs(x))) break;
+    if (Math.abs(step) < tol * Math.max(1, Math.abs(x))) { converged = true; break; }
+  }
+  if (!converged) {
+    throw new Error(
+      `qt: the Newton iteration did not converge for p=${p}, df=${df} ` +
+      `within ${maxIter} iterations`);
   }
   return x;
 }

@@ -83,7 +83,16 @@ export class DataMatrix{
   imputeMean():DataMatrix{return this._imputeBy('mean');}
   /** Replace NaN with the column median. */
   imputeMedian():DataMatrix{return this._imputeBy('median');}
-  /** K-nearest-neighbour imputation over rows (default k=5). */
+  /**
+   * K-nearest-neighbour imputation over rows (default k=5).
+   *
+   * The imputed copy must carry the metadata over: `transpose()` and
+   * `subset()` both copy rowMeta/colMeta, but these three used to return a
+   * bare DataMatrix, so every sample's GROUP, plot colour, weight and
+   * `excluded` flag — and every variable's unit/min/max/mean/missingCount —
+   * were dropped. An imputation run therefore silently changed the grouping
+   * that the group-based analyses (ANOSIM / PERMANOVA / SIMPER / LDA) read.
+   */
   imputeKNN(k:number=5):DataMatrix{
     const d=new Float64Array(this.data.length);
     for(let i=0;i<this.data.length;i++)d[i]=this.data.data[i];
@@ -109,7 +118,7 @@ export class DataMatrix{
         if(n>0)d[i*this.nVariables+j]=acc/n;
       }
     }
-    return new DataMatrix(new Matrix(d,this.nSamples,this.nVariables),[...this.rowLabels],[...this.colLabels]);
+    return this._copyWith(new Matrix(d,this.nSamples,this.nVariables));
   }
   private _imputeBy(stat:'mean'|'median'):DataMatrix{
     const d=new Float64Array(this.data.length);
@@ -123,7 +132,14 @@ export class DataMatrix{
       else{col.sort((a,b)=>a-b);const m=Math.floor(col.length/2);fill=col.length%2===1?col[m]:(col[m-1]+col[m])/2;}
       for(let i=0;i<this.nSamples;i++)if(isNaN(d[i*this.nVariables+j]))d[i*this.nVariables+j]=fill;
     }
-    return new DataMatrix(new Matrix(d,this.nSamples,this.nVariables),[...this.rowLabels],[...this.colLabels]);
+    return this._copyWith(new Matrix(d,this.nSamples,this.nVariables));
+  }
+  /** A DataMatrix over `data` that keeps this one's labels AND metadata. */
+  private _copyWith(data:Matrix):DataMatrix{
+    const out=new DataMatrix(data,[...this.rowLabels],[...this.colLabels]);
+    for(let i=0;i<this.nSamples;i++){const m=this.rowMeta.get(i);if(m)out.rowMeta.set(i,{...m});}
+    for(let j=0;j<this.nVariables;j++){const m=this.colMeta.get(j);if(m)out.colMeta.set(j,{...m});}
+    return out;
   }
 
   /** Drop columns whose values never vary (data_matrix.py remove_constant_columns). */

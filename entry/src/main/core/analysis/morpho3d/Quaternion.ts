@@ -272,7 +272,15 @@ export class RotationMatrix {
       for (let i = 0; i < 3; i++) V[i][2] = -V[i][2];
     }
     for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) {
-      for (let k = 0; k < 3; k++) R[i][j] += V[i][k] * U[k][j];  // V@U^T
+      // R = V @ Uᵀ, i.e. R[i][j] = Σ_k V[i][k] · U[j][k].
+      //
+      // The old code accumulated `V[i][k] * U[k][j]`, which is V·U — the
+      // transpose of the product.  Both are orthogonal with det = +1, so the
+      // matrix looked perfectly healthy, but it was not the rotation that
+      // superimposes the two point sets: superimposing a rigid pair left a
+      // residual of 0.76 (the review measured 7.7e-1 on another point set)
+      // instead of 0.
+      for (let k = 0; k < 3; k++) R[i][j] += V[i][k] * U[j][k];
     }
     return R;
   }

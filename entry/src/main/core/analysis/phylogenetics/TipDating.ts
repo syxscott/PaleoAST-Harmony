@@ -219,19 +219,17 @@ export function setupTipDating(
   const clonedTree = tree.clone();
   const clonedNodeMap = new Map<PhyloNode, PhyloNode>();
 
+  // The clone is paired with the original by STRUCTURAL POSITION (the index
+  // of the child), never by name. The old code matched children by name, and
+  // a Newick internal node has an empty name — so every internal node of the
+  // clone matched the FIRST empty-named internal node of the original. The
+  // map then pointed two original nodes at one clone: the (C,D) age was
+  // written onto the (A,B) clone and three nodes ended up with no age at all.
   function mapNodes(original: PhyloNode, clone: PhyloNode): void {
     clonedNodeMap.set(original, clone);
-    const childMap = new Map<PhyloNode, PhyloNode>();
-    for (const c of original.children) {
-      for (const cc of clone.children) {
-        if (cc.name === c.name || (c.name === '' && cc.name === '')) {
-          childMap.set(c, cc);
-          break;
-        }
-      }
-    }
-    for (const [orig, cl] of childMap) {
-      mapNodes(orig, cl);
+    const n = Math.min(original.children.length, clone.children.length);
+    for (let i = 0; i < n; i++) {
+      mapNodes(original.children[i], clone.children[i]);
     }
   }
   mapNodes(tree, clonedTree);

@@ -1,6 +1,5 @@
 import router from '@ohos.router';
 import { createPaleoastStartupLoader, type StartupProgress } from '../core/app_infrastructure/StartupLoader';
-import { initNative } from '../core/math/NativeMath';
 
 @Entry
 @Component
@@ -11,12 +10,9 @@ struct Splash {
 
   aboutToAppear(): void {
     // 真实模块预热（StartupLoader，startup/loader.py 模式）：依赖拓扑排序 +
-    // 进度回调；'native' 模块真正探测 NAPI 加速可用性。
-    this.loader.add({
-      id: 'native-detect', label: 'Detecting native acceleration', weight: 1,
-      dependencies: ['native'],
-      load: (): void => { void initNative(); },
-    });
+    // 进度回调。NAPI 加速探测由 loader 自带的 'native' 模块负责，它的 promise
+    // 被 await —— 之前这里另加了一个 'native-detect' 模块，重复探测一次而且
+    // 丢弃 promise（`void initNative()`），启动失败因此永远报不出来。
     this.loader.load((p: StartupProgress) => {
       this.progress = p.percent;
       this.statusLabel = p.currentModule.length > 0 ? p.currentModule : p.phase;

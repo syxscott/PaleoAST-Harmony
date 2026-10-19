@@ -84,15 +84,16 @@ export class LexerTokenizer {
   }
 
   /**
-   * Match regex at a given position using longest-prefix semantics.
+   * Match regex at a given position using longest-match semantics.
+   *
+   * The old implementation tried every prefix and stopped at the FIRST
+   * failure once a match had been found. That is wrong for any pattern with
+   * an optional part: "a(ab)?" matches "aab", but the prefix "aa" does not
+   * match, so the scan stopped there and returned "a". The NFA now computes
+   * the longest match in a single pass, which is both correct and cheaper
+   * than re-running the matcher for every prefix.
    */
   _matchAt(re: RegexCompiler, input: string, pos: number): string | null {
-    let longest: string | null = null;
-    for (let end = pos + 1; end <= input.length; end++) {
-      const s = input.slice(pos, end);
-      if (re.matches(s)) longest = s;       // keep going to find the longest
-      else if (longest !== null) break;     // had a match, no longer matches → stop
-    }
-    return longest;
+    return re.longestMatch(input, pos);
   }
 }

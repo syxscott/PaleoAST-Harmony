@@ -17,6 +17,7 @@
  */
 import { seed, rand, randint } from '../../math/random';
 import { qt, pt } from '../../math/stats';
+import { ComputationError } from '../../utils/Exceptions';
 
 // ─── Broken-stick model (Bennett 1996 / Grimm 1987 / MacArthur 1957) ────────
 
@@ -30,11 +31,19 @@ export interface BrokenStickResult {
  * Broken-stick significance test for CONISS zone selection.
  *
  * E[k] = (1/n) * Σ_{i=k..n} (1/i) is the expected size of the k-th largest
- * segment of a unit stick broken at n-1 random points. Observed BD values
- * (sorted descending, normalised to sum 1) are compared one-to-one with the
- * expectation. p-values come from Monte-Carlo simulation of random breakages
- * (Dirichlet(1,...,1)); the number of significant zones is the contiguous
- * prefix where observed > expectation (Bennett 1996).
+ * segment of a unit stick broken at n-1 random points. The observed zone
+ * heights (sorted descending, normalised to sum 1) are compared one-to-one
+ * with the expectation. p-values come from Monte-Carlo simulation of random
+ * breakages (Dirichlet(1,...,1)); the number of significant zones is the
+ * contiguous prefix where observed > expectation (Bennett 1996).
+ *
+ * WHAT IS BEING TESTED: coniss() feeds this function the third column of
+ * its linkage matrix, which is sqrt(ΔSS) — the Ward incremental
+ * sum-of-squares height, NOT the Bray-Curtis distance between the two
+ * clusters. The name "BD values" in the original Python docstring was
+ * misleading. Changing the tested statistic (Bray-Curtis vs ISS) changes
+ * every p-value and `significantZones`, so it is a design decision, not a
+ * bug fix — the semantics are left as they are and documented here.
  */
 export function brokenStickTest(bdValues: number[], nPermutations: number = 999): BrokenStickResult {
   const n = bdValues.length;
@@ -153,13 +162,27 @@ export function pyperPetermanCorrection(x: number[], y: number[], maxLag?: numbe
 // ─── PCHIP monotone cubic interpolation (Fritsch & Carlson 1980) ────────────
 
 /**
- * Evaluate the PCHIP shape-preserving cubic Hermite interpolant at xq.
- * Slopes follow Fritsch-Carlson: secants filtered to guarantee monotonicity
+ * Slopes of the PCHIP shape-preserving cubic Hermite interpolant.
+ *
+ * Follows Fritsch-Carlson: secants filtered to guarantee monotonicity
  * (Python uses scipy PchipInterpolator — age-depth models must not oscillate).
+ *
+ * The abscissae must be strictly increasing. A repeated x made the secant
+ * `0/0 = NaN`, and because `NaN <= 0` is false the harmonic-mean branch was
+ * taken, so the NaN spread to every interpolated point and the whole age
+ * model silently became NaN.
  */
 export function pchipSlopes(xs: number[], ys: number[]): number[] {
   const n = xs.length;
   if (n < 2) return [0];
+  for (let i = 1; i < n; i++) {
+    if (!(xs[i] > xs[i - 1])) {
+      throw new ComputationError(
+        `pchipSlopes: the interpolation grid must be strictly increasing — ` +
+        `x[${i}] = ${xs[i]} is not greater than x[${i - 1}] = ${xs[i - 1]}` +
+        (xs[i] === xs[i - 1] ? ' (duplicate abscissa)' : ' (out of order)'));
+    }
+  }
   const h: number[] = [], delta: number[] = [];
   for (let i = 0; i < n - 1; i++) {
     h.push(xs[i + 1] - xs[i]);
@@ -180,28 +203,29 @@ export function pchipSlopes(xs: number[], ys: number[]): number[] {
   return d;
 }
 
+/**
+ * Evaluate the PCHIP shape-preserving cubic Hermite interpolant at xq.
+ *
+ * Inside the constrained interval the cubic Hermite basis is used. Outside
+ * it the interpolant is **linearly extrapolated** along the end segment:
+ * the cubic basis is unbounded there and used to diverge wildly (a spline
+ * age model produced −784 Ma below the deepest constraint, while the
+ * linear model truncated at the boundary value — two opposite semantics
+ * for the same question).
+ */
 export function pchipInterpolate(xs: number[], ys: number[], xq: number): number {
   const n = xs.length;
   if (n === 0) return NaN;
   if (n === 1) return ys[0];
-  if (xq <= xs[0] || n === 2) {
-    // linear extrapolation on the end segments
-    const i = xq <= xs[0] ? 0 : 0;
-    const d = pchipSlopes(xs, ys);
-    const h = xs[1] - xs[0];
-    const t = (xq - xs[i]) / h;
-    const h00 = (1 + 2 * t) * (1 - t) * (1 - t), h10 = t * (1 - t) * (1 - t);
-    const h01 = t * t * (3 - 2 * t), h11 = t * t * (t - 1);
-    return h00 * ys[i] + h10 * h * d[i] + h01 * ys[i + 1] + h11 * h * d[i + 1];
+  if (xq <= xs[0]) {
+    // Linear extrapolation on the first segment
+    const slope = (ys[1] - ys[0]) / (xs[1] - xs[0]);
+    return ys[0] + slope * (xq - xs[0]);
   }
   if (xq >= xs[n - 1]) {
-    const d = pchipSlopes(xs, ys);
-    const i = n - 2;
-    const h = xs[i + 1] - xs[i];
-    const t = (xq - xs[i]) / h;
-    const h00 = (1 + 2 * t) * (1 - t) * (1 - t), h10 = t * (1 - t) * (1 - t);
-    const h01 = t * t * (3 - 2 * t), h11 = t * t * (t - 1);
-    return h00 * ys[i] + h10 * h * d[i] + h01 * ys[i + 1] + h11 * h * d[i + 1];
+    // Linear extrapolation on the last segment
+    const slope = (ys[n - 1] - ys[n - 2]) / (xs[n - 1] - xs[n - 2]);
+    return ys[n - 1] + slope * (xq - xs[n - 1]);
   }
   // locate bracketing interval
   let lo = 0, hi = n - 1;
@@ -288,6 +312,15 @@ export function blockBootstrapCI(
   alpha: number = 0.05,
   rngSeed: number = 42,
 ): { ciLower: number; ciUpper: number } {
+  // Fewer than two resamples cannot form an interval: with nBootstrap = 0
+  // the percentile lookup returned `undefined` (which crashed the caller
+  // on `.toFixed()`) and with nBootstrap = 1 a single resample was
+  // reported as a 95% confidence interval.
+  if (!Number.isFinite(nBootstrap) || nBootstrap < 2) {
+    throw new ComputationError(
+      `blockBootstrapCI: nBootstrap must be >= 2 to form a confidence interval (got ${nBootstrap})`);
+  }
+  if (alpha <= 0 || alpha >= 1) throw new ComputationError('blockBootstrapCI: alpha must be in (0, 1)');
   const xs = data.filter(v => isFinite(v));
   const n = xs.length;
   if (n < 4) return { ciLower: NaN, ciUpper: NaN };

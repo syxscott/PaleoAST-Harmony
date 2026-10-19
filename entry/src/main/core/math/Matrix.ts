@@ -98,6 +98,13 @@ export class Matrix {
    * uses -- a (1 x p) row vector broadcast down the rows and a (r x 1) column
    * vector broadcast across the columns -- plus the exact same-shape case.
    *
+   * Which invariant a centring gives follows from the operand's shape, and
+   * the two are NOT interchangeable:
+   * - `X.sub(X.meanAxis(0))` -- the mean is a 1 x p vector of COLUMN means,
+   *   so every COLUMN of X is centred and the COLUMN sums become 0.
+   * - `X.sub(X.meanAxis(1))` -- the mean is an r x 1 vector of ROW means,
+   *   so every ROW of X is centred and the ROW sums become 0.
+   *
    * The previous version indexed `o.data[i]` blindly over `this.length`. When
    * `o` was a 1 x p matrix (the return shape of `meanAxis(0)` / `sumAxis(0)`)
    * every index from p onwards read `undefined`, so the operator returned NaN

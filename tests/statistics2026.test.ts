@@ -29,13 +29,25 @@ describe('audit: Matrix element-wise ops had no broadcasting', () => {
     // `sub` indexed the 1 x p operand with the 5 x 3 receiver's flat index, so
     // o.data[3..14] were undefined and every cell from the second row on became
     // NaN. `X.sub(X.meanAxis(0))` returned only the first row correctly centred.
+    //
+    // NOTE ON THE INVARIANT: centring by the COLUMN means makes the COLUMN
+    // sums vanish. The ROW sums do not (they keep the original row total
+    // minus the sum of the means), so asserting a zero ROW sum asserts
+    // something false. The old assertion did exactly that and only passed
+    // because the runner treated the tolerance as an absolute 12.
     const X = M(X5x3);
     const centred = X.sub(X.meanAxis(0));
     expect(centred.anyNaN()).toBe(false);
-    for (let i = 0; i < X.rows; i++) {
+    const mu = X.meanAxis(0);
+    for (let j = 0; j < X.cols; j++) {
       let colSum = 0;
-      for (let j = 0; j < X.cols; j++) colSum += centred.get(i, j);
-      expect(colSum).toBeCloseTo(0, 12);
+      for (let i = 0; i < X.rows; i++) colSum += centred.get(i, j);
+      expect(colSum).toBeWithin(0, 1e-12);
+    }
+    for (let i = 0; i < X.rows; i++) {
+      for (let j = 0; j < X.cols; j++) {
+        expect(centred.get(i, j)).toBeWithin(X.get(i, j) - mu.get(0, j), 1e-12);
+      }
     }
   });
 
@@ -45,7 +57,7 @@ describe('audit: Matrix element-wise ops had no broadcasting', () => {
     const twos = new Matrix(new Float64Array([2, 2, 2]), 1, 3);
     expect(X.add(ones).anyNaN()).toBe(false);
     expect(X.mul(twos).get(4, 2)).toBeCloseTo(X.get(4, 2) * 2, 12);
-    expect(X.div(twos).get(0, 0)).toBeCloseTo(X.get(0, 0) / 2, 12);
+    expect(X.div(twos).get(0, 0)).toBeWithin(X.get(0, 0) / 2, 12);
     // Column vector (n x 1) broadcasts across the columns too.
     const colv = new Matrix(new Float64Array([1, 2, 3, 4, 5]), 5, 1);
     const scaled = X.mul(colv);
@@ -141,8 +153,10 @@ describe('audit: Shapiro-Wilk weights cancelled the statistic', () => {
   it('matches scipy for n = 3, for n = 5, and for 50 normal draws', () => {
     expect(normalityTest([1, 2, 10]).shapiroStat).toBeCloseTo(0.8321917808219177, 9);
     expect(normalityTest([1, 2, 10]).shapiroP).toBeCloseTo(0.19391752148145214, 9);
-    expect(normalityTest([1, 1.5, 2, 2.5, 9]).shapiroStat).toBeCloseTo(0.7135481348491046, 9);
-    expect(normalityTest([1, 1.5, 2, 2.5, 9]).shapiroP).toBeCloseTo(0.013201260921913621, 9);
+    // The n = 5 pair agrees with scipy to ~5e-10, so the tolerance is stated
+    // as an absolute bound rather than as a number of decimal places.
+    expect(normalityTest([1, 1.5, 2, 2.5, 9]).shapiroStat).toBeWithin(0.7135481348491046, 1e-8);
+    expect(normalityTest([1, 1.5, 2, 2.5, 9]).shapiroP).toBeWithin(0.013201260921913621, 1e-8);
   });
 
   it('W never exceeds 1 and normally-distributed data are not declared non-normal', () => {
@@ -165,7 +179,13 @@ describe('audit: Shapiro-Wilk weights cancelled the statistic', () => {
   });
 
   it('the Anderson-Darling statistic still agrees with scipy', () => {
-    // scipy.stats.anderson(..., dist='norm').statistic
+    // scipy.stats.anderson(..., dist='norm').statistic, on THIS sample.
+    //
+    // The old expectation, 0.2778917960195173, was computed on a DIFFERENT
+    // sample; re-running scipy 1.15.3 on exactly the values generated below
+    // gives 0.2180047214032399. (Verified with the same LCG + Box-Muller
+    // reproduced in Python; scipy's own statistic and a hand-computed A^2
+    // from scipy's CDF/SF agree to 1e-13.)
     let s = 7;
     const rnd = () => { s = (Math.imul(1664525, s >>> 0) + 1013904223) >>> 0; return s / 4294967296; };
     const gauss: number[] = [];
@@ -175,7 +195,7 @@ describe('audit: Shapiro-Wilk weights cancelled the statistic', () => {
       while (v === 0) v = rnd();
       gauss.push(Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v));
     }
-    expect(normalityTest(gauss).andersonStat).toBeCloseTo(0.2778917960195173, 6);
+    expect(normalityTest(gauss).andersonStat).toBeWithin(0.2180047214032399, 1e-9);
   });
 });
 
@@ -274,16 +294,22 @@ describe('audit: PLS read the raw blocks and mis-scaled the explained variance',
   });
 
   it('covarianceExplained is the squared-singular-value share, not the linear one', () => {
-    // s / sum(s) reported 95.5 / 4.5 where the true inertias split 99.8 / 0.2,
-    // and always printed 100% for a single component.
+    // s / sum(s) reported 95.5 / 4.5 where the true inertias split 99.8 / 0.2.
     const r = plsAnalysis(M(A), M(B));
     expect(r.singularValues[0]).toBeCloseTo(2.4041777017645996, 9);
     expect(r.covarianceExplained[0]).toBeCloseTo(98.30051737520597, 8);
     expect(r.covarianceExplained[1]).toBeCloseTo(1.6994826247940327, 8);
     const total = r.covarianceExplained.reduce((s, v) => s + v, 0);
     expect(total).toBeCloseTo(100, 10);
+    // A single-component fit reports the share of the FIRST AXIS OF THE WHOLE
+    // SPECTRUM, not 100%: the retained component explains 98.30% of the
+    // variance and the discarded one still explains 1.70%. The old code
+    // divided by the sum of the KEPT components, so a one-component fit
+    // always printed "100%" — the very behaviour the old comment above
+    // called out as wrong.
     const one = plsAnalysis(M(A), M(B), 1);
-    expect(one.covarianceExplained[0]).toBeCloseTo(100, 10);
+    expect(one.covarianceExplained[0]).toBeCloseTo(98.30051737520597, 8);
+    expect(one.covarianceExplained.length).toBe(1);
   });
 
   it('mismatched or tiny inputs are rejected instead of producing empty scores', () => {

@@ -267,7 +267,12 @@ export class PhyloNode {
     if (this.support !== null) s += String(this.support);
     else if (this.name) s += this.name;
     if (this.branchLength > 0) s += ':' + fmt(this.branchLength);
-    return s + ';';
+    // The ';' terminates the WHOLE tree, so it may only appear on the root.
+    // It used to be appended to every internal node, which produced
+    // "((A:0.1,B:0.1):0.1;,(C:0.1,D:0.1):0.1;);" — every standard Newick
+    // parser stops at the first ';', so a round-trip through this repo's own
+    // parseNewick kept only "((A:0.1,B:0.1):0.1" and lost 4 of 6 taxa.
+    return this.parent === null ? s + ';' : s;
   }
 
   // ─── Fitch Parsimony Indices ────────────────────────────────────
@@ -305,20 +310,77 @@ export class PhyloNode {
     return { treeLength: siteScores.reduce((a, b) => a + b, 0), siteScores };
   }
 
-  computeConsistencyIndex(sequences: Record<string, string>): number {
-    const { treeLength, siteScores } = this.computeParsimonyScore(sequences);
-    if (treeLength === 0) return 1;
-    const m = siteScores.filter(s => s > 0).length;
-    return m / treeLength;
+  /**
+   * Terms of the Kluge & Farris (1979) consistency / retention indices:
+   *
+   *   m = number of parsimony-informative sites. A site is informative when
+   *       at least two of its states each occur at least twice.
+   *   s = steps the informative sites actually need on THIS tree.
+   *   L = minimum number of steps the informative sites could need on ANY
+   *       tree: a character with k states needs at least k-1 steps.
+   *   g = maximum number of steps an informative site can need on THIS tree
+   *       (at most one per internal node) times m.
+   *
+   * The indices themselves are the textbook ones:
+   *   CI = (m - s) / (m - L)      RI = (g - s) / (g - m)
+   */
+  private _indexTerms(sequences: Record<string, string>): { m: number; s: number; L: number; g: number } {
+    const taxa = Object.keys(sequences);
+    const nSites = sequences[taxa[0]]?.length ?? 0;
+    const { siteScores } = this.computeParsimonyScore(sequences);
+    let m = 0, s = 0, L = 0;
+    for (let i = 0; i < nSites; i++) {
+      const counts = new Map<string, number>();
+      for (const name of taxa) {
+        const st = sequences[name][i];
+        counts.set(st, (counts.get(st) ?? 0) + 1);
+      }
+      let nStates = 0, nRepeated = 0;
+      for (const c of counts.values()) { nStates++; if (c >= 2) nRepeated++; }
+      if (nRepeated < 2) continue;          // not parsimony-informative
+      m += 1;
+      s += siteScores[i] ?? 0;
+      L += nStates - 1;                     // minimum possible steps
+    }
+    const nInternal = this.getAllNodes().filter(nd => !nd.isLeaf && nd.children.length > 0).length;
+    return { m, s, L, g: nInternal * m };
   }
 
+  /**
+   * Consistency index (Kluge & Farris 1979): CI = (m - s) / (m - L).
+   *
+   * The previous version counted every site with at least one change as "m"
+   * and divided it by the tree length, so singleton (non-informative) sites
+   * inflated the numerator and CI/RI were systematically too high — a matrix
+   * of mostly autapomorphies scored CI = 1 (= "no homoplasy at all").
+   *
+   * Two cases have no defined value and fall back to the repo's standing
+   * convention (an undefined index reads as 1, like the old `treeLength === 0`
+   * guard):
+   *   - m == 0: there is no informative site, so CI is undefined.
+   *   - m == L: every informative site is binary (two states need one step),
+   *     so the ratio is 0/0. NOTE: this is the common case, and the value 1
+   *     then means "CI is undefined for this dataset", NOT "no homoplasy".
+   */
+  computeConsistencyIndex(sequences: Record<string, string>): number {
+    const { m, s, L } = this._indexTerms(sequences);
+    if (m === 0) return 1;
+    const denom = m - L;
+    if (denom === 0) return 1;
+    return (m - s) / denom;
+  }
+
+  /**
+   * Retention index (Kluge & Farris 1979): RI = (g - s) / (g - m), with g the
+   * maximum number of steps the informative sites could need on this tree
+   * (one per internal node per informative site).
+   */
   computeRetentionIndex(sequences: Record<string, string>): number {
-    const { treeLength, siteScores } = this.computeParsimonyScore(sequences);
-    const nTaxa = this.leafCount();
-    const m = siteScores.filter(s => s > 0).length;
-    const g = m * (nTaxa - 1);
-    if (g === m) return 1;
-    return (g - treeLength) / (g - m);
+    const { m, s, g } = this._indexTerms(sequences);
+    if (m === 0) return 1;
+    const denom = g - m;
+    if (denom === 0) return 1;
+    return (g - s) / denom;
   }
 
   // ─── Compatibility ──────────────────────────────────────────────
@@ -355,6 +417,10 @@ export function parseNewick(newick: string): PhyloNode {
     .filter(line => !/^\s*!/.test(line))
     .join('\n');
   const s = withoutHeader.replace(/\[[^\]]*\]/g, '').trim().replace(/;$/, '');
+  // An empty string used to parse into one nameless leaf, i.e. a "tree" with
+  // a single unnamed taxon. That is not a tree, and it silently propagated
+  // into every downstream analysis.
+  if (s.length === 0) throw new Error('parseNewick: empty Newick string');
   let pos = 0;
 
   function parseNode(): PhyloNode {
@@ -364,7 +430,10 @@ export function parseNewick(newick: string): PhyloNode {
       node = new PhyloNode('', 0, false);
       node.addChild(parseNode());
       while (s[pos] === ',') { pos++; node.addChild(parseNode()); }
-      if (s[pos] === ')') pos++;
+      if (s[pos] !== ')') {
+        throw new Error(`parseNewick: unbalanced parenthesis at position ${pos} ("${s.slice(pos)}")`);
+      }
+      pos++;
     } else {
       node = new PhyloNode('', 0, true);
     }
@@ -403,7 +472,15 @@ export function parseNewick(newick: string): PhyloNode {
     return node;
   }
 
-  return parseNode();
+  const root = parseNode();
+  // Trailing junk used to be dropped on the floor: parseNewick('(A,B))garbage')
+  // returned the tree (A,B) and threw the rest away. A tree with an
+  // unparsed tail is a data-entry error, not a tree.
+  if (pos < s.length) {
+    throw new Error(
+      `parseNewick: unexpected trailing characters at position ${pos} ("${s.slice(pos).slice(0, 20)}")`);
+  }
+  return root;
 }
 
 /**
@@ -499,9 +576,16 @@ export function fitchParsimony(
 
     // Change list: representative (first alphabetical) state transition per edge
     const recordChanges = (node: PhyloNode): void => {
+      const ps = nodeStates.get(node);
+      if (!ps) return;
       for (const child of node.children) {
-        const ps = nodeStates.get(node)!;
-        const cs = nodeStates.get(child)!;
+        const cs = nodeStates.get(child);
+        // A child can be missing from `nodeStates` when the tree was changed
+        // after the down-pass (the SPR used to graft a subtree onto a tip
+        // whose `isLeaf` flag was still true, so the down-pass never visited
+        // that subtree). Skip it instead of dereferencing undefined — the
+        // crash was "cs is not iterable" and it killed the whole search.
+        if (!cs) continue;
         let hasOverlap = false;
         for (const st of cs) if (ps.has(st)) { hasOverlap = true; break; }
         if (!hasOverlap) {
@@ -562,85 +646,82 @@ export function pic(
       return { value: (val === undefined || !isFinite(val)) ? null : val, cumVar: 0 };
     }
 
-    const childResults = node.children.map(c => compute(c)).filter(r => r.value !== null);
-    if (childResults.length < 2) return { value: childResults[0]?.value ?? null, cumVar: 0 };
-
-    // For each child, cumVar = variance from root to child tip (sum of branch lengths)
-    const vars: number[] = [];
-    for (let ci = 0; ci < node.children.length; ci++) {
-      const cr = childResults[ci];
-      const bl = node.children[ci].branchLength || 0;
-      vars.push(cr.cumVar + bl);
+    // The child results MUST stay aligned with `node.children`. The old code
+    // filtered the children without a trait value out of `childResults` and
+    // then indexed the survivors by the child position, so a missing trait
+    // silently compared the WRONG pair of children (the root contrast of
+    // ((A,B),(C,D)) with A missing came out as -3 instead of -2.535) and a
+    // polytomy with one missing tip crashed with
+    // "Cannot read properties of undefined (reading 'cumVar')".
+    const childResults = node.children.map(c => compute(c));
+    const informative: number[] = [];
+    for (let i = 0; i < childResults.length; i++) {
+      if (childResults[i].value !== null) informative.push(i);
     }
 
-    if (node.children.length === 2) {
-      // Binary node: Felsenstein 1985 Eq. (1) contrast = (x_a - x_b) / sqrt(v_a + v_b)
-      const c1 = childResults[0], c2 = childResults[1];
-      const v1 = vars[0], v2 = vars[1];
-      const contrast = (c1.value! - c2.value!) / Math.sqrt(v1 + v2);
-      const se = Math.sqrt(v1 + v2);
+    if (informative.length < 2) {
+      // Not enough information for a contrast. The single informative child
+      // still carries its variance: the old code returned cumVar = 0 here and
+      // dropped the branch length, which changed the dimension of every
+      // contrast further up the tree.
+      if (informative.length === 1) {
+        const i = informative[0];
+        return {
+          value: childResults[i].value,
+          cumVar: childResults[i].cumVar + (node.children[i].branchLength || 0),
+        };
+      }
+      return { value: null, cumVar: 0 };
+    }
+
+    // Variance of every informative child's estimate around this node.
+    const xs: number[] = [];
+    const vars: number[] = [];
+    for (const i of informative) {
+      xs.push(childResults[i].value!);
+      vars.push(childResults[i].cumVar + (node.children[i].branchLength || 0));
+    }
+    const k = informative.length;
+
+    // Felsenstein 1985: a contrast needs two estimates. With k == 2 this is
+    // the classic binary contrast (x1 - x2)/sqrt(v1 + v2); with k > 2 the
+    // Helmert decomposition of the polytomy gives k - 1 orthogonal contrasts.
+    for (let ci = 0; ci < k - 1; ci++) {
+      let wOthers = 0, valOthers = 0;
+      for (let cj = ci + 1; cj < k; cj++) {
+        wOthers += 1 / Math.max(vars[cj], 1e-10);
+        valOthers += xs[cj] / Math.max(vars[cj], 1e-10);
+      }
+      const meanOthers = valOthers / wOthers;   // inverse-variance weighted mean
+      // Variance of the Helmert contrast = v_ci + v_others, where v_others is
+      // the variance of the weighted mean of the remaining children.
+      const vOthers = 1 / Math.max(wOthers, 1e-10);
+      const vContrast = vars[ci] + vOthers;
+      const contrast = (xs[ci] - meanOthers) / Math.sqrt(vContrast);
+      const se = Math.sqrt(vContrast);
       contrasts.push(contrast);
       seList.push(se);
-      contrastPairs.push({
-        nodeA: node.children[0].name || '(internal)',
-        nodeB: node.children[1].name || '(internal)',
-      });
-
-      // Reconstructed value at node: inverse-variance weighted mean
-      const w1 = 1 / Math.max(v1, 1e-10), w2 = 1 / Math.max(v2, 1e-10);
-      const recon = (w1 * c1.value! + w2 * c2.value!) / (w1 + w2);
-      if (node.name) nodeValues[node.name] = recon;
-      // cumVar semantics: variance of this node's RECONSTRUCTED value around
-      // its true value, so a parent can add its own branch length to get the
-      // child's variance around the parent (a tip therefore has cumVar = 0).
-      // The reconstruction is an inverse-variance weighted mean, so its
-      // variance is the harmonic form 1/(1/v1 + 1/v2) = v1·v2/(v1+v2) —
-      // NOT v1+v2, which is the variance of the CONTRAST and inflates the
-      // standard error of every higher-level contrast (by up to √2 per level).
-      const nodeVar = (v1 * v2) / Math.max(v1 + v2, 1e-10);
-      return { value: recon, cumVar: nodeVar };
-    } else {
-      // Polytomy: produce (k-1) independent contrasts via GLS
-      // V = diag(v_1, ..., v_k) since independent tips under Brownian motion
-      // C = (X'V^{-1}X)^{-1} X'V^{-1} t gives node value
-      // contrasts are t_i - sum_j(C_j * t_j) standardized by sqrt(v_i * (1 - sum_j(C_j^2 * v_j)))
-      // Simplified approach: treat polytomy as series of binary contrasts
-      // using Helmert contrasts (Felsenstein 1985 Appendix)
-      const k = node.children.length;
-      // For k-way node, produce (k-1) orthogonal contrasts
-      // Helmert matrix: each contrast is difference between one child and mean of remaining
-      for (let ci = 0; ci < k - 1; ci++) {
-        // Contrast: child_ci vs inverse-variance weighted mean of children ci+1..k-1
-        const w_ci = 1 / Math.max(vars[ci], 1e-10);
-        let w_others = 0, val_others = 0;
-        for (let cj = ci + 1; cj < k; cj++) {
-          w_others += 1 / Math.max(vars[cj], 1e-10);
-          val_others += childResults[cj].value! / Math.max(vars[cj], 1e-10);
-        }
-        const mean_others = val_others / w_others; // inverse-variance weighted mean
-        // Variance of the Helmert contrast = v_ci + v_others, where v_others is
-        // the variance of the weighted mean of the remaining children.
-        const v_others = 1 / Math.max(w_others, 1e-10);
-        const v_contrast = vars[ci] + v_others;
-        const contrast = (childResults[ci].value! - mean_others) / Math.sqrt(v_contrast);
-        const se = Math.sqrt(v_contrast);
-        contrasts.push(contrast);
-        seList.push(se);
+      if (k === 2) {
+        contrastPairs.push({
+          nodeA: node.children[informative[0]].name || '(internal)',
+          nodeB: node.children[informative[1]].name || '(internal)',
+        });
       }
-
-      // Node reconstruction: weighted mean of all children
-      let wSum = 0, wValSum = 0;
-      for (let ci = 0; ci < k; ci++) {
-        const w = 1 / Math.max(vars[ci], 1e-10);
-        wSum += w;
-        wValSum += w * childResults[ci].value!;
-      }
-      const recon = wValSum / wSum;
-      if (node.name) nodeValues[node.name] = recon;
-      // cumVar at node: variance of the inverse-variance weighted mean, i.e.
-      // the harmonic combination 1/Σ(1/v_i) — NOT Σv_i (see the binary branch).
-      return { value: recon, cumVar: 1 / Math.max(wSum, 1e-10) };
     }
+
+    // Node reconstruction: inverse-variance weighted mean of the informative
+    // children. The reconstruction's variance is the harmonic form
+    // 1/sum(1/v_i) — NOT sum(v_i), which is the variance of the CONTRAST and
+    // inflated the standard error of every higher-level contrast.
+    let wSum = 0, wValSum = 0;
+    for (let ci = 0; ci < k; ci++) {
+      const w = 1 / Math.max(vars[ci], 1e-10);
+      wSum += w;
+      wValSum += w * xs[ci];
+    }
+    const recon = wValSum / wSum;
+    if (node.name) nodeValues[node.name] = recon;
+    return { value: recon, cumVar: 1 / Math.max(wSum, 1e-10) };
   }
 
   const rootResult = compute(root);
@@ -745,35 +826,28 @@ export function heuristicSearch(
 
       let improved = false;
       for (const edge of internalEdges) {
-        // edge = { parent, child } where child is an internal node
-        const parent = edge.parent;
-        if (parent.children.length !== 2) continue; // NNI only defined for binary nodes
+        // The edge runs from `p` (the parent) down to `c` (an internal node);
+        // the NNI rearranges the THREE subtrees that meet at that edge: p's
+        // other child and c's two children.
+        //
+        // The old code worked on the edge between `parent` and its OWN parent
+        // (the grandparent) and never put the grandparent's child slot back,
+        // so accepting one move detached a whole subtree from the tree. The
+        // detached taxa stopped contributing to the parsimony score, the
+        // score dropped, and the move was accepted as an "improvement" — the
+        // search converged on progressively more broken trees, and the
+        // reported bestTree was missing taxa.
+        const p = edge.parent;
+        const c = edge.child;
+        if (p.children.length !== 2 || c.children.length !== 2) continue;
+        const other = p.children[0] === c ? p.children[1] : p.children[0];
+        const pKids = [...p.children];
+        const cKids = [...c.children];
 
-        const [childA, childB] = parent.children;
-        const siblingOfParent = parent.parent;
-
-        if (!siblingOfParent) continue; // root has no sibling, skip
-
-        // The two possible NNI rearrangements:
-        // Current: sibling is attached to parent alongside childA
-        // NNI-1: swap childA with sibling
-        // NNI-2: swap childB with sibling
-
-        for (let nniOpt = 0; nniOpt < 2; nniOpt++) {
-          // Save current state for revert
-          const siblingIdx = siblingOfParent.children.indexOf(parent);
-          const parentIdx = parent.children.indexOf(childA);
-
-          // Detach parent from sibling
-          siblingOfParent.removeChild(parent);
-
-          // For NNI option 1: childA becomes sibling's child, sibling becomes parent's child
-          // For NNI option 2: childB becomes sibling's child, sibling becomes parent's child
-          const detachChild = nniOpt === 0 ? childA : childB;
-
-          parent.removeChild(detachChild);
-          siblingOfParent.addChild(detachChild);
-          parent.addChild(siblingOfParent);
+        for (const swap of cKids) {
+          const keep = cKids[0] === swap ? cKids[1] : cKids[0];
+          setChildren(p, [c, swap]);
+          setChildren(c, [other, keep]);
 
           const newResult = fitchParsimony(tree, sequences);
           totalTrees++;
@@ -783,13 +857,10 @@ export function heuristicSearch(
             currentScore = newResult.treeLength;
             improved = true;
             break; // accepted, try next edge
-          } else {
-            // Revert NNI
-            siblingOfParent.removeChild(detachChild);
-            parent.removeChild(siblingOfParent);
-            siblingOfParent.addChild(parent);
-            parent.addChild(detachChild);
           }
+          // Revert NNI
+          setChildren(p, pKids);
+          setChildren(c, cKids);
         }
         if (improved) break;
       }
@@ -817,62 +888,95 @@ export function heuristicSearch(
   return { bestTree: bestTree!, bestScore, nTreesSearched: totalTrees, nRearrangements: totalRearr };
 }
 
+/** Replace a node's children, keeping the parent pointers consistent. */
+function setChildren(node: PhyloNode, kids: PhyloNode[]): void {
+  node.children = kids.slice();
+  for (const k of node.children) k.parent = node;
+}
+
 /** SPR (Subtree Pruning and Regrafting) - enhancement to NNI search.
  *  Reference: phangorn::pratchet / phytools::spr切片 */
 function trySPR(tree: PhyloNode, sequences: Record<string, string>): { newTree: PhyloNode; newScore: number } {
   const internals = getAllInternalNodes(tree);
   if (internals.length === 0) return { newTree: tree, newScore: Infinity };
 
-  // Pick a random internal node to prune
-  const pruneNode = internals[randint(0, internals.length - 1)];
-  if (pruneNode.parent === null) return { newTree: tree, newScore: Infinity };
+  // randint(lo, hi) is [lo, hi) — passing `len - 1` cut the last candidate
+  // off, so the last internal node could never be pruned and the last
+  // candidate could never receive the subtree.
+  const pruneIdx = randint(0, internals.length);
+
+  // Work on a COPY. The SPR is a candidate move: when it does not improve
+  // the score the caller keeps the old tree, so mutating the tree in place
+  // left the accepted score describing a tree that no longer existed.
+  const working = tree.clone();
+  const workInternals = getAllInternalNodes(working);
+  const pruneNode = workInternals[pruneIdx];
+  if (!pruneNode || pruneNode.parent === null) return { newTree: tree, newScore: Infinity };
 
   const parent = pruneNode.parent;
-  const sibling = parent.children.find(c => c !== pruneNode)!;
-
-  // Remove pruneNode from parent
   parent.removeChild(pruneNode);
 
-  // Find all possible regraft locations (any internal node except pruneNode's descendants)
-  const allNodes = tree.getAllNodes().filter(n => n !== pruneNode && !isDescendantOf(pruneNode, n));
-  if (allNodes.length === 0) {
-    parent.addChild(pruneNode);
+  // The regraft target must be an INTERNAL node. Grafting onto a tip left
+  // that tip with `isLeaf === true`, so the Fitch down-pass never visited
+  // the grafted subtree and `recordChanges` dereferenced an undefined state
+  // set ("cs is not iterable") — the whole search died on the first SPR.
+  const candidates = working.getAllNodes().filter(n =>
+    n !== pruneNode && !n.isLeaf && n.children.length > 0 && !isDescendantOf(pruneNode, n));
+  if (candidates.length === 0) {
     return { newTree: tree, newScore: Infinity };
   }
 
-  // Pick random regraft location
-  const regraftNode = allNodes[randint(0, allNodes.length - 1)];
+  const regraftNode = candidates[randint(0, candidates.length)];
 
-  // For binary nodes, regraft as a new child; for polytomies, add to children
+  // The tree root can move: regrafting onto the ROOT inserts a new node
+  // between the root and the tree. The old code left the tree object
+  // pointing at the former root, so the score was computed on a subtree that
+  // no longer contained the grafted taxa -- the pruned taxa silently
+  // stopped counting and the tree "improved" by losing them.
+  let root = working;
+
   pruneNode.branchLength = (regraftNode.branchLength || 0) * 0.5;
-  if (regraftNode.children.length === 0) {
-    regraftNode.addChild(pruneNode);
-  } else if (regraftNode.children.length === 2) {
-    // Split the edge by creating a new intermediate node
+  if (regraftNode.children.length === 2) {
+    // Split the edge by creating a new intermediate node.
+    //
+    // The old parent and the child slot have to be captured BEFORE the
+    // re-parenting: `newParent.addChild(regraftNode)` sets
+    // regraftNode.parent = newParent, so looking the parent up afterwards
+    // found the NEW parent and replaced the new node with ITSELF. The
+    // grafted subtree was then unreachable from the root: its taxa stopped
+    // counting towards the parsimony score, the score dropped, and the move
+    // was accepted as an "improvement".
     const newParent = new PhyloNode('', (regraftNode.branchLength || 0) * 0.5, false);
     regraftNode.branchLength = (regraftNode.branchLength || 0) * 0.5;
+    const oldParent = regraftNode.parent;
+    const oldIndex = oldParent ? oldParent.children.indexOf(regraftNode) : -1;
     newParent.addChild(regraftNode);
     newParent.addChild(pruneNode);
-    if (regraftNode.parent) {
-      const idx = regraftNode.parent.children.indexOf(regraftNode);
-      regraftNode.parent.children[idx] = newParent;
-      newParent.parent = regraftNode.parent;
+    if (oldParent && oldIndex >= 0) {
+      oldParent.children[oldIndex] = newParent;
+      newParent.parent = oldParent;
+    } else {
+      root = newParent;
     }
   } else {
     regraftNode.addChild(pruneNode);
+    regraftNode.isLeaf = false;
   }
 
-  const newScore = fitchParsimony(tree, sequences).treeLength;
-  return { newTree: tree, newScore };
+  const newScore = fitchParsimony(root, sequences).treeLength;
+  return { newTree: root, newScore };
 }
 
 function buildRandomTree(taxa: string[]): PhyloNode {
   // Build a random binary tree via sequential insertion
   const nodes = taxa.map(t => new PhyloNode(t, 0, true));
   while (nodes.length > 1) {
-    const i = randint(0, nodes.length - 1);
+    // randint(lo, hi) is [lo, hi): the old `len - 1` made the last element of
+    // `nodes` unreachable as a merge partner, which biased the distribution of
+    // the random starting trees.
+    const i = randint(0, nodes.length);
     const node1 = nodes.splice(i, 1)[0];
-    const j = randint(0, nodes.length - 1);
+    const j = randint(0, nodes.length);
     const node2 = nodes.splice(j, 1)[0];
     const parent = new PhyloNode('', rand() * 0.5 + 0.1, false);
     node1.branchLength = rand() * 0.5 + 0.1;
@@ -908,121 +1012,215 @@ function getAllInternalEdges(node: PhyloNode): { parent: PhyloNode; child: Phylo
 // Strict Consensus
 // ═══════════════════════════════════════════════════════════════════
 
+/**
+ * A bipartition of the taxon set: the two complementary groups of a split.
+ *
+ * `side` is the CANONICAL side (fewer taxa; ties broken lexicographically),
+ * so one split always produces one key no matter which of its two sides a
+ * tree happened to expose. The old key was `[sideA, sideB].sort().join('|')`
+ * — a lexicographic sort of the two SIDES — which folded the two
+ * complementary halves of one split into a single key and mixed them up with
+ * the halves of a different split.
+ */
+interface Bipartition {
+  side: string[];
+  other: string[];
+  /** Support: 1 for a strict consensus, the tree frequency for a majority rule. */
+  support: number;
+}
+
+/** Key of a bipartition: its canonical side, sorted. */
+function splitKey(side: string[]): string {
+  return [...side].sort().join(',');
+}
+
+/** Canonical form of a bipartition: the smaller group first (ties: lexicographic). */
+function canonicalBipartition(a: Set<string>, b: Set<string>): { side: string[]; other: string[] } {
+  const sa = [...a].sort();
+  const sb = [...b].sort();
+  if (sa.length !== sb.length) {
+    return sa.length < sb.length ? { side: sa, other: sb } : { side: sb, other: sa };
+  }
+  const ka = sa.join(','), kb = sb.join(',');
+  return ka <= kb ? { side: sa, other: sb } : { side: sb, other: sa };
+}
+
+/** Every non-trivial split of a tree, keyed by the canonical side. */
+function getTreeBipartitions(tree: PhyloNode, allTaxa: Set<string>): Map<string, Bipartition> {
+  const out = new Map<string, Bipartition>();
+  const walk = (node: PhyloNode): Set<string> => {
+    const desc = new Set<string>();
+    if (node.isLeaf) {
+      if (allTaxa.has(node.name)) desc.add(node.name);
+      return desc;
+    }
+    for (const child of node.children) {
+      for (const l of walk(child)) desc.add(l);
+    }
+    // The root does not define a split (its complement is empty).
+    if (node.parent !== null && node.parent !== undefined) {
+      const comp = new Set<string>();
+      for (const t of allTaxa) if (!desc.has(t)) comp.add(t);
+      const canon = canonicalBipartition(desc, comp);
+      // Trivial splits (a single taxon on one side) say nothing about the topology.
+      if (canon.side.length > 1 && canon.other.length > 1) {
+        out.set(splitKey(canon.side), { side: canon.side, other: canon.other, support: 1 });
+      }
+    }
+    return desc;
+  };
+  walk(tree);
+  return out;
+}
+
+/** Two splits are compatible when one of the four intersections is empty. */
+function bipartitionsCompatible(a: Bipartition, b: Bipartition): boolean {
+  const A = new Set(a.side), Ap = new Set(a.other);
+  const B = new Set(b.side), Bp = new Set(b.other);
+  const empty = (x: Set<string>, y: Set<string>): boolean => {
+    for (const t of x) if (y.has(t)) return false;
+    return true;
+  };
+  return empty(A, B) || empty(A, Bp) || empty(Ap, B) || empty(Ap, Bp);
+}
+
+/**
+ * Build a tree from a set of MUTUALLY COMPATIBLE splits.
+ *
+ * A split {A | Aᶜ} is a pair of sister groups, so it is realised as TWO
+ * complementary nodes that end up as children of the same parent. The old
+ * majority-rule code instead pushed every member of BOTH sides into one
+ * node, i.e. it read a bipartition as "a clade containing all its members":
+ * the supported split disappeared from the result completely.
+ *
+ * `rootSplit` decides where the root goes; `null` means "the root is a
+ * polytomy of the maximal supported clades".
+ */
+function buildConsensusTree(
+  taxa: string[],
+  splits: Bipartition[],
+  rootSplit: Bipartition | null,
+  withSupport: boolean,
+): PhyloNode {
+  const all = new Set(taxa);
+  const bySide = new Map<string, Bipartition>();
+  for (const s of splits) bySide.set(splitKey(s.side), s);
+
+  const isProperSubset = (a: Set<string>, b: Set<string>): boolean => {
+    if (a.size >= b.size) return false;
+    for (const t of a) if (!b.has(t)) return false;
+    return true;
+  };
+
+  const buildGroup = (members: Set<string>): PhyloNode => {
+    // Candidate clades: the canonical side of every split that fits inside.
+    const candidates: Bipartition[] = [];
+    for (const s of bySide.values()) {
+      if (isProperSubset(new Set(s.side), members)) candidates.push(s);
+    }
+    // Keep only the maximal candidates (none contained in another one).
+    const maximal = candidates.filter(c1 =>
+      !candidates.some(c2 => c1 !== c2 && isProperSubset(new Set(c1.side), new Set(c2.side))));
+    // Of those, the pairwise-disjoint ones with the highest support.
+    const chosen: Bipartition[] = [];
+    const covered = new Set<string>();
+    const ordered = maximal.slice().sort((x, y) =>
+      y.support - x.support || splitKey(x.side).localeCompare(splitKey(y.side)));
+    for (const c of ordered) {
+      let overlap = false;
+      for (const t of c.side) if (covered.has(t)) { overlap = true; break; }
+      if (overlap) continue;
+      chosen.push(c);
+      for (const t of c.side) covered.add(t);
+    }
+    const children: PhyloNode[] = [];
+    for (const c of chosen) {
+      const child = buildGroup(new Set(c.side));
+      if (withSupport) child.support = c.support;
+      children.push(child);
+    }
+    // Taxa that no supported clade covers hang off this group directly.
+    for (const t of members) {
+      if (!covered.has(t)) children.push(new PhyloNode(t, 0, true));
+    }
+    if (children.length === 1) return children[0];
+    const node = new PhyloNode('', 0, false);
+    for (const ch of children) node.addChild(ch);
+    return node;
+  };
+
+  if (rootSplit) {
+    const root = new PhyloNode('', 0, false);
+    const a = buildGroup(new Set(rootSplit.side));
+    const b = buildGroup(new Set(rootSplit.other));
+    if (withSupport) { a.support = rootSplit.support; b.support = rootSplit.support; }
+    root.addChild(a);
+    root.addChild(b);
+    return root;
+  }
+  return buildGroup(all);
+}
+
+/**
+ * The split below a binary root, or null for a polytomy root.
+ *
+ * The root itself has no complement (its descendants are every taxon), so the
+ * root split is the partition of the taxon set by the root's TWO children.
+ */
+function treeRootSplit(tree: PhyloNode, allTaxa: Set<string>): Bipartition | null {
+  if (tree.children.length !== 2) return null;
+  const left = new Set<string>();
+  for (const l of tree.children[0].getLeaves()) if (allTaxa.has(l.name)) left.add(l.name);
+  const right = new Set<string>();
+  for (const l of tree.children[1].getLeaves()) if (allTaxa.has(l.name)) right.add(l.name);
+  if (left.size === 0 || right.size === 0) return null;
+  const canon = canonicalBipartition(left, right);
+  return { side: canon.side, other: canon.other, support: 1 };
+}
+
+/** Look a split up in an accepted set (by canonical key). */
+function findAccepted(accepted: Bipartition[], split: Bipartition | null): Bipartition | null {
+  if (!split) return null;
+  const key = splitKey(split.side);
+  for (const a of accepted) if (splitKey(a.side) === key) return a;
+  return null;
+}
+
 export function strictConsensus(trees: PhyloNode[]): PhyloNode {
   if (trees.length === 0) throw new Error('No trees provided');
   if (trees.length === 1) return trees[0].clone();
 
-  // Get all leaves from first tree
-  const firstTreeLeaves = trees[0].getLeaves();
-  const leafNames = firstTreeLeaves.map(l => l.name).sort();
+  // The taxon universe is the union over all trees: the splits of every tree
+  // have to be expressed in the SAME universe, otherwise two trees with
+  // different taxa produce incomparable keys.
+  const allTaxa = new Set<string>();
+  for (const tree of trees) for (const l of tree.getLeaves()) allTaxa.add(l.name);
+  const taxa = [...allTaxa].sort();
 
-  // Get all bipartitions from each tree
-  const allBipartitions: Set<string>[] = [];
-  for (const tree of trees) {
-    allBipartitions.push(getBipartitions(tree));
-  }
+  const perTree = trees.map(t => getTreeBipartitions(t, allTaxa));
 
-  // Keep only bipartitions present in ALL trees (strict consensus)
-  const common: string[] = [];
-  for (const bip of allBipartitions[0]) {
+  // Keep only the splits present in ALL trees (strict consensus)
+  const common: Bipartition[] = [];
+  for (const [key, bip] of perTree[0]) {
     let inAll = true;
-    for (let i = 1; i < allBipartitions.length; i++) {
-      if (!allBipartitions[i].has(bip)) { inAll = false; break; }
+    for (let i = 1; i < perTree.length; i++) {
+      if (!perTree[i].has(key)) { inAll = false; break; }
     }
     if (inAll) common.push(bip);
   }
 
-  // Build consensus tree from common bipartitions
-  // Create leaf nodes for all taxa
-  const leafNodes: Map<string, PhyloNode> = new Map();
-  for (const name of leafNames) {
-    leafNodes.set(name, new PhyloNode(name, 0, true));
-  }
-
-  // If no common bipartitions, return star tree
+  // No common split -> star tree
   if (common.length === 0) {
     const root = new PhyloNode('', 0, false);
-    for (const leaf of leafNodes.values()) {
-      root.addChild(leaf);
-    }
+    for (const name of taxa) root.addChild(new PhyloNode(name, 0, true));
     return root;
   }
 
-  // Parse bipartitions to build tree structure
-  // Each bipartition splits leaves into two groups
-  const groupA: Set<string>[] = [];
-  for (const bip of common) {
-    const sides = bip.split('|');
-    const sideA = new Set(sides[0].split(','));
-    groupA.push(sideA);
-  }
-
-  // Build tree by iteratively grouping
-  let currentGroups: Set<string>[] = [new Set(leafNames)];
-  let nodes: Map<string, PhyloNode> = new Map(leafNodes);
-
-  for (const group of groupA.reverse()) {
-    // Find if this group is a subset of any current group
-    for (let i = 0; i < currentGroups.length; i++) {
-      const superSet = currentGroups[i];
-      let isSubset = true;
-      for (const elem of group) {
-        if (!superSet.has(elem)) { isSubset = false; break; }
-      }
-      if (isSubset && group.size < superSet.size) {
-        // Create internal node for this group
-        const internalNode = new PhyloNode('', 0, false);
-        for (const name of group) {
-          const node = nodes.get(name);
-          if (node) internalNode.addChild(node);
-        }
-        // Replace superSet with two subgroups
-        const remaining = new Set<string>();
-        for (const name of superSet) {
-          if (!group.has(name)) remaining.add(name);
-        }
-        currentGroups.splice(i, 1, remaining, group);
-        for (const name of group) nodes.set(name, internalNode);
-        break;
-      }
-    }
-  }
-
-  // Build final tree from remaining groups
-  const root = new PhyloNode('', 0, false);
-  for (const node of nodes.values()) {
-    if (node.parent === undefined || node.parent === null) {
-      root.addChild(node);
-    }
-  }
-
-  return root;
-}
-
-function getBipartitions(tree: PhyloNode): Set<string> {
-  const leaves = tree.getLeaves();
-  const leafNames = new Set(leaves.map(l => l.name));
-  const bipartitions = new Set<string>();
-
-  function traverse(node: PhyloNode): Set<string> {
-    if (node.isLeaf) return new Set([node.name]);
-    const descendantLeaves = new Set<string>();
-    for (const child of node.children) {
-      const childLeaves = traverse(child);
-      for (const l of childLeaves) descendantLeaves.add(l);
-    }
-    // Create bipartition: {descendants} vs {all - descendants}
-    // Fixed: check if this is the root node (has no parent), skip root from bipartitions
-    if (node.parent !== undefined && node.parent !== null) {
-      const sideA = [...descendantLeaves].sort().join(',');
-      const sideB = [...leafNames].filter(l => !descendantLeaves.has(l)).sort().join(',');
-      bipartitions.add([sideA, sideB].sort().join('|'));
-    }
-    return descendantLeaves;
-  }
-
-  traverse(tree);
-  return bipartitions;
+  // Root the consensus on the root split of the first tree when that split
+  // is shared by all of them; otherwise the root is a polytomy of the
+  // maximal shared clades.
+  const rootSplit = findAccepted(common, treeRootSplit(trees[0], allTaxa));
+  return buildConsensusTree(taxa, common, rootSplit, false);
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1370,147 +1568,54 @@ export function majorityRuleConsensus(trees: PhyloNode[], threshold: number = 0.
   if (trees.length === 1) return trees[0].clone();
 
   const nTrees = trees.length;
-  const allLeaves = trees[0].getLeaves().map(l => l.name);
+  const allTaxa = new Set<string>();
+  for (const tree of trees) for (const l of tree.getLeaves()) allTaxa.add(l.name);
+  const taxa = [...allTaxa].sort();
 
-  // Count bipartitions across all trees
-  const bipCounts = new Map<string, number>();
-
+  // Count the splits over all trees
+  const counts = new Map<string, number>();
+  const bips = new Map<string, Bipartition>();
   for (const tree of trees) {
-    const bips = getBipartitionsMR(tree, new Set(allLeaves));
-    for (const bip of bips) {
-      bipCounts.set(bip, (bipCounts.get(bip) || 0) + 1);
+    for (const [key, bip] of getTreeBipartitions(tree, allTaxa)) {
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+      if (!bips.has(key)) bips.set(key, bip);
     }
   }
 
-  // Keep bipartitions above threshold
-  const keptBips: { bip: string; freq: number }[] = [];
-  for (const [bip, count] of bipCounts) {
+  // Keep the splits above the threshold
+  const kept: Bipartition[] = [];
+  for (const [key, count] of counts) {
     const freq = count / nTrees;
-    if (freq >= threshold) keptBips.push({ bip, freq });
-  }
-
-  // Build leaf nodes for all taxa
-  const leafNodes: Map<string, PhyloNode> = new Map();
-  for (const name of allLeaves) {
-    leafNodes.set(name, new PhyloNode(name, 0, true));
-  }
-
-  // Build consensus tree from kept bipartitions using a Union-Find approach
-  const parent = new Map<string, string | null>();
-  for (const name of allLeaves) parent.set(name, null);
-
-  // Track internal nodes by their leaf-set key (sorted comma-joined names)
-  // This replaces dead code that tried to find internal nodes by .name (which is always '')
-  const internalNodeMap = new Map<string, PhyloNode>();
-
-  // Sort bipartitions by frequency (highest first) for stable tree building
-  keptBips.sort((a, b) => b.freq - a.freq);
-
-  for (const { bip } of keptBips) {
-    const sides = bip.split('|');
-    const groupA = new Set(sides[0].split(',').filter(s => s.length > 0));
-    const groupB = new Set(sides[1].split(',').filter(s => s.length > 0));
-
-    // Find representatives for each group (may be leaf or internal node)
-    const findRep = (name: string): string => {
-      const p = parent.get(name);
-      if (p === null || p === undefined) return name;
-      const root = findRep(p);
-      parent.set(name, root);
-      return root;
-    };
-
-    // Get all members of each group as flat arrays
-    const groupAMembers = [...groupA];
-    const groupBMembers = [...groupB];
-
-    if (groupAMembers.length === 0 || groupBMembers.length === 0) continue;
-
-    // Check if groups are already connected via parent pointers
-    const repA = findRep(groupAMembers[0]);
-    const repB = findRep(groupBMembers[0]);
-
-    if (repA !== repB) {
-      // Groups are in different components, create a new internal node joining them
-      const newNode = new PhyloNode('', 0, false);
-      newNode.support = keptBips.find(kb => kb.bip === bip)?.freq ?? threshold;
-
-      // Key for this internal node: sorted union of both groups
-      const allMembers = [...groupA, ...groupB].sort().join(',');
-      internalNodeMap.set(allMembers, newNode);
-
-      // Add all members of groupA
-      for (const name of groupAMembers) {
-        const node = leafNodes.get(name);
-        if (node) newNode.addChild(node);
-        else {
-          // name might be an internal node identifier, find corresponding internal node
-          // Look up by leaf-set key
-          const internal = internalNodeMap.get(name);
-          if (internal) newNode.addChild(internal);
-        }
-        parent.set(name, allMembers); // union-find: point to the new internal node's key
-      }
-
-      // Add all members of groupB
-      for (const name of groupBMembers) {
-        const node = leafNodes.get(name);
-        if (node) newNode.addChild(node);
-        else {
-          const internal = internalNodeMap.get(name);
-          if (internal) newNode.addChild(internal);
-        }
-        parent.set(name, allMembers);
-      }
+    if (freq >= threshold) {
+      const bip = bips.get(key)!;
+      kept.push({ side: bip.side, other: bip.other, support: freq });
     }
   }
 
-  // Build the root node from all top-level components
-  const root = new PhyloNode('', 0, false);
-
-  // Collect all nodes that have no parent (top-level)
-  const hasParent = new Set<string>();
-  for (const name of parent.keys()) {
-    const p = parent.get(name);
-    if (p !== null && p !== undefined && p !== name) {
-      hasParent.add(name);
+  // Two splits that cross each other cannot be drawn in one tree. They are
+  // added in decreasing support, so the better supported split wins and the
+  // conflicting one is dropped — a consensus tree is a TREE, not a set of
+  // incompatible constraints.
+  kept.sort((a, b) => b.support - a.support || splitKey(a.side).localeCompare(splitKey(b.side)));
+  const accepted: Bipartition[] = [];
+  for (const cand of kept) {
+    let compatible = true;
+    for (const acc of accepted) {
+      if (!bipartitionsCompatible(cand, acc)) { compatible = false; break; }
     }
+    if (compatible) accepted.push(cand);
   }
 
-  // Find all roots (nodes that are not a child of any other node)
-  for (const name of allLeaves) {
-    if (!hasParent.has(name)) {
-      const node = leafNodes.get(name);
-      if (node) root.addChild(node);
-    }
+  if (accepted.length === 0) {
+    const root = new PhyloNode('', 0, false);
+    for (const name of taxa) root.addChild(new PhyloNode(name, 0, true));
+    return root;
   }
 
-  // Add any internal nodes that weren't attached as children
-  for (const internal of internalNodeMap.values()) {
-    if (internal.parent === null || internal.parent === undefined) {
-      // Check if this internal node is already a descendant of root
-      let isDescendant = false;
-      for (const child of root.children) {
-        if (isDescendantOf(child, internal)) {
-          isDescendant = true;
-          break;
-        }
-      }
-      if (!isDescendant && internal.children.length > 0) {
-        root.addChild(internal);
-      }
-    }
-  }
-
-  // If root has no children, build a star tree from all leaves
-  if (root.children.length === 0) {
-    for (const name of allLeaves) {
-      const node = leafNodes.get(name);
-      if (node) root.addChild(node);
-    }
-  }
-
-  return root;
+  // Root the consensus on the root split of the first tree when that split is
+  // supported, otherwise on the best supported split.
+  const rootSplit = findAccepted(accepted, treeRootSplit(trees[0], allTaxa)) ?? accepted[0];
+  return buildConsensusTree(taxa, accepted, rootSplit, true);
 }
 
 function isDescendantOf(node: PhyloNode, potentialAncestor: PhyloNode): boolean {
@@ -1519,28 +1624,6 @@ function isDescendantOf(node: PhyloNode, potentialAncestor: PhyloNode): boolean 
     if (isDescendantOf(child, potentialAncestor)) return true;
   }
   return false;
-}
-
-function getBipartitionsMR(tree: PhyloNode, allLeaves: Set<string>): Set<string> {
-  const bips = new Set<string>();
-
-  function traverse(node: PhyloNode): Set<string> {
-    if (node.isLeaf) return new Set([node.name]);
-    const descendantLeaves = new Set<string>();
-    for (const child of node.children) {
-      const childLeaves = traverse(child);
-      for (const l of childLeaves) descendantLeaves.add(l);
-    }
-    if (descendantLeaves.size > 0 && descendantLeaves.size < allLeaves.size) {
-      const sideA = [...descendantLeaves].sort().join(',');
-      const sideB = [...allLeaves].filter(l => !descendantLeaves.has(l)).sort().join(',');
-      bips.add([sideA, sideB].sort().join('|'));
-    }
-    return descendantLeaves;
-  }
-
-  traverse(tree);
-  return bips;
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1615,9 +1698,18 @@ export function computeRFDistance(
       for (const c of node.children) {
         for (const l of walk(c)) leaves.add(l);
       }
-      if (leaves.size > 1 && leaves.size < n - 1) {
-        const key = [...leaves].sort().join(',');
-        splits.add(key);
+      // A split is the PAIR {descendants | complement}. The old key used the
+      // descendant set only, so the two halves of one split were counted as
+      // two different splits and every RF distance came out exactly twice the
+      // true value (4 instead of 2 for two 4-taxon trees; a normalised value
+      // of 2 where 1 is the maximum).
+      if (leaves.size > 1) {
+        const complement = new Set<string>();
+        for (const t of shared) if (!leaves.has(t)) complement.add(t);
+        if (complement.size > 1) {
+          const canon = canonicalBipartition(leaves, complement);
+          splits.add(splitKey(canon.side));
+        }
       }
       return leaves;
     };

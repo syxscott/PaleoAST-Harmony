@@ -35,9 +35,49 @@ export function splitCSVLine(line: string, delimiter: string): string[] {
   return fields;
 }
 
+/**
+ * Split delimited text into RECORDS (RFC 4180 §2.5 + §2.6).
+ *
+ * A record may span several physical lines because a quoted field may contain
+ * a line break, so the text cannot be split on newlines first: the record
+ * `id,note\nr1,"line1\nline2"\n` is TWO records, not three. Splitting on
+ * newlines produced three rows, the second one half a record, and every
+ * column after the note was shifted by one.
+ *
+ * Quote handling mirrors `splitCSVLine` exactly (a doubled quote inside a
+ * quoted field is a literal quote), so the two never disagree about where a
+ * field starts.
+ */
+export function splitCSVRecords(text: string): string[] {
+  const records: string[] = [];
+  let current = '';
+  let inQuotes = false;
+
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === '"') {
+      current += ch;
+      if (inQuotes && text[i + 1] === '"') {
+        current += text[i + 1];
+        i++;
+      } else {
+        inQuotes = !inQuotes;
+      }
+    } else if (!inQuotes && (ch === '\n' || ch === '\r')) {
+      records.push(current);
+      current = '';
+      if (ch === '\r' && text[i + 1] === '\n') i++;
+    } else {
+      current += ch;
+    }
+  }
+  if (current.length > 0) records.push(current);
+  return records;
+}
+
 export function parseCSV(text: string, delimiter = ',', hasHeader = true, hasRowLabels = true, naValues: string[] = ['NA','NaN','-','','nan','null']): DataMatrix {
-  // Fixed: use proper regex /\r?\n/ to match optional CR + LF
-  const lines = text.trim().split(/\r?\n/).filter(l => l.trim());
+  // Records, not lines: a quoted field may contain a line break (RFC 4180).
+  const lines = splitCSVRecords(text).filter(l => l.trim());
   if (lines.length === 0) throw new Error('Empty CSV');
   const splitRow = (line: string): string[] => splitCSVLine(line, delimiter);
   let startRow = 0; let colLabels: string[] = [];

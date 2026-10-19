@@ -14,66 +14,125 @@ export interface TPSRecord {
 export function parseTPS(text: string): TPSRecord[] {
   const records: TPSRecord[] = [];
   const lines = text.split(/\r?\n/);
-  let current: Partial<TPSRecord> | null = null;
-  let lmCount = 0;
+
+  // The record under construction. The ID is kept separately from the
+  // landmark block because the two arrive in either order:
+  //   ID= sp1            <- ID before LM (the usual way round)
+  //   LM= 2              <- ID after LM (also seen in the wild)
+  // The old parser flushed (and thereby DROPPED) a record that had an ID but
+  // no landmarks yet, so with the ID-first spelling every specimen inherited
+  // the name of the NEXT one and the first ID was lost entirely.
+  let id: string | null = null;
+  let comment = '';
+  let imageFile: string | undefined = undefined;
   let landmarks: number[][] = [];
-  let collectingLM = false;
   let curves: number[][][] = [];
   let currentCurve: number[][] = [];
+  let lmCount = 0;
+  let collectingLM = false;
   let collectingCurve = false;
   // TPS distinguishes 2-D (`LM=`) from 3-D (`LM3=`) landmark blocks, so the
   // coordinate reader below knows how many components to keep.
   let is3D = false;
 
-  function flush(): void {
-    if (current && landmarks.length > 0) {
-      current.landmarks = landmarks;
-      if (curves.length > 0) current.curves = curves;
-      records.push(current as TPSRecord);
+  /** The landmark block of the current record is complete. */
+  function blockComplete(): boolean {
+    return lmCount > 0 && landmarks.length >= lmCount;
+  }
+
+  /**
+   * Store the current record (if it carries data) and start a new one.
+   *
+   * The landmark count (`LM=8`) and the 2-D/3-D flag are FILE-level
+   * declarations: a TPS file normally has one "LM=8" header for all
+   * specimens, so they survive the record boundary. Only the record's own
+   * data is reset.
+   */
+  function commit(): void {
+    if (landmarks.length > 0 || curves.length > 0) {
+      const record: TPSRecord = {
+        id: id !== null ? id : String(records.length + 1),
+        landmarks,
+        comment
+      };
+      if (imageFile !== undefined) record.imageFile = imageFile;
+      if (curves.length > 0) record.curves = curves;
+      records.push(record);
     }
-    current = null;
+    id = null;
+    comment = '';
+    imageFile = undefined;
     landmarks = [];
     curves = [];
+    currentCurve = [];
     collectingLM = false;
     collectingCurve = false;
-    is3D = false;
   }
 
   for (const line of lines) {
     const t = line.trim();
-    if (!t) { flush(); continue; }
+    if (!t) {
+      // A blank line only ends a curve; it does not end a record (the ID of
+      // a record may still arrive after its landmarks).
+      if (collectingCurve && currentCurve.length > 0) {
+        curves.push(currentCurve);
+        currentCurve = [];
+      }
+      continue;
+    }
 
     if (t.startsWith('LM=') || t.startsWith('lm=')) {
-      flush();
-      lmCount = parseInt(t.split('=')[1]) || 0;
+      // A new landmark block starts a new record once the previous block is
+      // complete; otherwise it replaces an unfinished block of the same
+      // record (the ID is kept).
+      if (blockComplete()) commit();
+      landmarks = [];
+      lmCount = parseInt(t.substring(t.indexOf('=') + 1)) || 0;
       is3D = false;
-      current = current ?? { id: String(records.length + 1), landmarks: [], comment: '' };
       collectingLM = true;
       collectingCurve = false;
       continue;
     }
     if (t.startsWith('LM3=')) {
-      flush();
-      lmCount = parseInt(t.split('=')[1]) || 0;
+      if (blockComplete()) commit();
+      landmarks = [];
+      lmCount = parseInt(t.substring(t.indexOf('=') + 1)) || 0;
       is3D = true;
-      current = current ?? { id: String(records.length + 1), landmarks: [], comment: '' };
       collectingLM = true;
       collectingCurve = false;
       continue;
     }
     if (t.startsWith('ID=') || t.startsWith('id=')) {
-      if (!current) current = { id: '', landmarks: [], comment: '' };
-      current.id = t.split('=')[1];
+      const value = t.substring(t.indexOf('=') + 1).trim();
+      if (blockComplete()) {
+        if (id === null) {
+          // The landmarks of this record were just read and the record has no
+          // name yet: THIS ID names it (the "LM= first, ID= after" spelling).
+          id = value;
+          commit();
+        } else {
+          // The record that just finished is complete and already named, so
+          // this ID opens the NEXT record. The old parser flushed here too,
+          // but it also dropped the record it had just closed, so every
+          // specimen inherited the name of the NEXT one.
+          commit();
+          id = value;
+        }
+      } else {
+        // The record is not complete yet: this ID names it and its landmarks
+        // are still to come.
+        id = value;
+      }
+      // The coordinates that follow belong to the record that is being built.
+      collectingLM = lmCount > 0 && landmarks.length < lmCount;
       continue;
     }
     if (t.startsWith('COMMENT=') || t.startsWith('comment=')) {
-      if (!current) current = { id: '', landmarks: [], comment: '' };
-      current.comment = t.substring(t.indexOf('=') + 1);
+      comment = t.substring(t.indexOf('=') + 1);
       continue;
     }
     if (t.startsWith('IMAGE=') || t.startsWith('image=')) {
-      if (!current) current = { id: '', landmarks: [], comment: '' };
-      current.imageFile = t.substring(t.indexOf('=') + 1);
+      imageFile = t.substring(t.indexOf('=') + 1);
       continue;
     }
     if (t.startsWith('CURVES=') || t.startsWith('curves=')) {
@@ -100,7 +159,7 @@ export function parseTPS(text: string): TPSRecord[] {
     // Curve data
     if (collectingCurve) {
       // Semicolon or empty line ends current curve
-      if (t === ';' || t === '') {
+      if (t === ';') {
         if (currentCurve.length > 0) {
           curves.push(currentCurve);
           currentCurve = [];
@@ -114,7 +173,7 @@ export function parseTPS(text: string): TPSRecord[] {
       continue;
     }
   }
-  flush();
+  commit();
   return records;
 }
 

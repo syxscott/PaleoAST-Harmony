@@ -71,6 +71,9 @@ export function serializeMatrix(data: Float64Array, options?: SerializeOptions):
 }
 
 export function deserializeMatrix(buffer: ArrayBuffer): Float64Array {
+  if (buffer.byteLength < HEADER_SIZE) {
+    throw new CorruptedCacheError(`Cache file too short: ${buffer.byteLength} bytes, header needs ${HEADER_SIZE}`);
+  }
   const view = new DataView(buffer);
   const magic = view.getUint32(0);
   if (magic !== MAGIC) throw new Error('Invalid cache file: bad magic');
@@ -83,10 +86,17 @@ export function deserializeMatrix(buffer: ArrayBuffer): Float64Array {
   const payload = new Uint8Array(buffer, HEADER_SIZE);
   const actualCrc = crc32(payload);
   if (storedCrc !== 0 && storedCrc !== actualCrc) {
-    throw new Error(`Cache payload corrupt: CRC32 mismatch (stored ${storedCrc}, computed ${actualCrc})`);
+    throw new CorruptedCacheError(`Cache payload corrupt: CRC32 mismatch (stored ${storedCrc}, computed ${actualCrc})`);
   }
   if (payload.byteLength !== expectedBytes) {
-    throw new Error(`Cache payload length mismatch: header ${expectedBytes}, actual ${payload.byteLength}`);
+    throw new CorruptedCacheError(`Cache payload length mismatch: header ${expectedBytes}, actual ${payload.byteLength}`);
+  }
+  if (payload.byteLength % 8 !== 0) {
+    // A Float64Array needs a whole number of doubles. The old code handed the
+    // truncated payload to the constructor, which threw a bare RangeError —
+    // an error that says nothing about the file that caused it.
+    throw new CorruptedCacheError(
+      `Cache payload is not a whole number of doubles: ${payload.byteLength} bytes`);
   }
   return new Float64Array(buffer, HEADER_SIZE);
 }
@@ -124,5 +134,13 @@ export function saveMatrix(data: Float64Array, nRows: number, nCols: number): Ar
 export function loadMatrix(buffer: ArrayBuffer): { data: Float64Array; nRows: number; nCols: number } {
   const header = readCacheHeader(buffer);
   const data = deserializeMatrix(buffer);
+  // The shape in the header must match the payload. A header claiming 3x3
+  // over a payload of four doubles used to be accepted, and every consumer
+  // then read past the end of the data without noticing.
+  if (header.nRows > 0 && header.nCols > 0 && header.nRows * header.nCols !== data.length) {
+    throw new CorruptedCacheError(
+      `Cache shape mismatch: header says ${header.nRows}x${header.nCols} ` +
+      `(${header.nRows * header.nCols} values), payload holds ${data.length}`);
+  }
   return { data, nRows: header.nRows, nCols: header.nCols };
 }

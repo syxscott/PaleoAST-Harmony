@@ -66,6 +66,6 @@ describe('audit: ProcessPool.map isolates per-item errors (unchanged contract)',
     });
     expect(out[0]).toBe(10);
     expect(out[1] === null ? 'null for the failing item' : 'got ' + out[1]).toBe('null for the failing item');
-    expect(out[2]).toBeCloseTo(10 / 3, 1e-9);
+    expect(out[2]).toBeWithin(10 / 3, 1e-9);
   });
 });

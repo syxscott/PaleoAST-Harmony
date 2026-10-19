@@ -14,6 +14,133 @@
 
 import { State, Transition } from './Base';
 
+// ─── Character classes ──────────────────────────────────────────────
+
+/**
+ * A character class: a set of characters, optionally negated.
+ *
+ * The regex compiler used to treat every character of the pattern as a
+ * literal, so `[0-9]+(\.[0-9]+)?` was compiled into an NFA that matched the
+ * LITERAL text "[0-9]+...". Every rule of the basic lexer was therefore
+ * unmatchable and every token came out as UNKNOWN.
+ */
+export interface CharClass {
+  /** Inclusive code-point ranges. */
+  ranges: number[][];
+  /** When true the class matches every character EXCEPT the ranges. */
+  negated: boolean;
+}
+
+/** Marks a transition key that holds a character class instead of a literal. */
+const CLASS_PREFIX = '\u0000';
+
+/** The usual shorthand classes (\d \s \w and their negations). */
+const SHORTHAND_CLASSES: Record<string, CharClass> = {
+  'd': { 'ranges': [[48, 57]], 'negated': false },                            // 0-9
+  'D': { 'ranges': [[48, 57]], 'negated': true },
+  's': { 'ranges': [[9, 13], [32, 32]], 'negated': false },                     // \t \n \v \f \r, space
+  'S': { 'ranges': [[9, 13], [32, 32]], 'negated': true },
+  'w': { 'ranges': [[48, 57], [65, 90], [95, 95], [97, 122]], 'negated': false }, // 0-9 A-Z _ a-z
+  'W': { 'ranges': [[48, 57], [65, 90], [95, 95], [97, 122]], 'negated': true },
+};
+
+/** The transition key that holds a class. */
+function classKey(cls: CharClass): string {
+  const body = cls.ranges.map(r => `${r[0]}-${r[1]}`).join(',');
+  return CLASS_PREFIX + (cls.negated ? '!' : '') + body;
+}
+
+/** Read a class back from its transition key (null for a literal key). */
+function parseClassKey(key: string): CharClass | null {
+  if (!key.startsWith(CLASS_PREFIX)) return null;
+  const body = key.slice(CLASS_PREFIX.length);
+  const negated = body.startsWith('!');
+  const rest = negated ? body.slice(1) : body;
+  const ranges: number[][] = [];
+  if (rest.length > 0) {
+    for (const part of rest.split(',')) {
+      if (!part) continue;
+      const dash = part.indexOf('-');
+      ranges.push([parseInt(part.slice(0, dash), 10), parseInt(part.slice(dash + 1), 10)]);
+    }
+  }
+  return { ranges, negated };
+}
+
+/** Does the class match this character? */
+function classMatches(cls: CharClass, ch: string): boolean {
+  const code = ch.charCodeAt(0);
+  let inside = false;
+  for (const r of cls.ranges) {
+    if (code >= r[0] && code <= r[1]) { inside = true; break; }
+  }
+  return cls.negated ? !inside : inside;
+}
+
+/**
+ * All transition targets of a state for one input character: the literal
+ * transition plus every character class that contains the character.
+ */
+function targetsFor(state: State, ch: string): State[] {
+  const out: State[] = [];
+  const literal = state.transitions.get(ch);
+  if (literal) for (const t of literal) out.push(t);
+  for (const [sym, targets] of state.transitions) {
+    if (sym.length === 0 || !sym.startsWith(CLASS_PREFIX)) continue;
+    const cls = parseClassKey(sym);
+    if (cls && classMatches(cls, ch)) for (const t of targets) out.push(t);
+  }
+  return out;
+}
+
+/** One token of a compiled pattern: a literal character or a character class. */
+interface PatternToken {
+  /** The literal character ('' for a class token). */
+  ch: string;
+  /** The character class (null for a literal token). */
+  cls: CharClass | null;
+}
+
+/** Parse a `[...]` character class starting at `start`. */
+function parseCharClass(pattern: string, start: number): { cls: CharClass; next: number } {
+  let i = start + 1;
+  let negated = false;
+  if (pattern[i] === '^') { negated = true; i++; }
+  const ranges: number[][] = [];
+  while (i < pattern.length && pattern[i] !== ']') {
+    let ch: string;
+    if (pattern[i] === '\\') {
+      i++;
+      const e = pattern[i];
+      if (e === undefined) throw new Error('RegexCompiler: unterminated escape in a character class');
+      const shorthand = SHORTHAND_CLASSES[e];
+      if (shorthand) {
+        for (const r of shorthand.ranges) ranges.push([r[0], r[1]]);
+        i++;
+        continue;
+      }
+      ch = e;
+      i++;
+    } else {
+      ch = pattern[i];
+      i++;
+    }
+    const lo = ch.charCodeAt(0);
+    if (pattern[i] === '-' && i + 1 < pattern.length && pattern[i + 1] !== ']') {
+      i++;
+      let hi: string;
+      if (pattern[i] === '\\') { i++; hi = pattern[i] ?? ''; i++; }
+      else { hi = pattern[i]; i++; }
+      ranges.push([lo, hi.charCodeAt(0)]);
+    } else {
+      ranges.push([lo, lo]);
+    }
+  }
+  if (pattern[i] !== ']') throw new Error('RegexCompiler: unterminated character class');
+  return { cls: { ranges, negated }, next: i + 1 };
+}
+
+
 /** Generic finite-state automaton (DFA or NFA). */
 export class FiniteAutomaton {
   states: State[];
@@ -52,8 +179,7 @@ export class FiniteAutomaton {
     for (const ch of input) {
       const next: Set<State> = new Set();
       for (const s of current) {
-        const targets = s.transitions.get(ch) ?? [];
-        for (const t of targets) next.add(t);
+        for (const t of targetsFor(s, ch)) next.add(t);
       }
       current = next;
       if (current.size === 0) return false;
@@ -185,8 +311,7 @@ export class NFA extends FiniteAutomaton {
     const step = (states: Set<State>, ch: string): Set<State> => {
       const moved = new Set<State>();
       for (const s of states) {
-        const targets = s.transitions.get(ch) ?? [];
-        for (const t of targets) moved.add(t);
+        for (const t of targetsFor(s, ch)) moved.add(t);
       }
       return this._epsilonClosure(moved);
     };
@@ -197,6 +322,31 @@ export class NFA extends FiniteAutomaton {
     }
     for (const s of current) if (s.isAccept) return true;
     return false;
+  }
+
+  /**
+   * The longest prefix of `input[pos..]` this NFA accepts, or null.
+   *
+   * This is what a lexer needs, and it cannot be emulated by trying every
+   * prefix and stopping at the first failure: for a pattern with an optional
+   * part ("a(ab)?") the prefix "aa" does not match while the whole "aab"
+   * does, so a scan that stops at the first failure returns "a".
+   */
+  longestMatch(input: string, pos: number): string | null {
+    let current = this._epsilonClosure(new Set([this.start]));
+    let best = -1;
+    for (let i = pos; i < input.length; i++) {
+      const moved = new Set<State>();
+      for (const s of current) {
+        for (const t of targetsFor(s, input[i])) moved.add(t);
+      }
+      if (moved.size === 0) break;
+      current = this._epsilonClosure(moved);
+      for (const s of current) {
+        if (s.isAccept) { best = i; break; }
+      }
+    }
+    return best < 0 ? null : input.slice(pos, best + 1);
   }
 
   /** ε-closure under labelled '' / 'ε' transition. */
@@ -262,34 +412,65 @@ function _isAccept(set: Set<State>, acceptStates: State[]): boolean {
 
 /**
  * Build a regexp matcher over an alphabet using Thompson's NFA construction.
- * Supports: literal characters, concatenation, | (alternation), * (Kleene),
- * + (one-or-more), ? (zero-or-one), ( ) grouping.
+ * Supports: literal characters, character classes (`[a-z]`, `[^...]`) and
+ * their shorthands (`\d \D \s \S \w \W`), escapes (`\.` `\\` ...),
+ * concatenation, | (alternation), * (Kleene), + (one-or-more),
+ * ? (zero-or-one), ( ) grouping.
  */
 export class RegexCompiler {
   alphabet: string[];
   private nfa: NFA;
 
   constructor(pattern: string, alphabet?: string[]) {
-    this.alphabet = alphabet ?? pattern.split('').filter(c => /[a-zA-Z0-9]/.test(c));
+    this.alphabet = alphabet ?? RegexCompiler._patternChars(pattern);
     this.nfa = RegexCompiler._buildFromRegex(pattern);
   }
 
   /** Test whether a string matches the regex. */
   matches(input: string): boolean { return this.nfa.matches(input); }
 
+  /**
+   * The longest match of the pattern at `pos`, or null when there is none.
+   * A lexer needs this: trying every prefix and stopping at the first
+   * failure loses matches whenever an optional part is involved.
+   */
+  longestMatch(input: string, pos: number): string | null {
+    return this.nfa.longestMatch(input, pos);
+  }
+
   /** DFA version (slower for one-shot, faster for repeated matching). */
   toDFA(): DFA { return this.nfa.toDFA(); }
+
+  /** Every character the pattern can match (literals + positive classes). */
+  private static _patternChars(pattern: string): string[] {
+    const chars = new Set<string>();
+    for (const tok of RegexCompiler._tokenize(pattern)) {
+      if (tok.cls === null) {
+        if (tok.ch.length === 1) chars.add(tok.ch);
+        continue;
+      }
+      // A negated class matches an unbounded set of characters, so it is not
+      // enumerated; it is matched at run time instead.
+      if (tok.cls.negated) continue;
+      for (const r of tok.cls.ranges) {
+        for (let code = r[0]; code <= r[1]; code++) chars.add(String.fromCharCode(code));
+      }
+    }
+    return [...chars].sort();
+  }
 
   private static _buildFromRegex(pattern: string): NFA {
     const tokens = RegexCompiler._tokenize(pattern);
     let pos = 0;
+    const isOp = (tok: PatternToken | undefined, ch: string): boolean =>
+      tok !== undefined && tok.cls === null && tok.ch === ch;
     // Recursive-descent parser
     function parse(): { start: State; accept: State } {
       return parseAlt();
     }
     function parseAlt(): { start: State; accept: State } {
       let left = parseConcat();
-      while (pos < tokens.length && tokens[pos] === '|') {
+      while (pos < tokens.length && isOp(tokens[pos], '|')) {
         pos++;
         const right = parseConcat();
         const s = new State('s' + RegexCompiler._id(), false);
@@ -306,7 +487,7 @@ export class RegexCompiler {
     }
     function parseConcat(): { start: State; accept: State } {
       const list: { start: State; accept: State }[] = [];
-      while (pos < tokens.length && tokens[pos] !== ')' && tokens[pos] !== '|') {
+      while (pos < tokens.length && !isOp(tokens[pos], ')') && !isOp(tokens[pos], '|')) {
         list.push(parseUnary());
       }
       if (list.length === 0) {
@@ -324,7 +505,7 @@ export class RegexCompiler {
     function parseUnary(): { start: State; accept: State } {
       const atom = parseAtom();
       const op = tokens[pos];
-      if (op === '*') {
+      if (op !== undefined && op.cls === null && op.ch === '*') {
         pos++;
         const s = new State('s' + RegexCompiler._id(), false);
         const a = new State('a' + RegexCompiler._id(), true);
@@ -334,7 +515,7 @@ export class RegexCompiler {
         _addSilent(atom.accept, a);
         atom.accept.isAccept = false;
         return { start: s, accept: a };
-      } else if (op === '+') {
+      } else if (op !== undefined && op.cls === null && op.ch === '+') {
         pos++;
         const s = new State('s' + RegexCompiler._id(), false);
         const a = new State('a' + RegexCompiler._id(), true);
@@ -343,7 +524,7 @@ export class RegexCompiler {
         _addSilent(atom.accept, a);
         atom.accept.isAccept = false;
         return { start: s, accept: a };
-      } else if (op === '?') {
+      } else if (op !== undefined && op.cls === null && op.ch === '?') {
         pos++;
         const s = new State('s' + RegexCompiler._id(), false);
         const a = new State('a' + RegexCompiler._id(), true);
@@ -357,14 +538,30 @@ export class RegexCompiler {
     }
     function parseAtom(): { start: State; accept: State } {
       const tok = tokens[pos++];
-      if (tok === '(') {
+      if (tok.cls !== null) {
+        const s = new State('s' + RegexCompiler._id(), false);
+        const a = new State('a' + RegexCompiler._id(), true);
+        if (tok.cls.negated) {
+          // A negated class is unbounded, so it stays a class transition and
+          // is matched at run time.
+          _addClass(s, tok.cls, a);
+        } else {
+          for (const r of tok.cls.ranges) {
+            for (let code = r[0]; code <= r[1]; code++) {
+              _addSymbol(s, String.fromCharCode(code), a);
+            }
+          }
+        }
+        return { start: s, accept: a };
+      }
+      if (tok.ch === '(') {
         const inner = parseAlt();
-        if (tokens[pos] === ')') pos++;
+        if (isOp(tokens[pos], ')')) pos++;
         return inner;
       }
       const s = new State('s' + RegexCompiler._id(), false);
       const a = new State('a' + RegexCompiler._id(), true);
-      _addSymbol(s, tok, a);
+      _addSymbol(s, tok.ch, a);
       return { start: s, accept: a };
     }
     const { start, accept } = parse();
@@ -381,15 +578,39 @@ export class RegexCompiler {
     for (const [, tos] of root.transitions) for (const t of tos) RegexCompiler._wireStates(nfa, t, visited);
   }
 
-  private static _tokenize(pattern: string): string[] {
-    const out: string[] = [];
+  /**
+   * Split a pattern into literal characters, character classes and escapes.
+   *
+   * The old tokenizer pushed every character as its own literal token, so
+   * `[0-9]` became the four literals "[", "0", "-", "9" and the pattern was
+   * compiled into an NFA matching that literal text.
+   */
+  private static _tokenize(pattern: string): PatternToken[] {
+    const out: PatternToken[] = [];
     let i = 0;
     while (i < pattern.length) {
       const c = pattern[i];
       if (c === '(' || c === ')' || c === '|' || c === '*' || c === '+' || c === '?') {
-        out.push(c); i++;
+        out.push({ ch: c, cls: null });
+        i++;
+      } else if (c === '\\') {
+        i++;
+        const e = pattern[i];
+        if (e === undefined) throw new Error('RegexCompiler: the pattern ends with a backslash');
+        const shorthand = SHORTHAND_CLASSES[e];
+        if (shorthand) {
+          out.push({ ch: '', cls: shorthand });
+        } else {
+          out.push({ ch: e, cls: null });
+        }
+        i++;
+      } else if (c === '[') {
+        const parsed = parseCharClass(pattern, i);
+        out.push({ ch: '', cls: parsed.cls });
+        i = parsed.next;
       } else {
-        out.push(c); i++;
+        out.push({ ch: c, cls: null });
+        i++;
       }
     }
     return out;
@@ -409,6 +630,12 @@ function _addSymbol(from: State, sym: string, to: State): void {
   from.transitions.set(sym, [...(from.transitions.get(sym) ?? []), to]);
 }
 
+/** Add a character-class transition (matched at run time). */
+function _addClass(from: State, cls: CharClass, to: State): void {
+  const key = classKey(cls);
+  from.transitions.set(key, [...(from.transitions.get(key) ?? []), to]);
+}
+
 // ─── Misc parity exports (automaton.py AutomatonType, lexer.py factory) ─────
 
 /** Kind tag for automaton instances (automaton.py AutomatonType). */
@@ -421,16 +648,22 @@ export enum AutomatonType {
  * Convenience factory mirroring create_basic_lexer: builds a LexerTokenizer
  * with the common scientific-data token set (numbers, identifiers, strings,
  * whitespace, delimiters).
+ *
+ * The patterns are written with DOUBLED backslashes on purpose: in a
+ * JavaScript/ArkTS string literal `'\s'` is just "s" (the backslash is
+ * dropped), so the rule has to be written `'\\s+'` to reach the regex engine
+ * as `\s+`. With the single backslash the rule was the literal text "s+",
+ * which never matched a space.
  */
 export function createBasicLexer(): Tokenizer_LexerTokenizer {
   const t = new Tokenizer_LexerTokenizer();
-  t.addRule('[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?', TokenType.NUMBER);
+  t.addRule('[0-9]+(\\.[0-9]+)?([eE][+-]?[0-9]+)?', TokenType.NUMBER);
   t.addRule('[A-Za-z_][A-Za-z0-9_]*', TokenType.STRING);
   t.addRule('"[^"]*"', TokenType.STRING);
   t.addRule('[,;:|]', TokenType.PUNCTUATION);
-  t.addRule('\(', TokenType.PUNCTUATION);
-  t.addRule('\)', TokenType.PUNCTUATION);
-  t.addRule('\s+', TokenType.STRING, true); // skip whitespace
+  t.addRule('\\(', TokenType.PUNCTUATION);
+  t.addRule('\\)', TokenType.PUNCTUATION);
+  t.addRule('\\s+', TokenType.STRING, true); // skip whitespace
   return t;
 }
 import { LexerTokenizer as Tokenizer_LexerTokenizer, TokenType } from './Tokenizer';

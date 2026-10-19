@@ -84,6 +84,29 @@ export function ripleyK(
 
   const n = pts.length;
 
+  // Degenerate parameters used to produce a result object full of NaN and
+  // `undefined`:
+  //   - nRValues = 1  -> the r grid is `i / (nRValues - 1)` = 0/0 = NaN, so
+  //     rValues, kValues and lValues were all [NaN];
+  //   - nSimulations = 0 -> the envelope percentiles index an EMPTY array, so
+  //     envelopeLower/envelopeUpper were `undefined` while `interpretation`
+  //     still said "Pattern: RANDOM" — a pattern verdict with no envelope.
+  // Both are now refused with a message that says what to change.
+  if (!isFinite(nRValues) || nRValues < 2) {
+    throw new ComputationError(
+      `ripleyK: nRValues must be at least 2 (got ${nRValues}) — the r grid is ` +
+      `i/(nRValues-1) and a single radius has no grid to evaluate`,
+    );
+  }
+  if (!isFinite(nSimulations) || nSimulations < 1) {
+    throw new ComputationError(
+      `ripleyK: nSimulations must be at least 1 (got ${nSimulations}) — the ` +
+      `Monte Carlo envelope needs simulations to build percentiles from`,
+    );
+  }
+  const nR = Math.floor(nRValues);
+  const nSim = Math.floor(nSimulations);
+
   // Bounding box + area
   let xMin = Infinity, xMax = -Infinity, yMin = Infinity, yMax = -Infinity;
   for (const p of pts) {
@@ -93,16 +116,19 @@ export function ripleyK(
   const area = (xMax - xMin) * (yMax - yMin);
   if (area === 0) throw new ComputationError('Points have zero area');
   if (rMax === undefined) rMax = 0.25 * Math.min(xMax - xMin, yMax - yMin);
+  if (!isFinite(rMax) || rMax <= 0) {
+    throw new ComputationError(`ripleyK: rMax must be a positive distance (got ${rMax})`);
+  }
 
   const rValues: number[] = [];
-  for (let i = 0; i < nRValues; i++) rValues.push((i / (nRValues - 1)) * rMax);
+  for (let i = 0; i < nR; i++) rValues.push((i / (nR - 1)) * rMax);
 
   const kValues = _computeK(pts, rValues, area, xMin, xMax, yMin, yMax, boundaryCorrection);
   const lValues = kValues.map((k, i) => Math.sqrt(Math.max(k, 0) / Math.PI) - rValues[i]);
 
   // Monte Carlo envelope
   const lSims: number[][] = [];
-  for (let s = 0; s < nSimulations; s++) {
+  for (let s = 0; s < nSim; s++) {
     const random = new Array(n);
     for (let i = 0; i < n; i++) {
       random[i] = [xMin + rand() * (xMax - xMin), yMin + rand() * (yMax - yMin)];
@@ -112,16 +138,21 @@ export function ripleyK(
     lSims.push(lRand);
   }
   const envelopeUpper: number[] = [], envelopeLower: number[] = [];
-  for (let j = 0; j < nRValues; j++) {
+  for (let j = 0; j < nR; j++) {
     const vals = lSims.map(s => s[j]).sort((a, b) => a - b);
-    envelopeLower.push(vals[Math.floor(nSimulations * 0.025)]);
-    envelopeUpper.push(vals[Math.floor(nSimulations * 0.975)]);
+    // The percentile index has to stay INSIDE the sorted array: with
+    // nSimulations = 1 the 97.5% index was 0 (fine) but with nSimulations = 0
+    // it was `undefined`, and the envelope became `undefined` entries.
+    const lo = Math.min(nSim - 1, Math.floor(nSim * 0.025));
+    const hi = Math.min(nSim - 1, Math.floor(nSim * 0.975));
+    envelopeLower.push(vals[lo]);
+    envelopeUpper.push(vals[hi]);
   }
 
   // Interpretation: focus on second half of distance range to avoid boundary artifacts
-  const halfFrom = Math.floor(nRValues / 4);
+  const halfFrom = Math.floor(nR / 4);
   let above = 0, below = 0, nw = 0;
-  for (let j = halfFrom; j < nRValues; j++) {
+  for (let j = halfFrom; j < nR; j++) {
     if (lValues[j] > envelopeUpper[j]) above++;
     if (lValues[j] < envelopeLower[j]) below++;
     nw++;
@@ -133,7 +164,7 @@ export function ripleyK(
 
   return {
     rValues, kValues, lValues, envelopeUpper, envelopeLower,
-    pointCoords: pts, nPoints: n, area, nSimulations, interpretation,
+    pointCoords: pts, nPoints: n, area, nSimulations: nSim, interpretation,
     boundaryCorrection,
   };
 }

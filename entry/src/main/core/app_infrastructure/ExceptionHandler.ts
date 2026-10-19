@@ -11,18 +11,33 @@ export class ExceptionHandler {
     return prefix + msg;
   }
 
+  /**
+   * A user-facing description of a failure.
+   *
+   * The friendly wording must not REPLACE the reason: a numerical failure has
+   * to stay explicable (docs/architecture.md). The original message is
+   * therefore appended in FULL — the previous version truncated it to 200
+   * characters, which could cut the actual cause in half, and it threw the
+   * cause away entirely whenever one of the friendly branches matched.
+   */
   static formatUserError(error: unknown, operation: string = ''): string {
     const msg = error instanceof Error ? error.message : String(error);
     const hint = operation ? operation + ' ' : '';
-    if (msg.includes('No data')) return hint + 'No data loaded. Please load data first.';
-    if (msg.includes('singular')) return hint + 'Matrix is singular. Check for linear dependencies.';
-    if (msg.includes('shape') || msg.includes('dimension')) return hint + 'Dimension mismatch. Check data dimensions.';
-    if (msg.includes('NaN') || msg.includes('nan')) return hint + 'Data contains missing values.';
-    if (msg.includes('negative')) return hint + 'Data contains negative values.';
-    if (msg.includes('empty')) return hint + 'Data is empty.';
-    if (msg.includes('convergence')) return hint + 'Algorithm did not converge. Try increasing iterations.';
-    if (msg.includes('timeout')) return hint + 'Operation timed out.';
-    return hint + 'Error: ' + msg.substring(0, 200);
+    const friendly = ExceptionHandler.friendlyText(msg);
+    return (hint + (friendly || 'Error')) + ' (cause: ' + msg + ')';
+  }
+
+  /** The friendly wording alone, without the original reason. */
+  private static friendlyText(msg: string): string {
+    if (msg.includes('No data')) return 'No data loaded. Please load data first.';
+    if (msg.includes('singular')) return 'Matrix is singular. Check for linear dependencies.';
+    if (msg.includes('shape') || msg.includes('dimension')) return 'Dimension mismatch. Check data dimensions.';
+    if (msg.includes('NaN') || msg.includes('nan')) return 'Data contains missing values.';
+    if (msg.includes('negative')) return 'Data contains negative values.';
+    if (msg.includes('empty')) return 'Data is empty.';
+    if (msg.includes('convergence')) return 'Algorithm did not converge. Try increasing iterations.';
+    if (msg.includes('timeout')) return 'Operation timed out.';
+    return '';
   }
 }
 

@@ -28,28 +28,39 @@ export interface BrownianVCVResult {
 /**
  * Brownian-motion VCV matrix in ape/Python convention, with optional
  * Pagel-λ transformation of the off-diagonal.
+ *
+ * The tip names are the row labels of V, so they have to be unique. Two tips
+ * with the same name used to share one internal key, which corrupted the
+ * whole matrix: the depth of the second tip overwrote the first one's, and
+ * the LCA scan matched the tip itself instead of the LCA (so the shared path
+ * length came out as each tip's own distance to the root). Fossil data is
+ * full of duplicate labels ("indet.", "cf. sp."), so the key is the node
+ * OBJECT and duplicate tip names are rejected with a readable error.
  */
 export function brownianVCV(tree: PhyloNode, lambdaParam: number = 1.0): BrownianVCVResult {
   const leaves = tree.getLeaves();
   const n = leaves.length;
-  const tipNames = leaves.map(l => l.name || `tip_${n}`);
+  const tipNames = leaves.map((l, i) => l.name || `tip_${i}`);
 
-  // Assign a unique key per node (tips use their name; anonymous internal
-  // nodes get generated keys) so path membership tests line up with depths.
-  const nodeKey = new Map<PhyloNode, string>();
-  let anon = 0;
-  for (const node of tree.getAllNodes()) {
-    nodeKey.set(node, node.name || `__internal_${anon++}`);
+  const seen = new Map<string, number>();
+  for (const name of tipNames) seen.set(name, (seen.get(name) ?? 0) + 1);
+  const duplicates = [...seen.entries()].filter(([, c]) => c > 1).map(([nm]) => nm);
+  if (duplicates.length > 0) {
+    throw new Error(
+      `brownianVCV: duplicate tip name(s): ${duplicates.join(', ')} — the covariance matrix is ` +
+      `indexed by tip, so every tip needs a unique name (rename "indet." / "cf. sp." tips)`);
   }
 
-  const depthByKey = new Map<string, number>();
-  const pathKeysByTip = new Map<PhyloNode, string[]>();
-  const walk = (node: PhyloNode, depth: number, path: string[]): void => {
-    const key = nodeKey.get(node)!;
-    depthByKey.set(key, depth);
-    path.push(key);
+  // Node keys are the node OBJECT, never its name: two nodes may legitimately
+  // share a label (two internal nodes called "node1", a tip and an internal
+  // node with the same name) and must not share a depth or a path entry.
+  const depthByNode = new Map<PhyloNode, number>();
+  const pathNodesByTip = new Map<PhyloNode, PhyloNode[]>();
+  const walk = (node: PhyloNode, depth: number, path: PhyloNode[]): void => {
+    depthByNode.set(node, depth);
+    path.push(node);
     if (node.children.length === 0) {
-      pathKeysByTip.set(node, [...path]);
+      pathNodesByTip.set(node, [...path]);
     }
     for (const child of node.children) walk(child, depth + (child.branchLength ?? 0), path);
     path.pop();
@@ -60,16 +71,16 @@ export function brownianVCV(tree: PhyloNode, lambdaParam: number = 1.0): Brownia
   for (let i = 0; i < n; i++) V.push(new Array(n).fill(0));
 
   for (let i = 0; i < n; i++) {
-    V[i][i] = depthByKey.get(nodeKey.get(leaves[i])!) ?? 0;
+    V[i][i] = depthByNode.get(leaves[i]) ?? 0;
     for (let j = i + 1; j < n; j++) {
-      // LCA depth: deepest shared node key on the two root paths
-      const pathI = pathKeysByTip.get(leaves[i]) ?? [];
-      const pathJ = pathKeysByTip.get(leaves[j]) ?? [];
-      const setJ = new Set(pathJ);
+      // LCA depth: the deepest shared NODE on the two root paths
+      const pathI = pathNodesByTip.get(leaves[i]) ?? [];
+      const pathJ = pathNodesByTip.get(leaves[j]) ?? [];
+      const setJ = new Set<PhyloNode>(pathJ);
       let lcaDepth = 0;
       for (let k = pathI.length - 1; k >= 0; k--) {
         if (setJ.has(pathI[k])) {
-          lcaDepth = depthByKey.get(pathI[k]) ?? 0;
+          lcaDepth = depthByNode.get(pathI[k]) ?? 0;
           break;
         }
       }
@@ -113,7 +124,18 @@ function matInv(M: number[][]): number[][] | null {
 
 /**
  * Canonical Blomberg K from a trait vector and an ape-convention VCV
- * (diag = root-to-tip, off-diag = shared path). Returns 0.0 when degenerate.
+ * (diag = root-to-tip, off-diag = shared path).
+ *
+ * The FORMULA is the canonical one and is unchanged. The FAILURE CHANNEL is
+ * not: every degenerate input used to be folded into a number, and the two
+ * most dangerous cases were
+ *   - a constant trait ([5,5,5]) -> 1.5000000001062503, the ratio of two
+ *     ~1e-30 quantities, i.e. floating-point noise that reads as "K = 1.5,
+ *     strong signal" in a paper;
+ *   - a NaN trait, a singular V, or n < 3 -> 0, and K = 0 is the legitimate
+ *     value for "no phylogenetic signal", so a failure was indistinguishable
+ *     from a conclusion.
+ * Every one of those now throws with a message that says what is wrong.
  *
  * Blomberg's K is defined so that E[K] = 1 when the trait evolves under
  * Brownian motion on the supplied tree. That fixes the normalisation:
@@ -136,15 +158,48 @@ function matInv(M: number[][]): number[][] | null {
  */
 export function blombergKFromVCV(y: number[], V: number[][]): number {
   const n = y.length;
-  if (n < 3) return 0.0;
-  const Vj = V.map(row => row.map((v, j) => v + (row[j] === undefined ? 0 : 0)));
+  if (n < 3) {
+    throw new Error(`blombergKFromVCV: Blomberg K needs at least 3 taxa, got ${n}`);
+  }
+  if (!V || V.length !== n || V.some(row => row.length !== n)) {
+    throw new Error(`blombergKFromVCV: V must be a ${n}x${n} matrix`);
+  }
+  for (let i = 0; i < n; i++) {
+    if (!isFinite(y[i])) {
+      throw new Error(
+        `blombergKFromVCV: trait value ${i} is ${y[i]} - a missing (NaN) or non-finite value ` +
+        `makes K undefined; drop or impute that tip first`);
+    }
+    for (let j = 0; j < n; j++) {
+      if (!isFinite(V[i][j])) throw new Error(`blombergKFromVCV: V[${i}][${j}] is not finite`);
+    }
+  }
+  // Zero variance: every tip carries the same value, so both mean-squared
+  // errors are ~0 and K is 0/0. This is checked BEFORE the arithmetic,
+  // because the arithmetic turns it into noise.
+  let yMin = Infinity, yMax = -Infinity;
+  for (let i = 0; i < n; i++) {
+    if (y[i] < yMin) yMin = y[i];
+    if (y[i] > yMax) yMax = y[i];
+  }
+  if (!(yMax > yMin)) {
+    throw new Error(
+      `blombergKFromVCV: the trait has zero variance (every tip is ${yMin}) - ` +
+      `Blomberg K is undefined for a constant trait`);
+  }
+
+  const Vj = V.map(row => [...row]);
   for (let i = 0; i < n; i++) Vj[i][i] += 1e-10;
   const Vinv = matInv(Vj);
-  if (!Vinv) return 0.0;
+  if (!Vinv) {
+    throw new Error('blombergKFromVCV: the VCV matrix is singular - K is undefined for this tree');
+  }
 
   let oneViOne = 0;
   for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) oneViOne += Vinv[i][j];
-  if (oneViOne <= 0) return 0.0;
+  if (!(oneViOne > 0)) {
+    throw new Error('blombergKFromVCV: the GLS mean is not defined (1TV^-1 1 <= 0)');
+  }
 
   let oneViY = 0;
   for (let i = 0; i < n; i++) {
@@ -175,8 +230,16 @@ export function blombergKFromVCV(y: number[], V: number[][]): number {
   const norm = (trace - n / oneViOne) / (n - 1);
 
   const denom = mseGls * norm;
-  if (!(denom > 0)) return 0.0;
-  return mse0 / denom;
+  if (!isFinite(denom) || !(denom > 0)) {
+    throw new Error(
+      `blombergKFromVCV: the normaliser is not positive (denominator ${denom}) - K is undefined ` +
+      `for this trait/tree combination`);
+  }
+  const k = mse0 / denom;
+  if (!isFinite(k)) {
+    throw new Error('blombergKFromVCV: K is not finite - the trait/tree combination is degenerate');
+  }
+  return k;
 }
 
 export interface BMSimulationResult {

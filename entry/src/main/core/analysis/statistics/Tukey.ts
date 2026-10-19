@@ -35,7 +35,7 @@
  * - scipy.stats.studentized_range.
  */
 
-import { pnorm, qnorm } from '../../math/stats';
+import { pnorm } from '../../math/stats';
 
 // ─── Gauss-Legendre nodes on [-1, 1] (computed once, cached) ────────────────
 
@@ -173,42 +173,131 @@ function getGLag32(): { nodes: Float64Array; weights: Float64Array } {
 export function ptukeyCdf(q: number, k: number, df: number): number {
   if (!isFinite(q) || k < 2 || df < 1) return q <= 0 ? 0 : 1;
   if (q <= 0) return 0;
+  return Math.min(1, Math.max(0, _outerIntegral(q, k, df, _innerCdf)));
+}
 
-  const lag = getGLag32();
+/**
+ * Survival function P(Q >= q) — the Tukey HSD adjusted p-value.
+ *
+ * The previous implementation was `1 - ptukeyCdf(...)`, which cancels: the
+ * CDF is 0.9999999999325094 for q = 15, k = 4, df = 30, so the tail kept
+ * only 4 of its 11 significant digits and the reported p-value was 33 %
+ * too small (and 4 % too small already at q = 8, k = 4, df = 20). The
+ * survival function is now integrated DIRECTLY, in the same form that has no
+ * cancellation: see `_innerSf`.
+ */
+export function ptukeySf(q: number, k: number, df: number): number {
+  if (!isFinite(q) || k < 2 || df < 1) return q <= 0 ? 1 : 0;
+  if (q <= 0) return 1;
+  return Math.min(1, Math.max(0, _outerIntegral(q, k, df, _innerSf)));
+}
+
+// ─── Studentized range: the two inner integrals ─────────────────────────────
+//
+// With S^2 ~ chi2_v / v independent of the range R of k standard normals,
+//
+//     P(Q <= q) = E_S[ P(R <= q S) ]
+//               = (1/Gamma(v/2)) ∫_0^inf x^(v/2-1) e^(-x) I(d(x)) dx,
+//
+//     d(x) = q sqrt(2x/v),
+//
+//     I(d)  = k ∫_{-inf}^{inf} φ(z) [Φ(z+d) - Φ(z)]^(k-1) dz
+//           = P(R <= d)                (the range of k N(0,1) variates).
+//
+// The outer integral is a Gauss-Laguerre rule (weight e^(-x)); the inner one
+// is a composite Gauss-Legendre rule in the z domain.
+//
+// WHY THE z DOMAIN AND NOT u = Φ(z): the old code substituted u = Φ(z) and
+// integrated over u ∈ (0,1) with a 12 x 20 composite Gauss-Legendre rule.
+// For a large q the integrand [Φ(Φ⁻¹(u)+d) - u]^(k-1) is concentrated in a
+// window of width Φ(-d) around u = 0 — 3e-50 at q = 15 — and that rule
+// cannot resolve it, so the CDF lost its last digits and the tail
+// (computed as 1 - CDF) inherited the error. In the z domain the same
+// integrand is a smooth bump of width O(1), which the composite rule
+// resolves to machine precision.
+
+// Composite Gauss-Legendre resolution of the z integral.
+const Z_INTERVALS = 80;
+const Z_HI = 12;
+/** Lower end of the z range: the survival bump sits near z = -d/2. */
+function _zLo(d: number): number { return -Math.min(40, d / 2 + 12); }
+
+/**
+ * I(d) = k ∫ φ(z) [Φ(z+d) - Φ(z)]^(k-1) dz — the probability that the range
+ * of k standard normals is at most d.
+ */
+function _innerCdf(k: number, d: number): number {
   const gl = getGL16();
-  const a = df / 2;
-  const nIntervals = 12;
+  const lo = _zLo(d), hi = Z_HI;
+  const h = (hi - lo) / Z_INTERVALS;
+  let sum = 0;
+  for (let seg = 0; seg < Z_INTERVALS; seg++) {
+    const mid = lo + (seg + 0.5) * h;
+    const half = 0.5 * h;
+    for (let gi = 0; gi < gl.nodes.length; gi++) {
+      const z = mid + half * gl.nodes[gi];
+      const A = pnorm(z + d) - pnorm(z);
+      if (A <= 0) continue;
+      const phi = Math.exp(-0.5 * z * z) / Math.sqrt(2 * Math.PI);
+      sum += half * gl.weights[gi] * phi * Math.pow(A, k - 1);
+    }
+  }
+  return k * sum;
+}
 
+/**
+ * 1 - I(d), the survival counterpart, evaluated WITHOUT cancellation.
+ *
+ *     1 - I(d) = k ∫ φ(z) [B(z)^(k-1) - A(z)^(k-1)] dz,
+ *     B(z) = Φ(-z),  A(z) = Φ(z+d) - Φ(z),  B - A = Φ(-z-d).
+ *
+ * The bracket is evaluated through the factorisation
+ * B^(k-1) - A^(k-1) = (B - A)·(B^(k-2) + B^(k-3)A + ... + A^(k-2)), so the
+ * difference is never taken between two nearly equal O(1) numbers: the only
+ * small factor, B - A = Φ(-z-d), is computed directly.
+ */
+function _innerSf(k: number, d: number): number {
+  const gl = getGL16();
+  const lo = _zLo(d), hi = Z_HI;
+  const h = (hi - lo) / Z_INTERVALS;
+  let sum = 0;
+  for (let seg = 0; seg < Z_INTERVALS; seg++) {
+    const mid = lo + (seg + 0.5) * h;
+    const half = 0.5 * h;
+    for (let gi = 0; gi < gl.nodes.length; gi++) {
+      const z = mid + half * gl.nodes[gi];
+      const A = pnorm(z + d) - pnorm(z);
+      if (A < 0) continue;
+      const B = pnorm(-z);
+      const diff = pnorm(-z - d);          // = B - A, computed without cancellation
+      if (diff <= 0) continue;
+      // Σ_{j=0}^{k-2} B^(k-2-j) A^j
+      let s = 0;
+      for (let j = 0; j <= k - 2; j++) s += Math.pow(B, k - 2 - j) * Math.pow(A, j);
+      const phi = Math.exp(-0.5 * z * z) / Math.sqrt(2 * Math.PI);
+      sum += half * gl.weights[gi] * phi * diff * s;
+    }
+  }
+  return k * sum;
+}
+
+/**
+ * Outer Gauss-Laguerre integral of the Gamma(v/2, 1) weighted inner
+ * integral, divided by Γ(v/2).
+ */
+function _outerIntegral(
+  q: number, k: number, df: number, inner: (k: number, d: number) => number,
+): number {
+  const lag = getGLag32();
+  const a = df / 2;
   let outer = 0;
   for (let oi = 0; oi < lag.nodes.length; oi++) {
     const x = lag.nodes[oi];
+    if (x <= 0) continue;
     const d = q * Math.sqrt(2 * x / df);
-    // Composite 16-point Gauss-Legendre for the inner u-integral on (0,1):
-    //   k * Integral_0^1 [Phi(Phi^-1(u) + d) - u]^(k-1) du
-    let inner = 0;
-    for (let seg = 0; seg < nIntervals; seg++) {
-      const loSeg = seg / nIntervals;
-      const hiSeg = (seg + 1) / nIntervals;
-      const mid = 0.5 * (loSeg + hiSeg);
-      const half = 0.5 * (hiSeg - loSeg);
-      for (let gi = 0; gi < gl.nodes.length; gi++) {
-        const u = mid + half * gl.nodes[gi];
-        const z = qnorm(u);
-        const y = pnorm(z + d) - u;
-        if (y <= 0) continue; // underflow of the (k-1)-th power
-        inner += half * gl.weights[gi] * Math.pow(y, k - 1);
-      }
-    }
-    // f(x) = x^(a-1) e^(-x) * inner ; the e^(-x) weight is in the quadrature
-    outer += lag.weights[oi] * Math.exp((a - 1) * Math.log(x)) * k * inner;
+    outer += lag.weights[oi] * Math.exp((a - 1) * Math.log(x)) * inner(k, d);
   }
-  const cdf = outer / expLgamma(a);
-  return Math.min(1, Math.max(0, cdf));
-}
-
-/** Survival function P(Q >= q) — the Tukey HSD adjusted p-value. */
-export function ptukeySf(q: number, k: number, df: number): number {
-  return Math.min(1, Math.max(0, 1 - ptukeyCdf(q, k, df)));
+  return outer / expLgamma(a);
 }
 
 /** exp(lgamma(a)) without overflow for the Gamma(a,1) normalizer. */

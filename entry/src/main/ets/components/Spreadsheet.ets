@@ -2,6 +2,7 @@ import { DataMatrix, StateManager } from "../../core/models/index";
 import { SpreadsheetDataSource } from "./SpreadsheetDataSource";
 import { Matrix } from "../../core/math/Matrix";
 import { EventBus } from "../../core/utils/EventBus";
+import { blankGroups, fitGroups, cycleGroup, UNGROUPED } from "./rowGroups";
 
 /**
  * Scientific Spreadsheet Component — replaces views/ui_spreadsheet.py
@@ -51,27 +52,58 @@ export struct Spreadsheet {
   private editingOldValue: number = NaN;
   // 数据被外部改变（撤销/重做/重新加载）时的刷新订阅
   private dataChangedHandler = (): void => { this.onExternalDataChanged(); };
+  // 换了一张表（重新导入）时的订阅：分组标签属于旧表，必须清空
+  private datasetLoadedHandler = (): void => { this.resetGroups(); };
 
   aboutToAppear(): void {
     if (this.dataMatrix) {
-      this.rowGroups = Array.from({ length: this.dataMatrix.nSamples }, () => 'Ungrouped');
+      this.rowGroups = blankGroups(this.dataMatrix.nSamples);
     }
     this.initColumnIndices();
     this.recomputeRows();
     // 撤销/重做/重新加载后由 Index 经 EventBus 通知，这里刷新行缓存与网格
     EventBus.getInstance().on('data_changed', this.dataChangedHandler);
+    // 重新导入是"换了一张表"，不是"这张表被改了"：分组必须重置
+    EventBus.getInstance().on('dataset_loaded', this.datasetLoadedHandler);
   }
 
   aboutToDisappear(): void {
     EventBus.getInstance().off('data_changed', this.dataChangedHandler);
+    EventBus.getInstance().off('dataset_loaded', this.datasetLoadedHandler);
   }
 
-  /** 外部数据变更（undo/redo/加载新文件）→ 重建行缓存并刷新整表。 */
+  /**
+   * 外部数据变更（undo/redo/加载新文件）→ 重建行缓存并刷新整表。
+   *
+   * 分组标签在这里按行号保留：撤销/重做改的是同一张表，分组必须留下。
+   * "换了一张表"由 resetGroups() 单独处理——两者都是 'data_changed'，
+   * 在这里无法区分。
+   */
   private onExternalDataChanged(): void {
     this.initColumnIndices();
     this.rowGroups = this.dataMatrix
-      ? Array.from({ length: this.dataMatrix.nSamples }, (_, i) => this.rowGroups[i] ?? 'Ungrouped')
+      ? fitGroups(this.rowGroups, this.dataMatrix.nSamples)
       : [];
+    this.recomputeRows();
+    this.dataSource.setRowIndices(this.filteredRowsCache);
+  }
+
+  /**
+   * 换了一张表：旧分组属于旧数据，按行号继承到新表就是错的。
+   *
+   * 旧行为：新表仍然显示旧表的 Group_A / Group_B（按行号继承），用户在新表
+   * 里点一次 "Set Group"，整份数组（含旧标签）就被写进新表的 rowMeta——
+   * 新表继承了旧分组，之后 ANOSIM / PERMANOVA / SIMPER / LDA 算出来的
+   * p 值与新数据毫无关系，而界面上看不出任何异常。
+   *
+   * 这里把标签清空（空数组 = 每行都是 Ungrouped），不依赖当前的行数：
+   * 事件是在父组件换掉 @ObjectLink 之前同步送达的，此时本组件读到的
+   * 可能还是旧矩阵。
+   */
+  private resetGroups(): void {
+    this.rowGroups = [];
+    this.selectedRows = new Set<number>();
+    this.selectedRow = -1;
     this.recomputeRows();
     this.dataSource.setRowIndices(this.filteredRowsCache);
   }
@@ -385,15 +417,20 @@ export struct Spreadsheet {
     // groupColors is a Map — Object.keys() on it is always []; use keys()
     const groups = Array.from(this.groupColors.keys());
     if (groups.length === 0) return;
-    const currentGroup = this.rowGroups[this.selectedRow] ?? 'Ungrouped';
-    const idx = groups.indexOf(currentGroup);
-    // Rotate to the next group (idx === -1 → start with the first group)
-    this.rowGroups[this.selectedRow] = groups[(idx + 1) % groups.length];
+    // One label per row of the CURRENT table. The array published to the
+    // DataMatrix must never carry a previous table's labels, and it must
+    // have exactly one entry per row, or setGroups() would write the tail
+    // of an older (longer) table into the new one.
+    const labels = fitGroups(this.rowGroups, this.dataMatrix?.nSamples ?? 0);
+    const currentGroup = labels[this.selectedRow] ?? UNGROUPED;
+    // Rotate to the next group (unknown label → start with the first group)
+    labels[this.selectedRow] = cycleGroup(currentGroup, groups);
+    this.rowGroups = labels;
     this.onGroupChanged(this.rowGroups);
   }
 
   private clearGroups(): void {
-    this.rowGroups = Array.from({ length: this.dataMatrix?.nSamples ?? 0 }, () => 'Ungrouped');
+    this.rowGroups = blankGroups(this.dataMatrix?.nSamples ?? 0);
     this.onGroupChanged(this.rowGroups);
   }
 
@@ -410,7 +447,7 @@ export struct Spreadsheet {
         this.dataMatrix.data.set(i, j, data[i][j]);
       }
     }
-    this.rowGroups = Array.from({ length: this.dataMatrix.nSamples }, () => 'Ungrouped');
+    this.rowGroups = blankGroups(this.dataMatrix.nSamples);
     this.selectedRows = new Set<number>();
     this.selectedRow = -1;
     this.initColumnIndices();
@@ -428,13 +465,21 @@ export struct Spreadsheet {
   }
 
   getGroups(): string[] { return this.rowGroups; }
-  setGroups(groups: string[]): void { this.rowGroups = groups; this.onGroupChanged(groups); }
+  setGroups(groups: string[]): void {
+    // Exactly one label per row: an array of the wrong length would either
+    // drop labels or write a previous table's labels into this one.
+    this.rowGroups = fitGroups(groups, this.dataMatrix?.nSamples ?? 0);
+    this.onGroupChanged(this.rowGroups);
+  }
   setDarkMode(dark: boolean): void { this.darkMode = dark; }
 
   // ─── Context Menu Actions ───────────────────────────────────────
 
   setGroupForRow(row: number, group: string): void {
-    this.rowGroups[row] = group;
+    const labels = fitGroups(this.rowGroups, this.dataMatrix?.nSamples ?? 0);
+    if (row < 0 || row >= labels.length) return;
+    labels[row] = group;
+    this.rowGroups = labels;
     this.onGroupChanged(this.rowGroups);
   }
 

@@ -34,6 +34,26 @@ function decodeCell(v: unknown): number {
 }
 
 export class MatrixConverter {
+  /**
+   * Format one numeric cell for a text table (LaTeX, HTML, TSV …).
+   *
+   * `Number.prototype.toFixed` renders a missing value as the literal
+   * "NaN" and an infinite one as "Infinity" — JavaScript artefacts that
+   * end up verbatim in a paper table, while the same app's CSV export writes
+   * "NA" for the very same cell (see toCSV below). One missing value, two
+   * spellings, and the "NaN" one is the one that gets typeset.
+   *
+   * A missing value is now "NA" (the CSV convention of this app) and an
+   * infinite value is "Inf" / "-Inf". Without `digits` the number is
+   * rendered as-is.
+   */
+  static formatCell(v: number, digits?: number): string {
+    if (typeof v !== 'number' || Number.isNaN(v)) return 'NA';
+    if (v === Infinity) return 'Inf';
+    if (v === -Infinity) return '-Inf';
+    return digits !== undefined ? v.toFixed(digits) : String(v);
+  }
+
   static toCSV(M: Matrix, delimiter: string = ',', precision: number = 6): string {
     const sep = delimiter;
     const out: string[] = [];

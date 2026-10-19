@@ -2,19 +2,25 @@
  * Shareholder Quorum Subsampling (SQS) — replaces ecology/sqs.py.
  *
  * SQS is a fossil-sampling standardisation method that draws a random "股份"
- * (share = 1/N per individual) from each sampling event until a quorum threshold
- * q is reached, then compares the expected species count to a theoretical
- * coverage-based estimate.
+ * (share) from each sampling event until a quorum threshold q is reached,
+ * then compares the expected species count to a theoretical coverage-based
+ * estimate.
  *
  * Algorithm (Alroy 2010 "The shifting balance of diversity"):
  * 1. For each occurrence list (sampling event), compute the share per individual:
- *      share_i = 1 / N_i   (N_i = total specimens at event i)
+ *      share_i = 1 / (N_i · nEvents)   (N_i = total specimens at event i)
+ *    so that the shares of all individuals sum to 1.
  * 2. Pool all shares and randomly draw without replacement until the cumulative
  *      fraction reaches the quorum q.
  * 3. Count how many species are represented in the drawn share — this is the
  *      expected species richness at that quorum level.
  * 4. Repeat over many iterations to get a mean expected species count at each
  *      quorum level.
+ *
+ * The quorum is a FRACTION of the whole sampling effort (0–1). The
+ * 'rarefaction' method uses the same convention (a sub-sample of
+ * floor(q · N) individuals), so both methods answer the same question and
+ * their curves are comparable.
  *
  * The resulting SQS curve plots quorum level vs expected species and is used
  * to compare diversity trajectories across sampled sections with different
@@ -32,6 +38,7 @@
  */
 import { Matrix } from '../../math/Matrix';
 import { seed, rand } from '../../math/random';
+import { ComputationError } from '../../utils/Exceptions';
 
 /**
  * Options for SQS computation.
@@ -56,6 +63,19 @@ export interface SQSResult {
   totalIndividuals: number;
   /** Method used ('alroy_sqs' or 'rarefaction'). */
   method: string;
+  /**
+   * Mean fraction of the individual pool that was actually drawn at each
+   * quorum level (individuals drawn / total individuals).
+   *
+   * Both methods answer the same question — "how much of the sample did this
+   * quorum level consume?" — so this is the quantity that makes the two
+   * methods comparable. It used to be impossible to check: the random method
+   * scaled its quorum with the NUMBER OF EVENTS (the sum of the per-individual
+   * shares was nEvents, not 1), so quorum 0.5 consumed 50 % of a
+   * single-event sample but only 12.5 % of a four-event sample of the same
+   * per-event size.
+   */
+  sampledFraction?: number[];
 }
 
 function toArray(v: number[] | Matrix): number[] {
@@ -101,6 +121,9 @@ export function sqs(
       nEvents: 0, totalIndividuals: 0, method: method === 'random' ? 'alroy_sqs' : 'rarefaction',
     };
   }
+  if (!Number.isFinite(nPoints) || nPoints < 1) {
+    throw new ComputationError(`SQS: nPoints must be a finite number >= 1, got ${nPoints}`);
+  }
 
   // ── Pre-compute per-event totals and shares ────────────────────────────────
   const eventTotals: number[] = occ2d.map(row => row.reduce((a, b) => a + b, 0));
@@ -108,24 +131,37 @@ export function sqs(
   const observedSpecies: number[] = occ2d.map(row => row.filter(v => v > 0).length);
 
   // ── Build quorum levels ───────────────────────────────────────────────────
+  // A single point used to divide by (nPoints − 1) = 0 and produced a NaN
+  // quorum, which then made every comparison `quorumAccum >= NaN` false: the
+  // draw consumed the WHOLE sample and the "SQS curve" degenerated to the
+  // observed richness. nPoints === 1 now means the single level qMin.
   const [qMin, qMax] = quorumRange;
   const quorumLevels: number[] = [];
-  for (let i = 0; i < nPoints; i++) {
-    quorumLevels.push(qMin + (qMax - qMin) * i / (nPoints - 1));
+  if (nPoints === 1) {
+    quorumLevels.push(qMin);
+  } else {
+    for (let i = 0; i < nPoints; i++) {
+      quorumLevels.push(qMin + (qMax - qMin) * i / (nPoints - 1));
+    }
   }
 
   // ── Compute expected species at each quorum level ─────────────────────────
   const nIter = 50; // iterations per quorum (Alroy 2010 uses ≥50)
   const expectedSpecies: number[] = [];
+  const sampledFraction: number[] = [];
 
   for (const q of quorumLevels) {
     let totalExpected = 0;
+    let totalDrawn = 0;
 
     for (let iter = 0; iter < nIter; iter++) {
-      totalExpected += _sqsSingleIteration(occ2d, eventTotals, q, method);
+      const draw = _sqsSingleIteration(occ2d, eventTotals, q, method);
+      totalExpected += draw.species;
+      totalDrawn += draw.drawn;
     }
 
     expectedSpecies.push(totalExpected / nIter);
+    sampledFraction.push(totalIndividuals > 0 ? (totalDrawn / nIter) / totalIndividuals : 0);
   }
 
   return {
@@ -135,6 +171,7 @@ export function sqs(
     nEvents,
     totalIndividuals,
     method: method === 'random' ? 'alroy_sqs' : 'rarefaction',
+    sampledFraction,
   };
 }
 
@@ -143,10 +180,19 @@ export function sqs(
  *
  * Alroy (2010) original algorithm:
  *   1. Build a master list of shares: each individual in event i contributes
- *      (species_name, 1/N_i) to the list.
+ *      (species_name, share) to the list.
  *   2. Shuffle the master list.
  *   3. Draw shares sequentially, accumulating the quorum fraction.
  *   4. When quorum is reached, count unique species in the drawn shares.
+ *
+ * The share of an individual of event i is 1 / (N_i · nEvents), so that the
+ * shares of ALL individuals sum to exactly 1 and the quorum is a fraction of
+ * the whole sampling effort. The previous weight, 1 / N_i, made the sum of
+ * the shares equal to the NUMBER OF EVENTS: the quorum then scaled with the
+ * number of events, so the same 0.5 consumed 50 % of a one-event sample but
+ * only 12.5 % of a four-event sample of the same per-event size — and the SQS
+ * curve, whose whole purpose is to compare profiles with different sampling
+ * intensities, was not comparable.
  *
  * This is O(N_total) per iteration and correct for the original method.
  */
@@ -155,7 +201,7 @@ function _sqsSingleIteration(
   eventTotals: number[],
   quorum: number,
   method: 'random' | 'rarefaction',
-): number {
+): { species: number; drawn: number } {
   const nEvents = occ2d.length;
   const nSpecies = occ2d[0].length;
 
@@ -164,18 +210,19 @@ function _sqsSingleIteration(
     // to the quorum fraction of total individuals.
     const totalN = eventTotals.reduce((a, b) => a + b, 0);
     const targetN = Math.floor(quorum * totalN);
-    return _rarefactionSingle(occ2d, targetN);
+    return { species: _rarefactionSingle(occ2d, targetN), drawn: targetN };
   }
 
   // ── Alroy SQS (share-based random draw) ──────────────────────────────────
   // Build master list of (species_index, share_weight) for every individual.
-  // Each individual contributes a share of 1/N_i to the event it belongs to.
+  // Each individual contributes a share of 1/(N_i·nEvents) to the event it
+  // belongs to, so the total share of the pool is 1.
   const masterShares: { species: number; weight: number }[] = [];
 
   for (let i = 0; i < nEvents; i++) {
     const Ni = eventTotals[i];
     if (Ni === 0) continue;
-    const share = 1 / Ni;
+    const share = 1 / (Ni * nEvents);
     const row = occ2d[i];
     for (let s = 0; s < nSpecies; s++) {
       const count = row[s];
@@ -185,7 +232,7 @@ function _sqsSingleIteration(
     }
   }
 
-  if (masterShares.length === 0) return 0;
+  if (masterShares.length === 0) return { species: 0, drawn: 0 };
 
   // Fisher-Yates shuffle (seeded RNG — reproducibility)
   for (let i = masterShares.length - 1; i > 0; i--) {
@@ -195,15 +242,21 @@ function _sqsSingleIteration(
 
   // Draw shares until quorum
   let quorumAccum = 0;
+  let drawn = 0;
   const drawnSpecies = new Set<number>();
 
   for (const share of masterShares) {
     quorumAccum += share.weight;
     drawnSpecies.add(share.species);
-    if (quorumAccum >= quorum) break;
+    drawn++;
+    // Relative tolerance: the accumulated sum of 1/(N_i·nEvents) lands a
+    // few ULPs below the quorum (80 × 1/160 = 0.49999999999999994 < 0.5), and
+    // without the tolerance the draw would overshoot the quorum by one
+    // individual.
+    if (quorumAccum >= quorum * (1 - 1e-12)) break;
   }
 
-  return drawnSpecies.size;
+  return { species: drawnSpecies.size, drawn };
 }
 
 /**

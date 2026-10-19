@@ -3,7 +3,8 @@
  * Generates reports in Markdown/LaTeX/HTML formats.
  */
 import { LATEX_PREAMBLE } from './latexPreamble';
-import { escapeLatex } from './LatexCompiler';
+import { escapeLatex, escapeHtml, detokenizePath, formatCI } from './LatexCompiler';
+import { MatrixConverter } from './MatrixConverter';
 
 export enum SectionType {
   TITLE = 'title',
@@ -128,10 +129,21 @@ export class ReportBuilder {
     return id;
   }
 
+  /**
+   * Add a table.
+   *
+   * `tableContent` is a LaTeX FRAGMENT (the `tabular` plus its rules); both
+   * toLaTeX() and LatexCompiler.renderTable wrap it in
+   * `\begin{table}…\end{table}` themselves. A COMPLETE table environment is
+   * accepted as well and is unwrapped here, so a caller that hands over
+   * `TableGenerator.latex(...)` (which emits a whole environment) no longer
+   * produces a nested float — pdflatex rejects that with
+   * "LaTeX Error: Not in outer par mode." and produces no PDF at all.
+   */
   addTable(tableContent: string, caption: string, label?: string, placement: string = 'htbp'): string {
     this._counterTable++;
     const id = label || `tab:${this._counterTable}`;
-    this._tables.push({ id, caption, content: tableContent, placement });
+    this._tables.push({ id, caption, content: unwrapTableEnvironment(tableContent), placement });
     return id;
   }
 
@@ -285,7 +297,9 @@ export class ReportBuilder {
 
     if (this._statisticalResults.length) {
       lines.push('<h2>Statistical results</h2>');
-      lines.push('<table><tr><th>Analysis</th><th>Statistic</th><th>df</th><th>p</th><th>Effect size</th></tr>');
+      // The 95% CI column was missing here (the Markdown output had it), so a
+      // confidence interval was silently dropped from the HTML report.
+      lines.push('<table><tr><th>Analysis</th><th>Statistic</th><th>df</th><th>p</th><th>Effect size</th><th>95% CI</th></tr>');
       for (const sr of this._statisticalResults) {
         lines.push('<tr>'
           + `<td>${this._escapeHTML(sr.testName)}</td>`
@@ -293,6 +307,7 @@ export class ReportBuilder {
           + `<td>${sr.df === undefined ? '--' : this._escapeHTML(String(sr.df))}</td>`
           + `<td>${sr.pValue === undefined ? '--' : this._escapeHTML(String(sr.pValue))}</td>`
           + `<td>${sr.effectSize === undefined ? '--' : this._escapeHTML(String(sr.effectSize))}</td>`
+          + `<td>${this._escapeHTML(formatCI(sr.ciLower, sr.ciUpper))}</td>`
           + '</tr>');
       }
       lines.push('</table>');
@@ -379,7 +394,10 @@ export class ReportBuilder {
     for (const fig of this._figures) {
       lines.push('\\begin{figure}[htbp]');
       lines.push('\\centering');
-      lines.push(`\\includegraphics[width=${fig.width || '0.8\\textwidth'}]{${this._escapeLaTeX(fig.path)}}`);
+      // The path is detokenized, not escaped: a LaTeX macro inside the file
+      // name is expanded while the name is parsed, so the escaped form made
+      // LaTeX look for a file called "C\textbackslash{}Users..." and fail.
+      lines.push(`\\includegraphics[width=${fig.width || '0.8\\textwidth'}]{${detokenizePath(fig.path)}}`);
       lines.push(`\\caption{${this._escapeLaTeX(fig.caption)}}`);
       lines.push(`\\label{${fig.id}}`);
       lines.push('\\end{figure}');
@@ -428,9 +446,11 @@ export class ReportBuilder {
     lines.push('');
     lines.push('\\begin{table}[htbp]');
     lines.push('\\centering');
-    lines.push('\\begin{tabular}{lllll}');
+    // Six columns, not five: the 95% CI was dropped from the LaTeX output
+    // while the Markdown output still carried it.
+    lines.push('\\begin{tabular}{llllll}');
     lines.push('\\toprule');
-    lines.push('Test & Statistic & df & p-value & Effect size \\\\');
+    lines.push('Test & Statistic & df & p-value & Effect size & 95\\% CI \\\\');
     lines.push('\\midrule');
 
     for (const r of this._statisticalResults) {
@@ -439,7 +459,8 @@ export class ReportBuilder {
       const df = r.df !== undefined ? String(r.df) : '--';
       const pVal = r.pValue !== undefined ? this._formatPValue(r.pValue) : '--';
       const effect = r.effectSize !== undefined ? r.effectSize.toFixed(4) : '--';
-      lines.push(`${testName} & ${stat} & ${df} & ${pVal} & ${effect} \\\\`);
+      const ci = formatCI(r.ciLower, r.ciUpper);
+      lines.push(`${testName} & ${stat} & ${df} & ${pVal} & ${effect} & ${ci} \\\\`);
     }
 
     lines.push('\\bottomrule');
@@ -456,9 +477,15 @@ export class ReportBuilder {
     return `$p = ${p.toFixed(4)}$`;
   }
 
+  /**
+   * HTML escaping.
+   *
+   * Delegates to the one shared implementation (LatexCompiler.escapeHtml),
+   * which TableGenerator and FigureHandler use as well — three copies of an
+   * escaper is how the LaTeX escaper ended up in the HTML table writer.
+   */
   private _escapeHTML(s: string): string {
-    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    return escapeHtml(s);
   }
 
   /**
@@ -486,6 +513,19 @@ export class ReportBuilder {
   // ─── Table helpers ────────────────────────────────────────────────────────────
 
   static tableFromMatrix(headers: string[], rows: number[][], digits: number = 3): string {
+    // Column count check. The column spec is derived from the header count
+    // while the cell count of every row comes from the row itself, so a
+    // mismatch produced a .tex that pdflatex rejects with "Extra alignment
+    // tab has been changed to \cr" (exit code 1, no PDF) — the user is told
+    // nothing about their data, only that "the report failed to build".
+    // A mismatch is now reported as an error with the numbers involved.
+    for (let i = 0; i < rows.length; i++) {
+      if (rows[i].length !== headers.length) {
+        throw new Error(
+          `Table column count mismatch: ${headers.length} header column(s) but row ${i + 1} has `
+          + `${rows[i].length} cell(s). Every row must have exactly one cell per header column.`);
+      }
+    }
     const colSpec = 'l'.repeat(headers.length);
     const lines: string[] = [];
     lines.push(`\\begin{tabular}{${colSpec}}`);
@@ -497,7 +537,10 @@ export class ReportBuilder {
     lines.push(headers.map(h => `\\textbf{${escapeLatex(h)}}`).join(' & ') + ' \\\\');
     lines.push('\\midrule');
     for (const row of rows) {
-      lines.push(row.map(v => typeof v === 'number' ? v.toFixed(digits) : escapeLatex(String(v))).join(' & ') + ' \\\\');
+      // A missing value is "NA" (the CSV convention of this app), not the
+      // JavaScript artefact "NaN" that toFixed() produces — that string was
+      // typeset verbatim in the paper table.
+      lines.push(row.map(v => typeof v === 'number' ? MatrixConverter.formatCell(v, digits) : escapeLatex(String(v))).join(' & ') + ' \\\\');
     }
     lines.push('\\bottomrule');
     lines.push('\\end{tabular}');
@@ -529,4 +572,73 @@ export class ReportBuilder {
     this._counterFigure = 0;
     this._counterTable = 0;
   }
+}
+
+// ─── Table environment normalisation ────────────────────────────────────────
+
+/**
+ * Turn a COMPLETE `\begin{table}…\end{table}` environment into the fragment
+ * the report wrapper expects (the `tabular` plus its rules).
+ *
+ * `addTable` stores a fragment; both toLaTeX() and LatexCompiler.renderTable
+ * wrap it in a table environment themselves. A caller that handed over
+ * `TableGenerator.latex(...)` — which already emits a whole environment —
+ * therefore produced a table inside a table, and pdflatex rejects that with
+ * "LaTeX Error: Not in outer par mode." (exit code 1, no PDF at all).
+ *
+ * The inner `\caption{}` and `\label{}` are removed: the report supplies its
+ * own caption and label, and keeping both would typeset two captions and
+ * define two labels for one table.
+ *
+ * A fragment (no `\begin{table}`) is returned unchanged.
+ */
+export function unwrapTableEnvironment(content: string): string {
+  if (!content) return content;
+  const begin = /^\s*\\begin\{table\}(\[[^\]]*\])?/.exec(content);
+  if (!begin) return content;
+  const endIdx = content.lastIndexOf('\\end{table}');
+  if (endIdx < 0) return content;   // not a complete environment: leave it alone
+  let body = content.slice(begin[0].length, endIdx);
+  body = removeLatexCommand(body, 'caption');
+  body = removeLatexCommand(body, 'label');
+  // The report wrapper emits its own \centering.
+  body = body.replace(/^[ \t]*\\centering[ \t]*\r?\n?/gm, '');
+  return body.trim();
+}
+
+/**
+ * Remove every `\name{…}` from a LaTeX fragment and return what is left.
+ *
+ * The braces are matched by counting (not by a `[^}]*` regex), so a caption
+ * whose text contains an escaped brace — `a \{b\}` — is removed as a whole
+ * instead of being cut in half and leaving a stray `\}` behind.
+ */
+function removeLatexCommand(src: string, name: string): string {
+  const marker = '\\' + name + '{';
+  let out = src;
+  let idx = out.indexOf(marker);
+  while (idx >= 0) {
+    const before = idx > 0 ? out[idx - 1] : '';
+    if (/[A-Za-z]/.test(before)) {
+      // A longer command name ending in `name` (e.g. \mycaption) — skip it.
+      idx = out.indexOf(marker, idx + 1);
+      continue;
+    }
+    let depth = 0;
+    let i = idx + marker.length - 1;   // sits on the opening brace
+    let closed = false;
+    for (; i < out.length; i++) {
+      const ch = out[i];
+      if (ch === '\\') { i++; continue; }   // an escaped character is not a brace
+      if (ch === '{') depth++;
+      else if (ch === '}') {
+        depth--;
+        if (depth === 0) { i++; closed = true; break; }
+      }
+    }
+    if (!closed) return out;   // unbalanced braces: leave the fragment alone
+    out = out.slice(0, idx) + out.slice(i);
+    idx = out.indexOf(marker);
+  }
+  return out;
 }

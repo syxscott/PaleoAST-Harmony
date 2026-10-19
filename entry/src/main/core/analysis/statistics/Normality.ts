@@ -4,7 +4,7 @@
  */
 import { Matrix } from '../../math/Matrix';
 import { ComputationError } from '../../utils/Exceptions';
-import { pnorm, qnorm } from '../../math/stats';
+import { qnorm } from '../../math/stats';
 import { erfc } from '../../math/special';
 
 export interface NormalityResult {
@@ -46,22 +46,24 @@ export function normalityTest(data: Matrix | number[], column: number = 0): Norm
   svar = Math.sqrt(svar / (n - 1));
   if (!isFinite(svar) || svar <= 0) svar = 1;  // constant data guard
   const z = sorted.map(v => (v - mean) / svar);
-  const cdf = z.map(v => pnorm(v, 0, 1));
+  // A2 = -n - (1/n) * sum_i (2i-1) * [log Phi(z_i) + log Phi(-z_{n-i+1})]
+  //
+  // The two log terms are the log-CDF and the log-survival of the standard
+  // normal, and they are evaluated in the LOG DOMAIN. The previous version
+  // took `Math.log(cdf)` and `Math.log(1 - cdf)` from `pnorm`, whose
+  // Abramowitz & Stegun 7.1.26 approximation is only accurate to ~1.5e-7 in
+  // ABSOLUTE terms: on a 50-point normal sample that put A2 at 0.21800412
+  // where scipy gives 0.21800472. `1 - cdf` also cancels to 0 in the tail.
   let S = 0;
   for (let i = 1; i <= n; i++) {
-    const a = cdf[i - 1];
-    const b = 1 - cdf[n - i]; // CDF of mirrored = 1 - F(z_{n-i+1})
-    if (a > 0 && b > 0) S += (2 * i - 1) * (Math.log(a) + Math.log(b));
+    const logCdf = _logNormalCdf(z[i - 1]);
+    const logSf = _logNormalCdf(-z[n - i]);
+    S += (2 * i - 1) * (logCdf + logSf);
   }
   const adStat = -n - S / n;
-  // Anderson-Darling critical values for normality at standard significance levels
-  const critMap: Record<number, number> = {
-    15: 0.576,
-    10: 0.632,
-    5: 0.752,
-    2.5: 0.873,
-    1: 1.038
-  };
+  // Critical values depend on the sample size (Stephens 1974), see
+  // `_andersonCriticalValues`.
+  const critMap = _andersonCriticalValues(n);
 
   return {
     shapiroStat: sw.W,
@@ -69,8 +71,72 @@ export function normalityTest(data: Matrix | number[], column: number = 0): Norm
     andersonStat: adStat,
     andersonCritical: critMap,
     isNormalShapiro: sw.p > 0.05,
-    isNormalAnderson: adStat < (critMap[5] ?? 0.752)
+    isNormalAnderson: adStat < (critMap[5] ?? 0.787)
   };
+}
+
+/**
+ * Anderson-Darling critical values for NORMALITY, keyed by significance
+ * level in percent.
+ *
+ * The old implementation returned a fixed table
+ * `{15: 0.576, 10: 0.632, 5: 0.752, 2.5: 0.873, 1: 1.038}` and compared the
+ * statistic against the 5% entry (0.752) for EVERY sample size. That table
+ * mixes the asymptotic Stephens (1974) constants with a hard-wired
+ * "large-sample" value, and it is wrong in both directions:
+ *
+ *   n =  5: the 5% critical value is 0.984 -> the old 0.752 rejects
+ *           normality for samples that are perfectly normal;
+ *   n = 10: the 5% critical value is 0.684 -> the old 0.752 is too
+ *           LENIENT and hides non-normality;
+ *   n = 50: the 5% critical value is 0.736 -> the old 0.752 is slightly
+ *           too lenient.
+ *
+ * The values are the ones scipy.stats.anderson reports: the asymptotic
+ * constants A, divided by the sample-size correction (1 + 4/N - 25/N^2) and
+ * rounded to three decimals (Stephens 1974, Table 1; see also D'Agostino &
+ * Stephens 1986).
+ *
+ * For N < 5 the correction factor is not positive (1 + 4/3 - 25/9 < 0), so
+ * the N = 5 row is used: the small-sample critical values are the
+ * conservative ones, and a five-point sample cannot support a sharper test.
+ */
+const ANDERSON_A = [0.576, 0.656, 0.787, 0.918, 1.092];
+const ANDERSON_SIG = [15, 10, 5, 2.5, 1];
+
+/** Critical values of the Anderson-Darling statistic for normality. */
+export function _andersonCriticalValues(n: number): Record<number, number> {
+  const denom = 1 + 4 / n - 25 / (n * n);
+  const factor = denom > 0 ? denom : 0.8; // 0.8 == the N = 5 correction
+  const out: Record<number, number> = {};
+  for (let i = 0; i < ANDERSON_SIG.length; i++) {
+    out[ANDERSON_SIG[i]] = Math.round((ANDERSON_A[i] / factor) * 1000) / 1000;
+  }
+  return out;
+}
+
+/**
+ * log Phi(x) for the standard normal, evaluated without cancellation.
+ *
+ * For x >= 0 it uses log1p(-Q(x)) with Q = 0.5*erfc(x/sqrt(2)); for x < 0 it
+ * uses 0.5*erfc(-x/sqrt(2)) directly, which keeps full relative accuracy in
+ * the left tail. The repo's `erfc` is itself a difference of two nearly equal
+ * numbers (`1 - gammainc(0.5, x^2)`), so it loses relative accuracy once its
+ * argument exceeds ~5; below that point the Mills-ratio continued fraction is
+ * used instead, which is accurate to ~1e-15 for every argument.
+ */
+function _logNormalCdf(x: number): number {
+  if (x < -7) {
+    // Left tail: Phi(x) = phi(x) * R(x) with R the Mills ratio, evaluated by
+    // Laplace's continued fraction 1/(x + 1/(x + 2/(x + 3/(x + ...)))).
+    const ax = -x;
+    let cf = 0;
+    for (let n = 40; n >= 1; n--) cf = n / (ax + cf);
+    const mills = 1 / (ax + cf);
+    return -0.5 * ax * ax - 0.5 * Math.log(2 * Math.PI) + Math.log(mills);
+  }
+  if (x < 0) return Math.log(0.5) + Math.log(erfc(-x / Math.SQRT2));
+  return Math.log1p(-0.5 * erfc(x / Math.SQRT2));
 }
 
 

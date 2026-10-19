@@ -4,7 +4,7 @@
  * Manages a list of figures with captions and references; produces LaTeX figure
  * environments and Markdown image links for inclusion in a report.
  */
-import { escapeLatex } from './LatexCompiler';
+import { escapeLatex, escapeHtml, detokenizePath } from './LatexCompiler';
 export interface Figure {
   path: string;
   caption: string;
@@ -21,14 +21,24 @@ export class FigureHandler {
     return f;
   }
 
-  /** Render all figures into LaTeX figure environments. */
+  /**
+   * Render all figures into LaTeX figure environments.
+   *
+   * The path is wrapped in `\detokenize{}`. A raw path with backslashes
+   * ("C:\Users\paleo\fig1.png") made pdflatex report "Undefined control
+   * sequence." and produce NO pdf (verified with TeX Live 2025: 12
+   * occurrences, exit code 1). The LaTeX escaper is not a fix either: the
+   * macro is expanded while the file name is parsed, so LaTeX looks for a
+   * file called "C\textbackslash{}Users..." and dies with "Missing endcsname
+   * inserted". `\detokenize` passes the path through verbatim.
+   */
   toLatex(): string {
     return this.figures.map(f => {
       const w = f.width ?? 0.9;
       return [
         `\\begin{figure}[htbp]`,
         `\\centering`,
-        `\\includegraphics[width=${w}\\linewidth]{${f.path}}`,
+        `\\includegraphics[width=${w}\\linewidth]{${detokenizePath(f.path)}}`,
         `\\caption{${this._escape(f.caption)}}`,
         f.label ? `\\label{${f.label}}` : '',
         `\\end{figure}`
@@ -59,9 +69,12 @@ export class FigureHandler {
     return this.figures.map(f => `![${this._escapeHTML(f.caption)}](${f.path})`).join('\n\n');
   }
 
+  /**
+   * HTML escaping — the one shared implementation (LatexCompiler.escapeHtml),
+   * also used by ReportBuilder and TableGenerator.
+   */
   private _escapeHTML(s: string): string {
-    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    return escapeHtml(s);
   }
 
   /**

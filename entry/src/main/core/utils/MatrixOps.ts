@@ -2,10 +2,22 @@ import { Matrix } from "../math/Matrix";
 import * as linalg from "../math/linalg";
 import { createSeededRNG } from "../math/random";
 export type DistanceMetric = "euclidean" | "bray_curtis" | "cosine" | "jaccard" | "canberra" | "cityblock" | "correlation" | "hamming";
+/**
+ * DUPLICATE IMPLEMENTATION.
+ *
+ * `core/analysis/statistics/statistics.ts` has the same metric table; the
+ * copy there throws loudly on an unknown metric, so a typo fails instead of
+ * silently measuring something else. Keep the two in step.
+ *
+ * The Bray-Curtis denominator is `Σ |a_k + b_k|`. Without the absolute
+ * value a pair whose column sums cancel out (a_k = 1, b_k = −1) produced a
+ * denominator of 0 and a distance of 0 — two different specimens reported as
+ * identical.
+ */
 export function pairwiseDistance(a: number[], b: number[], metric: DistanceMetric = "euclidean"): number {
   switch (metric) {
     case "euclidean": { let s=0; for(let k=0;k<a.length;k++) s+=(a[k]-b[k])**2; return Math.sqrt(s); }
-    case "bray_curtis": { let n=0,d=0; for(let k=0;k<a.length;k++){n+=Math.abs(a[k]-b[k]);d+=a[k]+b[k];} return d>0?n/d:0; }
+    case "bray_curtis": { let n=0,d=0; for(let k=0;k<a.length;k++){n+=Math.abs(a[k]-b[k]);d+=Math.abs(a[k]+b[k]);} return d>0?n/d:0; }
     case "cosine": { let dot=0,na=0,nb=0; for(let k=0;k<a.length;k++){dot+=a[k]*b[k];na+=a[k]**2;nb+=b[k]**2;} const d=Math.sqrt(na)*Math.sqrt(nb); return d>0?1-dot/d:1; }
     case "jaccard": { let n=0,d=0; for(let k=0;k<a.length;k++){if(a[k]||b[k]){d++;if(a[k]!==b[k])n++;}} return d>0?n/d:0; }
     case "canberra": { let s=0; for(let k=0;k<a.length;k++){const d=Math.abs(a[k])+Math.abs(b[k]);s+=d>0?Math.abs(a[k]-b[k])/d:0;} return s; }

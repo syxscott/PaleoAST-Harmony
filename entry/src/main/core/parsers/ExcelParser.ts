@@ -17,11 +17,18 @@
  */
 import { DataMatrix } from '../models/DataMatrix';
 import { Matrix } from '../math/Matrix';
-import { splitCSVLine } from './CSVParser';
+import { splitCSVLine, splitCSVRecords } from './CSVParser';
 
 export interface ExcelData {
   sheets: SheetData[];
   nSheets: number;
+  /**
+   * Set when the file could NOT be read as a workbook and the delimited-text
+   * reader was used instead. The result is still a table, but it was not read
+   * as an xlsx — a silent fallback would hand the user numbers with no
+   * indication that the workbook was never actually parsed.
+   */
+  fallbackReason?: string;
 }
 
 export interface SheetData {
@@ -36,6 +43,14 @@ export interface ParseExcelOptions {
   hasHeader?: boolean;
   hasRowLabels?: boolean;
   naValues?: string[];
+}
+
+/** Excel parse failure with an explanation of what went wrong. */
+export class ExcelParseError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ExcelParseError';
+  }
 }
 
 /**
@@ -60,13 +75,38 @@ export function parseExcel(content: ArrayBuffer | Uint8Array | string, options: 
   try {
     return parseXLSX(bytes, opts);
   } catch (e) {
-    // Fallback: try as CSV-like format
-    const text = uint8ToString(bytes);
-    if (looksLikeDelimited(text)) {
-      return parseDelimited(text, opts);
+    const reason = e instanceof Error ? e.message : String(e);
+
+    // A ZIP archive is never delimited text. The old code sniffed the raw
+    // bytes for commas and tabs; a real xlsx is full of them, so EVERY
+    // workbook that failed to decode came back as a "table" whose labels were
+    // binary garbage and whose cells were all null -- with no error at all.
+    // That is the worst possible outcome for a result that ends up in a
+    // paper, so a ZIP now fails loudly instead.
+    if (isZipArchive(bytes)) {
+      throw new ExcelParseError(
+        `Failed to parse Excel workbook: ${reason}. The file is a ZIP archive (xlsx) ` +
+        'but its contents could not be decoded; it was NOT parsed as delimited text ' +
+        'because that would silently produce a table of wrong numbers.'
+      );
     }
-    throw new Error(`Failed to parse Excel file: ${e}`);
+
+    // Not a ZIP: it may be delimited text after all (e.g. a CSV handed in as
+    // bytes). Fall back, but say so in the result.
+    const text = decodeUtf8(bytes);
+    if (looksLikeDelimited(text)) {
+      const result = parseDelimited(text, opts);
+      result.fallbackReason =
+        `Not a readable xlsx workbook (${reason}); parsed as delimited text instead.`;
+      return result;
+    }
+    throw new ExcelParseError(`Failed to parse Excel file: ${reason}`);
   }
+}
+
+/** ZIP local-file-header / empty-archive signature. */
+function isZipArchive(bytes: Uint8Array): boolean {
+  return bytes.length >= 2 && bytes[0] === 0x50 && bytes[1] === 0x4B;
 }
 
 /**
@@ -189,7 +229,7 @@ function parseZipArchive(bytes: Uint8Array): Record<string, string> {
 
     const data = extractEntryData(bytes, entry);
     if (data) {
-      entries[entry.name] = uint8ToString(data);
+      entries[entry.name] = decodeUtf8(data);
     }
   }
 
@@ -208,8 +248,7 @@ function parseLocalFileHeader(bytes: Uint8Array, offset: number): ZipEntry | nul
   const nameLen = bytes[offset + 26] | (bytes[offset + 27] << 8);
   const extraLen = bytes[offset + 28] | (bytes[offset + 29] << 8);
 
-  const name = Array.from(bytes.slice(offset + 30, offset + 30 + nameLen))
-    .map(b => String.fromCharCode(b)).join('');
+  const name = decodeUtf8(bytes.slice(offset + 30, offset + 30 + nameLen));
 
   const dataOffset = offset + 30 + nameLen + extraLen;
 
@@ -242,8 +281,7 @@ function parseCentralDirectoryEntry(bytes: Uint8Array, offset: number): ZipEntry
   const localHeaderOffset = bytes[offset + 42] | (bytes[offset + 43] << 8) |
                            (bytes[offset + 44] << 16) | (bytes[offset + 45] << 24);
 
-  const name = Array.from(bytes.slice(offset + 46, offset + 46 + nameLen))
-    .map(b => String.fromCharCode(b)).join('');
+  const name = decodeUtf8(bytes.slice(offset + 46, offset + 46 + nameLen));
 
   return {
     name,
@@ -295,14 +333,22 @@ function inflateDeflate(compressed: Uint8Array): Uint8Array {
 
   // Shared LSB-first bit reader (RFC 1951 §3.1.1) — one stream position for
   // the whole inflate, shared by headers, Huffman decoding and extra bits.
+  //
+  // RFC 1951 §3.1.1: "Data elements are packed into bytes in order of
+  // increasing bit number within the byte, i.e. starting with the
+  // LEAST-SIGNIFICANT bit of the byte." The old reader took the MOST
+  // significant bit first, so every block header, every Huffman code and every
+  // extra bit was read upside down and no real workbook could be decoded.
   const readBit = (): number => {
     if (bitCount === 0) {
       if (pos >= compressed.length) throw new Error('DEFLATE: unexpected end of input');
       bitBuffer = compressed[pos++];
       bitCount = 8;
     }
+    const bit = bitBuffer & 1;
+    bitBuffer >>>= 1;
     bitCount--;
-    return (bitBuffer >> bitCount) & 1;
+    return bit;
   };
   const readBits = (n: number): number => {
     let val = 0;
@@ -349,8 +395,15 @@ function inflateDeflate(compressed: Uint8Array): Uint8Array {
 
   const LENGTH_BASE = [3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258];
   const LENGTH_EXTRA = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0];
-  const DIST_BASE = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 14, 16, 20, 24, 28, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 448];
-  const DIST_EXTRA = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11];
+  // Distance table — RFC 1951 §3.2.5 (30 codes).
+  //
+  // The old table had 32 entries with the bases 1..10, 12, 14, 16, 20, ...:
+  // that is NOT the RFC table, so every back-reference was copied from the
+  // wrong distance and the decompressed bytes were garbage.
+  const DIST_BASE = [1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193,
+    257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577];
+  const DIST_EXTRA = [0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6,
+    7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13];
   // HCLEN order of the code-length alphabet (RFC 1951 §3.2.7)
   const HCLEN_ORDER = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15];
 
@@ -441,60 +494,97 @@ function inflateDeflate(compressed: Uint8Array): Uint8Array {
 // XML Parsing Helpers
 // ══════════════════════════════════════════════════════════════════════════════
 
-function uint8ToString(bytes: Uint8Array): string {
-  let result = '';
-  for (let i = 0; i < bytes.length; i++) {
-    result += String.fromCharCode(bytes[i]);
-  }
-  return result;
+/**
+ * Decode bytes as UTF-8.
+ *
+ * Everything inside an xlsx is UTF-8 XML. The old decoder built the string
+ * with `String.fromCharCode` per byte, i.e. Latin-1, so a label such as
+ * "三叶虫" came out as nine mojibake characters instead of three. The same
+ * helper is used for the ZIP entry names, which are ASCII in practice.
+ */
+const utf8Decoder = new TextDecoder('utf-8');
+
+function decodeUtf8(bytes: Uint8Array): string {
+  return utf8Decoder.decode(bytes);
 }
 
-function parseWorkbookXml(entries: Record<string, string>): { sheets: string[] } | null {
+/** One `<sheet>` entry of the workbook: its display name and its r:id. */
+interface WorkbookSheet {
+  name: string;
+  /** Relationship id (`r:id`) pointing at the worksheet part, if present. */
+  rid: string | null;
+}
+
+function parseWorkbookXml(entries: Record<string, string>): { sheets: WorkbookSheet[] } | null {
   const xml = entries['xl/workbook.xml'] || entries['xl\\workbook.xml'];
   if (!xml) return null;
 
-  const sheets: string[] = [];
-  const sheetMatches = xml.match(/<sheet[^>]*name="([^"]*)"[^>]*>/g) || [];
+  const sheets: WorkbookSheet[] = [];
+  const sheetMatches = xml.match(/<sheet\b[^>]*>/g) || [];
 
   for (const match of sheetMatches) {
-    const nameMatch = match.match(/name="([^"]*)"/);
-    if (nameMatch) {
-      sheets.push(nameMatch[1]);
-    }
+    const nameMatch = match.match(/\bname="([^"]*)"/);
+    if (!nameMatch) continue;
+    // The relationship id is `r:id`. `sheetId` must NOT match here — it is a
+    // different attribute and would point the lookup at the wrong part.
+    const ridMatch = match.match(/(?:^|\s)(?:r:)?id="([^"]*)"/);
+    sheets.push({ name: nameMatch[1], rid: ridMatch ? ridMatch[1] : null });
   }
 
   return sheets.length > 0 ? { sheets } : null;
 }
 
-function resolveSheetMapping(entries: Record<string, string>, workbook: { sheets: string[] }): Record<string, string> {
+/**
+ * Resolve a relationship target to a path inside the archive.
+ * `worksheets/sheet2.xml` is relative to `xl/`; `/xl/worksheets/sheet2.xml` is
+ * absolute.
+ */
+function normaliseSheetPath(target: string): string {
+  let path = target.replace(/\\/g, '/');
+  if (path.startsWith('/')) path = path.slice(1);
+  if (!path.startsWith('xl/')) path = 'xl/' + path;
+  return path;
+}
+
+/**
+ * Map sheet names to their worksheet parts.
+ *
+ * The mapping follows the workbook's `r:id` into the relationship file. The
+ * old code paired the Nth `<sheet>` with the Nth worksheet relationship, which
+ * returns ANOTHER SHEET's data whenever the two orders differ (a deleted
+ * sheet, or a file rewritten by a tool that renumbered the relationships).
+ */
+function resolveSheetMapping(entries: Record<string, string>, workbook: { sheets: WorkbookSheet[] }): Record<string, string> {
   const mapping: Record<string, string> = {};
 
   // Try xl/workbook.xml.rels first
   const relsXml = entries['xl/_rels/workbook.xml.rels'] || entries['xl\\workbook.xml.rels'];
 
+  const byId = new Map<string, string>();
+  const worksheetTargets: string[] = [];
+
   if (relsXml) {
-    // Parse relationships
-    const targetMatches = relsXml.match(/Type="[^"]*worksheet[^"]*"[^>]*Target="([^"]*)"/g) || [];
-    for (let i = 0; i < targetMatches.length && i < workbook.sheets.length; i++) {
-      const targetMatch = targetMatches[i].match(/Target="([^"]*)"/);
-      if (targetMatch) {
-        let path = targetMatch[1];
-        // Normalize path separators
-        path = path.replace(/\\/g, '/');
-        if (!path.startsWith('xl/')) {
-          path = 'xl/' + path;
-        }
-        mapping[workbook.sheets[i]] = path;
-      }
+    const relMatches = relsXml.match(/<Relationship\b[^>]*>/g) || [];
+    for (const rel of relMatches) {
+      const idMatch = rel.match(/\bId="([^"]*)"/);
+      const targetMatch = rel.match(/\bTarget="([^"]*)"/);
+      if (!targetMatch) continue;
+      const path = normaliseSheetPath(targetMatch[1]);
+      if (idMatch) byId.set(idMatch[1], path);
+      const typeMatch = rel.match(/\bType="([^"]*)"/);
+      if (typeMatch && /worksheet/i.test(typeMatch[1])) worksheetTargets.push(path);
     }
   }
 
-  // Fallback: use standard naming
-  if (Object.keys(mapping).length === 0) {
-    for (let i = 0; i < workbook.sheets.length; i++) {
-      mapping[workbook.sheets[i]] = `xl/worksheets/sheet${i + 1}.xml`;
-    }
-  }
+  workbook.sheets.forEach((sheet, index) => {
+    // Primary: the relationship the workbook itself names.
+    let path = sheet.rid ? byId.get(sheet.rid) : undefined;
+    // Fallback: position among the worksheet relationships.
+    if (!path) path = worksheetTargets[index];
+    // Last resort: the conventional file name.
+    if (!path) path = `xl/worksheets/sheet${index + 1}.xml`;
+    mapping[sheet.name] = path;
+  });
 
   return mapping;
 }
@@ -533,26 +623,16 @@ function parseSheetXml(xml: string, sharedStrings: string[], opts: Required<Pars
   let maxCol = 0;
 
   // Parse cells
-  const cellRegex = /<c\s[^>]*r="([A-Z]+)(\d+)"[^>]*>([\s\S]*?)<\/c>/g;
-  let cellMatch;
-
-  while ((cellMatch = cellRegex.exec(xml)) !== null) {
-    const colRef = cellMatch[1];
-    const rowNum = parseInt(cellMatch[2], 10) - 1;
-    const cellContent = cellMatch[3];
-
-    const col = colLetterToIndex(colRef);
+  for (const cell of extractCells(xml)) {
+    const col = colLetterToIndex(cell.colRef);
     maxCol = Math.max(maxCol, col);
 
-    if (!rows.has(rowNum)) {
-      rows.set(rowNum, new Map());
+    if (!rows.has(cell.rowNum)) {
+      rows.set(cell.rowNum, new Map());
     }
 
-    // The cell type lives on the <c> element itself, so read it from the full
-    // match and hand it to the decoder (see parseCellValue).
-    const typeAttr = (cellMatch[0].match(/<c\s[^>]*?\bt="([^"]*)"/) || [])[1] ?? 'n';
-    const value = parseCellValue(cellContent, sharedStrings, typeAttr);
-    rows.get(rowNum)!.set(col, value);
+    const value = parseCellValue(cell.content, sharedStrings, cell.typeAttr);
+    rows.get(cell.rowNum)!.set(col, value);
   }
 
   // Convert to array format
@@ -568,7 +648,7 @@ function parseSheetXml(xml: string, sharedStrings: string[], opts: Required<Pars
 
     for (let j = 0; j <= maxCol; j++) {
       if (opts.hasRowLabels && j === 0) {
-        rowLabels.push(rowData?.get(j)?.toString() || `Row_${i + 1}`);
+        rowLabels.push(cellToLabel(rowData?.get(j)) || `Row_${i + 1}`);
       } else {
         const cell = rowData?.get(j);
         if (cell === undefined) {
@@ -606,7 +686,7 @@ function parseSheetXml(xml: string, sharedStrings: string[], opts: Required<Pars
     // column name. The no-header branch below already started at column 1.
     for (let j = opts.hasRowLabels ? 1 : 0; j <= maxCol; j++) {
       const cell = headerRow.get(j);
-      colLabels.push(cell?.toString() || `Col_${j + 1}`);
+      colLabels.push(cellToLabel(cell) || `Col_${j + 1}`);
     }
   } else {
     for (let j = opts.hasRowLabels ? 1 : 0; j <= maxCol; j++) {
@@ -632,6 +712,84 @@ function parseSheetXml(xml: string, sharedStrings: string[], opts: Required<Pars
 
 type CellValue = number | string | boolean | null;
 
+/** One `<c>` element of a worksheet. */
+interface RawCell {
+  colRef: string;
+  rowNum: number;
+  typeAttr: string;
+  content: string;
+}
+
+/**
+ * Extract every `<c>` cell of a worksheet.
+ *
+ * A cell is either self-closing (`<c r="A1" s="1"/>` — styled but empty, the
+ * usual way Excel writes an empty cell) or paired (`<c r="A1"><v>1</v></c>`).
+ * A single regex cannot tell the two apart: the lazy `[\s\S]*?` of the paired
+ * form runs past the `/>` of a self-closing cell and swallows the NEXT cell's
+ * content, which is then filed under the empty cell's reference — so the value
+ * of B1 ended up in A1.
+ *
+ * This scanner reads the opening tag first, so a self-closing cell never
+ * captures any content, and the content of a paired cell never runs past the
+ * start of the next cell.
+ */
+function extractCells(xml: string): RawCell[] {
+  const cells: RawCell[] = [];
+  let i = 0;
+
+  while (i < xml.length) {
+    const start = xml.indexOf('<c', i);
+    if (start < 0) break;
+    const marker = xml[start + 2];
+    // `<c `, `<c>` and `<c/>` open a cell; `<col ...>` / `<cols>` do not.
+    if (marker !== ' ' && marker !== '\t' && marker !== '\n' && marker !== '>' && marker !== '/') {
+      i = start + 2;
+      continue;
+    }
+
+    const tagEnd = xml.indexOf('>', start);
+    if (tagEnd < 0) break;
+    const tag = xml.slice(start, tagEnd + 1);
+    const selfClosing = tag.endsWith('/>');
+    const attrs = tag.slice(2, tag.length - 1).replace(/\/\s*$/, '').trim();
+
+    let content = '';
+    let next = tagEnd + 1;
+    if (!selfClosing) {
+      const closeIdx = xml.indexOf('</c>', tagEnd + 1);
+      const nextCellIdx = xml.indexOf('<c', tagEnd + 1);
+      if (closeIdx < 0) {
+        // Unterminated cell: keep only what precedes the next cell.
+        content = nextCellIdx >= 0 ? xml.slice(tagEnd + 1, nextCellIdx) : xml.slice(tagEnd + 1);
+        next = nextCellIdx >= 0 ? nextCellIdx : xml.length;
+      } else if (nextCellIdx >= 0 && nextCellIdx < closeIdx) {
+        // Truncated cell: the next cell starts before this one is closed, so
+        // the content must stop there instead of running into the next cell.
+        content = xml.slice(tagEnd + 1, nextCellIdx);
+        next = nextCellIdx;
+      } else {
+        content = xml.slice(tagEnd + 1, closeIdx);
+        next = closeIdx + 4;
+      }
+    }
+
+    const refMatch = attrs.match(/\br="([A-Z]+)(\d+)"/);
+    if (refMatch) {
+      const typeMatch = attrs.match(/\bt="([^"]*)"/);
+      cells.push({
+        colRef: refMatch[1],
+        rowNum: parseInt(refMatch[2], 10) - 1,
+        typeAttr: typeMatch ? typeMatch[1] : 'n',
+        content
+      });
+    }
+    i = next;
+  }
+
+  return cells;
+}
+
 /**
  * Decode one `<c>` cell.
  *
@@ -654,7 +812,14 @@ function parseCellValue(cellContent: string, sharedStrings: string[], typeAttr: 
   }
 
   const vMatch = cellContent.match(/<v>([\s\S]*?)<\/v>/);
-  if (!vMatch) return (type === 's' || type === 'str') ? '' : 0;
+  if (!vMatch) {
+    // An empty cell carries no <v>. The old code returned 0 here, which
+    // FABRICATED a measurement: a blank cell became a real zero, every mean
+    // was dragged towards 0 and a missing specimen looked like a measured
+    // one. Missing data has to stay missing (NaN) — the CSV path already did.
+    if (type === 's' || type === 'str') return '';
+    return NaN;
+  }
 
   const raw = vMatch[1];
 
@@ -673,10 +838,21 @@ function parseCellValue(cellContent: string, sharedStrings: string[], typeAttr: 
 
     case 'n': // Number
     default: {
+      // A cell whose value is not a number is missing data, not a zero.
       const n = parseFloat(raw);
-      return isNaN(n) ? 0 : n;
+      return isNaN(n) ? NaN : n;
     }
   }
+}
+
+/**
+ * Text of a cell for use as a row/column label.
+ * A missing value (NaN) has no text — it must not become the label "NaN".
+ */
+function cellToLabel(cell: CellValue | undefined): string {
+  if (cell === undefined || cell === null) return '';
+  if (typeof cell === 'number') return isNaN(cell) ? '' : String(cell);
+  return String(cell);
 }
 
 function colLetterToIndex(letters: string): number {
@@ -702,6 +878,10 @@ function unescapeXml(s: string): string {
 // ══════════════════════════════════════════════════════════════════════════════
 
 function looksLikeDelimited(text: string): boolean {
+  // Binary payloads (a failed workbook, an image, a DOCX) contain NUL and
+  // other control bytes. Sniffing those as CSV produced a table of garbage
+  // labels, so a file that is not text at all is never treated as text.
+  if (/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/.test(text)) return false;
   const firstLine = text.split(/\r?\n/)[0];
   const delimiters = [',', '\t', ';', '|'];
   return delimiters.some(d => {
@@ -710,28 +890,35 @@ function looksLikeDelimited(text: string): boolean {
   });
 }
 
-function parseDelimited(text: string, opts: Required<ParseExcelOptions>): ExcelData {
-  const lines = text.trim().split(/\r?\n/);
-  if (lines.length === 0) {
+/** Delimiter with the most occurrences in the first record. */
+function sniffDelimiter(firstLine: string): string {
+  const candidates = [',', '\t', ';', '|'];
+  let best = ',';
+  let bestCount = 0;
+  for (const d of candidates) {
+    const count = (firstLine.match(new RegExp(d === '|' ? '\\|' : d, 'g')) || []).length;
+    if (count > bestCount) {
+      bestCount = count;
+      best = d;
+    }
+  }
+  return best;
+}
+
+function parseDelimited(text: string, opts: Required<ParseExcelOptions>, forcedDelimiter?: string): ExcelData {
+  // Records, not lines: a quoted field may contain a line break (RFC 4180).
+  const records = splitCSVRecords(text).filter(r => r.trim());
+  if (records.length === 0) {
     return { sheets: [{ name: 'Sheet1', data: [], rowLabels: [], colLabels: [] }], nSheets: 1 };
   }
 
-  // Detect delimiter
-  const firstLine = lines[0];
-  let delimiter = ',';
-  const delimiterCounts = [
-    { d: ',', c: (firstLine.match(/,/g) || []).length },
-    { d: '\t', c: (firstLine.match(/\t/g) || []).length },
-    { d: ';', c: (firstLine.match(/;/g) || []).length },
-    { d: '|', c: (firstLine.match(/\|/g) || []).length }
-  ];
-  delimiterCounts.sort((a, b) => b.c - a.c);
-  if (delimiterCounts[0].c > 0) delimiter = delimiterCounts[0].d;
+  // Use the delimiter the caller asked for; otherwise detect it.
+  const delimiter = forcedDelimiter ?? sniffDelimiter(records[0]);
 
   // Parse rows
   const rows: string[][] = [];
-  for (const line of lines) {
-    const fields = parseCSVLine(line, delimiter);
+  for (const record of records) {
+    const fields = parseCSVLine(record, delimiter);
     rows.push(fields);
   }
 
@@ -794,7 +981,13 @@ function parseCSVLine(line: string, delimiter: string): string[] {
 // ══════════════════════════════════════════════════════════════════════════════
 
 export function parseExcelText(text: string, delimiter = '\t'): ExcelData {
-  return parseDelimited(text, { sheetIndex: 0, hasHeader: true, hasRowLabels: true, naValues: ['NA', 'NaN', '-', '', 'nan', 'null'] });
+  // The delimiter used to be dropped on the floor: `parseExcelText(text, ';')`
+  // and `parseExcelText(text, ',')` produced the same table.
+  return parseDelimited(
+    text,
+    { sheetIndex: 0, hasHeader: true, hasRowLabels: true, naValues: ['NA', 'NaN', '-', '', 'nan', 'null'] },
+    delimiter
+  );
 }
 
 export function excelToDataMatrix(excel: ExcelData, sheetIndex = 0): DataMatrix {

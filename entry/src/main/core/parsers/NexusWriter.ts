@@ -4,7 +4,12 @@
  * with proper quoting of names containing whitespace or reserved characters.
  */
 
-const RESERVED = /[()\[\]{}\\;:,.'"`\s]/;
+/**
+ * Characters that force a name to be quoted.
+ * `/`, `=` and `*` were missing: a taxon called `Homo/sapiens` or `sp=1` was
+ * written unquoted and the file could no longer be read back.
+ */
+const RESERVED = /[()\[\]{}\\;:,.'"`\s\/=*]/;
 
 /** Quote a name when it contains whitespace or reserved punctuation. */
 function quoteIfNeeded(name: string): string {
@@ -151,7 +156,9 @@ export class NEXUSWriter {
       lines.push('END;', '');
     }
 
-    lines.push('END;');
+    // Every BEGIN block above is closed by its own END;. The extra "END;" at
+    // the end of the document had no BEGIN to match and made the file
+    // unreadable by strict NEXUS readers.
     return lines.join('\n');
   }
 }

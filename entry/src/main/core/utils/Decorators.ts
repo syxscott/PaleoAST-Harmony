@@ -2,6 +2,32 @@
  * Utility decorators — replaces utils/decorators.py.
  */
 
+// ─── Diagnostic sink ──────────────────────────────────────────────────────────
+
+/**
+ * Where `logExecutionTime` and `deprecated` write their diagnostics.
+ *
+ * NULL by default, and that is deliberate: these are DECORATORS, so a
+ * `console.log` inside them prints on EVERY call of a production method.
+ * `core/app_infrastructure/CodeAudit.ts` lists stray console statements as a
+ * defect, and a silent-by-default sink is the only way a decorator can stay
+ * in a production code path.
+ *
+ * Turn the diagnostics on explicitly, e.g. in a debug build:
+ *   `setDecoratorLogSink((m) => console.log(m));`
+ */
+let decoratorLogSink: ((message: string) => void) | null = null;
+
+/** Install (or, with `null`, remove) the decorator diagnostic sink. */
+export function setDecoratorLogSink(sink: ((message: string) => void) | null): void {
+  decoratorLogSink = sink;
+}
+
+/** The currently installed decorator diagnostic sink (null = silent). */
+export function getDecoratorLogSink(): ((message: string) => void) | null {
+  return decoratorLogSink;
+}
+
 // ─── thread_safe ────────────────────────────────────────────────────────────────
 // Mark a class method as mutually exclusive (mirrors threading.RLock wrapping).
 // Correctly unwraps inner Promises returned by the wrapped function so callers
@@ -78,7 +104,9 @@ export function memoize(): MethodDecorator {
 }
 
 // ─── logExecutionTime ──────────────────────────────────────────────────────────
-// Logs execution time via console.time when supported.
+// Reports the execution time through the injectable diagnostic sink. The sink
+// is silent by default (see `setDecoratorLogSink`), so applying this
+// decorator to a production method does not print on every call.
 
 export function logExecutionTime(label?: string): MethodDecorator {
   return (_target, key, descriptor) => {
@@ -91,11 +119,11 @@ export function logExecutionTime(label?: string): MethodDecorator {
       // Async-aware: if return is a Promise, also measure after resolution.
       if (r && typeof (r as any).then === 'function') {
         return (r as Promise<unknown>).then(v => {
-          console.log(`[time] ${name}: ${Date.now() - t0}ms`);
+          decoratorLogSink?.(`[time] ${name}: ${Date.now() - t0}ms`);
           return v;
         });
       }
-      console.log(`[time] ${name}: ${dt}ms`);
+      decoratorLogSink?.(`[time] ${name}: ${dt}ms`);
       return r;
     } as any;
     return descriptor;
@@ -104,6 +132,11 @@ export function logExecutionTime(label?: string): MethodDecorator {
 
 // ─── validateInputs ─────────────────────────────────────────────────────────────
 // Map arg-name → validator function. Throws ValidationError if any input fails.
+//
+// Every entry of the map is checked, even when the caller passed FEWER
+// arguments than there are validators. The loop used to be
+// `i < names.length && i < args.length`, so the trailing validators were
+// silently skipped and an invalid input passed through.
 
 type Validator = (v: unknown) => boolean | string;
 
@@ -112,9 +145,13 @@ export function validateInputs(map: Record<string, Validator>): MethodDecorator 
     const orig = descriptor.value as Function;
     descriptor.value = function (...args: unknown[]) {
       const names = Object.keys(map);
-      for (let i = 0; i < names.length && i < args.length; i++) {
-        const r = map[names[i]](args[i]);
-        if (r !== true) throw new Error(`Validation failed on arg "${names[i]}" of ${String(key)}: ${r}`);
+      for (let i = 0; i < names.length; i++) {
+        const name = names[i];
+        if (i >= args.length) {
+          throw new Error(`Validation failed on arg "${name}" of ${String(key)}: argument is missing`);
+        }
+        const r = map[name](args[i]);
+        if (r !== true) throw new Error(`Validation failed on arg "${name}" of ${String(key)}: ${r}`);
       }
       return orig.apply(this, args);
     } as any;
@@ -144,11 +181,15 @@ export function cacheResult(ttlMs: number = 60000, keyFn?: (...args: unknown[]) 
 }
 
 // ─── deprecated ────────────────────────────────────────────────────────────────
+// Reports the deprecation through the injectable diagnostic sink. The sink is
+// silent by default, so the warning has to be switched on explicitly (see
+// `setDecoratorLogSink`) — a decorator must not print on every call.
+
 export function deprecated(msg = ''): MethodDecorator {
   return (_target, key, descriptor) => {
     const orig = descriptor.value as Function;
     descriptor.value = function (...args: unknown[]) {
-      console.warn(`Deprecated: ${String(key)} ${msg ? '- ' + msg : ''}`);
+      decoratorLogSink?.(`Deprecated: ${String(key)} ${msg ? '- ' + msg : ''}`);
       return orig.apply(this, args);
     } as any;
     return descriptor;

@@ -15,7 +15,7 @@
  */
 import { Matrix } from '../../math/Matrix';
 import * as linalg from '../../math/linalg';
-import { seed, randint } from '../../math/random';
+import { createSeededRNG } from '../../math/random';
 
 export interface PLSResult {
   singularValues: number[];
@@ -95,15 +95,25 @@ export function plsIntegration(
   // Overall integration index: mean absolute RV over components
   const integrationIndex = corr.reduce((s, v) => s + Math.abs(v), 0) / Math.max(1, corr.length);
 
-  // Overall Escoufier RV coefficient (kept for reference)
-  const Saa = Ac.transpose().matmul(Ac);
-  const Sbb = Bc.transpose().matmul(Bc);
+  // Overall Escoufier RV coefficient.
+  //
+  //   RV = tr(S_ab · S_ba) / sqrt(tr(S_aa²) · tr(S_bb²))
+  //
+  // The three covariance blocks have to be scaled the SAME way: C is the
+  // cross-covariance AᵀB/(n−1), so S_aa and S_bb must be AᵀA/(n−1) and
+  // BᵀB/(n−1) as well.  They were left unscaled, which put a factor
+  // (n−1)² between numerator and denominator: two identical blocks scored
+  // RV = 1/49 (n = 8) instead of 1, and n = 50 would be 2401× too small.
+  // The sibling `plsAnalysis` in analysis/statistics/statistics.ts uses the
+  // consistent form.
+  const Saa = Ac.transpose().matmul(Ac).div(Math.max(1, A.rows - 1));
+  const Sbb = Bc.transpose().matmul(Bc).div(Math.max(1, A.rows - 1));
   const trSaaSq = _traceSquare(Saa);
   const trSbbSq = _traceSquare(Sbb);
   let trCabCba = 0;
   for (let i = 0; i < C.rows; i++) for (let j = 0; j < C.cols; j++) trCabCba += C.get(i, j) * C.get(i, j);
   const denom = Math.sqrt(Math.max(1e-300, trSaaSq * trSbbSq));
-  const RV = trCabCba / denom;
+  const RV = denom > 0 ? trCabCba / denom : 0;
 
   // Covariance explained (against the full singular spectrum)
   const totalVariance = svd.S.reduce((s, v) => s + v * v, 0);
@@ -117,12 +127,19 @@ export function plsIntegration(
   // Permutation test — only block B's rows are permuted.  (The previous
   // implementation applied the same permutation to BOTH blocks, which left
   // the pairing intact and drove every p-value to 1.)
+  //
+  // The permutation uses its own seeded stream (createSeededRNG) instead of
+  // the global one: `seed(rngSeed)` reset the module-level PRNG of
+  // math/random, so whether a later `divideConfigurationIntoBlocks(...,
+  // 'random')` produced the same permutation depended on whether a PLS
+  // analysis had run before it — the seeded division then stopped being
+  // reproducible in the way its own documentation promises.
   let countGreater = 0, countLess = 0;
-  seed(rngSeed);
+  const rng = createSeededRNG(rngSeed);
   for (let p = 0; p < nPermutations; p++) {
     const perm = new Array(Ac.rows).fill(0).map((_, i) => i);
     for (let i = perm.length - 1; i > 0; i--) {
-      const j = randint(0, i + 1);
+      const j = Math.floor(rng() * (i + 1));
       [perm[i], perm[j]] = [perm[j], perm[i]];
     }
     const Bp = new Matrix(new Float64Array(Ac.rows * B.cols), Ac.rows, B.cols);
