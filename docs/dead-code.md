@@ -37,15 +37,26 @@ node tools/dead_code_audit.mjs --list   # 逐个符号列出
 | add-one p 值格式化 | 2 | `LatexCompiler.formatPValue` | `ReportBuilder._formatPValue` |
 
 注意 `PartialGPA.findRotation` 与 `morphometrics._findRotation` 的
-**docstring 措辞不同**(一个写 `cfg @ Rᵀ ≈ consensus`,一个写 `R @ target ≈ reference`,
-看起来像相反约定),但**代码公式逐字相同**。读注释会得出错误结论 —— 这本身是文档危害。
+**代码公式逐字相同**。
+
+> **2026-10-19 更正**：本文原写"两份 docstring 措辞不同(一个写 `cfg @ Rᵀ ≈ consensus`,
+> 一个写 `R @ target ≈ reference`,看起来像相反约定),读注释会得出错误结论"。
+> **这个判断是错的**——2026-10-19 的审查实测:两份 docstring **都写 `cfg @ Rᵀ`,都说对了**;
+> 错的是**两份实现**(`p[b] += cfg[i][a] * R[a][b]`,即 `cfg @ R`,把转置用反了)。
+> 也就是说:读注释是对的,读代码是错的。Kabsch 旋转的转置错误已在那轮审查中修复,
+> 并补了"刚性一致 → Procrustes 距离 ≈ 0"的回归测试(旧测试只测纯平移,
+> 纯平移的最优旋转是单位阵,转置错误在那里完全隐形)。
 
 ## 整文件无生产 importer(约 1600 行)
 
 `ets/components/FileDropHandler.ets`(33)
 `ets/components/dialogs/BaseAnalysisDialog.ets`(98,仅结构模板,3 个 dialog 在注释里说明 ArkTS struct 不能继承)
 
-`core/app_infrastructure/{CodeAudit,ExceptionHandler,StartupLoader,ThemeManager}.ts`(458)
+`core/app_infrastructure/{CodeAudit,ExceptionHandler,ThemeManager}.ts`
+> **2026-10-19 更正**：本文原把 `StartupLoader.ts` 也列在这里。**该结论已过期**:
+> `ets/pages/Splash.ets:2` 导入 `createPaleoastStartupLoader`,且
+> `ets/entryability/EntryAbility.ets:32` 以 `windowStage.loadContent('pages/Splash', …)`
+> 作为应用启动页 —— `StartupLoader.ts` **在生产启动路径上**。照旧结论删掉它会直接打断启动页。
 `core/hpc/{ProcessPool,TaskScheduler}.ts`(154,仅测试引用 —— 与 `Index.ets` 里"closures capturing `this` 不能跨线程"的注释一致)
 `core/plugins/{Base,Decorators,Loader,Registry}.ts`(137)
 `core/scipy/DistanceCluster.ts`(134)

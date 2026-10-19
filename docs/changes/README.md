@@ -36,6 +36,20 @@
 
 | 日期 | 标题 | 类型 |
 |---|---|---|
+| 2026-10-19 | [全仓审查与修复:16 条致命缺陷 + 验证基础设施的空洞](2026-10-19-full-repo-audit-fixes.md) | 缺陷修复 / 数值变更 / 工程 |
+| 2026-10-19 | [statistics:置换检验不播种、p 值尾部塌成 0、PERMANOVA 的 SS 与 F 不同口径](2026-10-19-statistics-numerics-fixes.md) | 缺陷修复 / 数值变更 |
+| 2026-10-19 | [UI 层:兜底绘图挑错字段、箱线图画布与 SVG 不一致、分组跨数据集残留](2026-10-19-ets-plot-dispatch-fixes.md) | 缺陷修复 / 数值变更 |
+| 2026-10-19 | [core/math:SVD 宽矩阵返回转置的 U/Vt、奇异判据用绝对阈值](2026-10-19-math-matrix-linalg-fixes.md) | 缺陷修复 / 数值变更 |
+| 2026-10-19 | [core/math:特殊函数尾部分位数发散、lgamma 负数 NaN、新增上尾函数](2026-10-19-math-special-stats-fixes.md) | 缺陷修复 / 数值变更 |
+| 2026-10-19 | [core/math:randint 可能取到上界、BCa 加速常数符号反了、LOWESS 偶数样本中位数](2026-10-19-math-random-bootstrap-lowess-fixes.md) | 缺陷修复 / 数值变更 |
+| 2026-10-19 | [地层学:卡方 p 值由发散的连分数算出、CONISS 分带数与请求不符、spline 年龄模型外推出负年龄](2026-10-19-stratigraphy-numerics-fixes.md) | 缺陷修复 / 数值变更 |
+| 2026-10-19 | [宏观演化:fitEarlyBurst 永远返回垃圾拟合、fitOU 没做 OU 变换、logRankTest 风险集漏删失](2026-10-19-macroevolution-numerics-fixes.md) | 缺陷修复 / 数值变更 |
+| 2026-10-19 | [生态学:稀释曲线的 nIterations 是死参数、SQS 两种 method 的 quorum 不同义](2026-10-19-ecology-fixes.md) | 缺陷修复 / 数值变更 |
+| 2026-10-19 | [系统发育:共识树输出损坏、RF 距离恒为真值 2 倍、Blomberg K 对退化输入返回噪声数](2026-10-19-phylogenetics-consensus-signal-and-search-fixes.md) | 缺陷修复 / 数值变更 |
+| 2026-10-19 | [形态测量:Kabsch 旋转反向应用、3D Procrustes 算 V·U、RV 系数不是 Escoufier RV](2026-10-19-morphometrics-morpho3d-fixes.md) | 缺陷修复 / 数值变更 |
+| 2026-10-19 | [解析器:xlsx 的 inflate 违反 RFC 1951、TPS 的 ID 错位、NEXUS 矩阵行与 taxa 不绑定](2026-10-19-parsers-fixes.md) | 缺陷修复 / 数值变更 |
+| 2026-10-19 | [导出:LaTeX 丢标题、HTML 上下文用 LaTeX 转义器、写盘失败被报成「用户取消」](2026-10-19-reporting-export-fixes.md) | 缺陷修复 |
+| 2026-10-19 | [controllers + utils:SIMPER 丢弃 metric、Phylo ANOVA 对空分组作结论、缺失值口径三套](2026-10-19-controllers-and-utils-fixes.md) | 缺陷修复 / 数值变更 |
 | 2026-09-27 | [ProcessPool.execute 泄漏超时定时器:每次成功调用都悬住事件循环](2026-09-27-processpool-timeout-timer-leak.md) | 缺陷修复 |
 | 2026-09-27 | [DFA.minimize() 改写了自己:每调一次多一个 DEAD 状态](2026-09-27-dfa-minimize-mutated-receiver.md) | 缺陷修复 |
 | 2026-09-27 | [BCa 在退化分布上静默返回 NaN 区间;同时锁住 normInv/normCDF/BCa 公式](2026-09-27-bootstrap-bca-degenerate-nan.md) | 缺陷修复 / 数值变更 |
