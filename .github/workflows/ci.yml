@@ -83,3 +83,45 @@ jobs:
             fi
           done <<< "$COMMITS"
           echo "OK: commit messages checked."
+
+  # ── The gates that actually decide whether the code is correct ────────────
+  #
+  # Everything above is a lint. None of it would have noticed that
+  # `toBeCloseTo` treated its second argument as an absolute tolerance while
+  # the suite was written against Jest's "decimal places" meaning: 118 of the
+  # 145 numeric assertions were vacuous, and 16 critical defects sat behind
+  # them. A gate that is not run is not a gate, so the unit tests and the
+  # structural check are run here too.
+  unit-and-structure:
+    name: Unit tests & structural check
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # The test runner needs Node 22.6+ for --experimental-transform-types
+      # (tests/runner.ts uses constructor parameter properties, which the
+      # strip-only mode rejects with ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX).
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Run the unit tests
+        run: node --experimental-transform-types tests/test.mjs
+
+      # Bracket balance, duplicate exports, and the .ets "this.x is not a
+      # member of this struct" check. The last one is why
+      # `this.dataFingerprint(dm)` -- a call to a method the struct does not
+      # have -- can no longer reach a release unnoticed.
+      - name: Run the structural check
+        run: python3 tools/structure_check.py
+
+      # The device-wiring gate: every declared analysis must have a dispatch
+      # case in runDialogAnalysisCore, and every parameter key the case reads
+      # must be one the dialog actually writes.
+      - name: Run the static wiring check
+        run: node test/device/run.mjs
