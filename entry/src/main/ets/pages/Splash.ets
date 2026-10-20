@@ -1,5 +1,8 @@
 import router from '@ohos.router';
-import { createPaleoastStartupLoader, type StartupProgress } from '../core/app_infrastructure/StartupLoader';
+// Two levels up: pages/ -> ets/ -> main/, so that the path lands on
+// entry/src/main/core/. With one level ('../core/...') it pointed at
+// entry/src/main/ets/core/, which does not exist -- a compile error.
+import { createPaleoastStartupLoader, type StartupProgress } from '../../core/app_infrastructure/StartupLoader';
 
 @Entry
 @Component
