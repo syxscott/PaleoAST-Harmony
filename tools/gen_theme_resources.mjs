@@ -50,10 +50,23 @@ const targets = [
 const check = process.argv.includes('--check');
 let drifted = 0;
 
+/**
+ * The line endings a file has on disk depend on how it was checked out
+ * (core.autocrlf, .gitattributes), not on its content. Comparing the bytes
+ * would therefore fail on a Windows clone and pass on CI. The endings are
+ * normalised before the comparison, so only the content is judged.
+ *
+ * @param {string} text the file content
+ * @returns {string} the content with CRLF turned into LF
+ */
+function normalise(text) {
+  return text.replace(/\r\n/g, '\n');
+}
+
 for (const target of targets) {
   const wanted = renderColorJson(target.theme);
   if (check) {
-    const current = existsSync(target.file) ? readFileSync(target.file, 'utf8') : '';
+    const current = existsSync(target.file) ? normalise(readFileSync(target.file, 'utf8')) : '';
     if (current !== wanted) {
       drifted++;
       console.error(`OUT OF DATE: ${target.file.replace(/\\/g, '/')}`);

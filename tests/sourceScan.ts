@@ -7,8 +7,29 @@
  * and `$r('app.color.x')` written in a doc comment is not a resource
  * reference.
  */
-import { readdirSync, statSync } from 'node:fs';
+import { readdirSync, statSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+
+/**
+ * Read a source file for inspection, with the line endings normalised.
+ *
+ * The repository mixes CRLF and LF, and which one a file has on disk
+ * depends on how it was checked out (core.autocrlf, .gitattributes) rather
+ * than on its content. That matters for any check that splits the source
+ * into lines and matches a regular expression against a line: in
+ * JavaScript, `.` does not match `\r` either — it is a line terminator — so
+ * a pattern like `(.+)$` matches nothing at all on a CRLF file, and a
+ * source check that passes on a Linux checkout can fail on a Windows one.
+ *
+ * Normalising here keeps those checks about the source and not about the
+ * checkout.
+ *
+ * @param path the file to read
+ * @returns the source with CRLF turned into LF
+ */
+export function readSource(path: string): string {
+  return readFileSync(path, 'utf8').replace(/\r\n/g, '\n');
+}
 
 /**
  * Remove the comments from a source file, keeping the string and template

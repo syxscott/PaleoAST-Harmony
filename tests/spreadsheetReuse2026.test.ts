@@ -53,12 +53,17 @@ import { describe, it, expect } from './runner.ts';
 import { readFileSync } from 'node:fs';
 import { formatCell, cellFontColor, cellBackground, rowBackground } from '../entry/src/main/ets/components/cellAppearance.ts';
 import { token } from '../entry/src/main/ets/theme/tokens.ts';
+import { readSource } from './sourceScan.ts';
 
 const SHEET = 'entry/src/main/ets/components/Spreadsheet.ets';
 const ROW = 'entry/src/main/ets/components/SpreadsheetRow.ets';
 
-const readSheet = () => readFileSync(SHEET, 'utf-8');
-const readRow = () => readFileSync(ROW, 'utf-8');
+// The source is read with the line endings normalised: which one a file has
+// on disk depends on the checkout, not on the content, and a regular
+// expression that ends in `$` matches nothing against a line that still
+// carries its `\r` (in JavaScript `.` does not match `\r` either).
+const readSheet = () => readSource(SHEET);
+const readRow = () => readSource(ROW);
 
 // ─── Source inspection helpers ─────────────────────────────────────────────
 
@@ -104,13 +109,19 @@ function braceDelta(line: string): number {
  * never be mistaken for a member.
  */
 function structMembers(src: string, structName: string): Member[] {
-  const decl = src.indexOf('struct ' + structName);
+  // The line endings are normalised here as well as at the reading
+  // boundary: in JavaScript `.` does not match `\r` either, so a member
+  // pattern that ends in `$` matches nothing against a CRLF line, and the
+  // check would answer a question about the checkout instead of about the
+  // row.
+  const text = src.replace(/\r\n/g, '\n');
+  const decl = text.indexOf('struct ' + structName);
   if (decl < 0) return [];
-  const open = src.indexOf('{', decl);
+  const open = text.indexOf('{', decl);
   if (open < 0) return [];
   const out: Member[] = [];
   let depth = 1;
-  for (const raw of src.slice(open + 1).split('\n')) {
+  for (const raw of text.slice(open + 1).split('\n')) {
     const line = raw.replace(MODIFIER_RE, '');
     if (depth === 1) {
       const m = MEMBER_RE.exec(line);
@@ -470,6 +481,30 @@ describe('fix: the long-press menu of a cell was opened by the row itself', () =
 // ─── The checks themselves ─────────────────────────────────────────────────
 
 describe('the reuse checks are not vacuous', () => {
+  it('the source checks survive a checkout with CRLF line endings', () => {
+    // Which line endings a file has on disk depends on the checkout
+    // (core.autocrlf, .gitattributes), not on the content. In JavaScript `.`
+    // does not match `\r` either, so a member pattern that ends in `$`
+    // matches nothing at all against a CRLF line -- the check would then
+    // pass on a Linux checkout and fail on a Windows one, or the other way
+    // round, while saying nothing about the row.
+    const lf = readRow();
+    const crlf = lf.replace(/\n/g, '\r\n');
+    expect(crlf.includes('\r\n')).toBe(true);
+
+    const fromLf = structMembers(lf, 'SpreadsheetRow');
+    const fromCrlf = structMembers(crlf, 'SpreadsheetRow');
+    expect(fromCrlf.length).toBe(fromLf.length);
+    expect(fromCrlf.length > 10).toBe(true);
+    expect(fromCrlf.map(m => m.name).join(',')).toBe(fromLf.map(m => m.name).join(','));
+
+    // And the same for the member list the callbacks are counted from.
+    const arrowsLf = fromLf.filter(m => m.type.indexOf('=>') >= 0).map(m => m.name);
+    const arrowsCrlf = fromCrlf.filter(m => m.type.indexOf('=>') >= 0).map(m => m.name);
+    expect(arrowsCrlf.length).toBe(5);
+    expect(arrowsCrlf.join(',')).toBe(arrowsLf.join(','));
+  });
+
   it('a row that keeps its values in plain members is rejected', () => {
     expect(plainStateMembers(ROW_WITH_PLAIN_STATE)).toContain('rowIndex');
     expect(plainStateMembers(ROW_WITH_PLAIN_STATE)).toContain('selectedRow');
