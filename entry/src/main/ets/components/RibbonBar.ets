@@ -1,3 +1,6 @@
+import { common } from '@kit.AbilityKit';
+import { applyColorMode, DARK_MODE_KEY } from '../theme/ThemeController';
+import { token } from '../theme/tokens';
 /**
  * RibbonBar — Top navigation toolbar
  * Replaces inline @Builder RibbonBar in Index.ets
@@ -32,7 +35,7 @@ export struct RibbonBar {
       if (this.isSmallScreen) {
         Text('☰')
           .fontSize(18)
-          .fontColor(this.darkMode ? '#ccc' : '#2C3E50')
+          .fontColor($r('app.color.text_primary'))
           .padding({ left: 10, right: 10, top: 8, bottom: 8 })
           .onClick(() => { this.onToggleSidebar(); });
       }
@@ -44,10 +47,10 @@ export struct RibbonBar {
             Text(this.isSmallScreen ? tab.substring(0, 4) : tab)
               .fontSize(this.isSmallScreen ? 12 : 13)
               .fontWeight(this.currentTab === idx ? FontWeight.Bold : FontWeight.Medium)
-              .fontColor(this.currentTab === idx ? '#3498DB' : (this.darkMode ? '#ccc' : '#2C3E50'))
+              .fontColor(this.currentTab === idx ? token('primary', this.darkMode) : (token('text_primary', this.darkMode)))
               .padding({ left: this.isSmallScreen ? 10 : 16, right: this.isSmallScreen ? 10 : 16, top: 8, bottom: 8 })
               .borderRadius(8)
-              .backgroundColor(this.currentTab === idx ? (this.darkMode ? '#2a2a4a' : '#EBF5FB') : 'transparent')
+              .backgroundColor(this.currentTab === idx ? (token('bg_tint', this.darkMode)) : 'transparent')
               .animation({ duration: 200, curve: Curve.EaseInOut })
               .onClick(() => {
                 animateTo({ duration: 200, curve: Curve.EaseInOut }, () => {
@@ -65,13 +68,13 @@ export struct RibbonBar {
       // 右侧固定操作区
       Text('Undo')
         .fontSize(11)
-        .fontColor(this.canUndo ? '#3498DB' : '#BDC3C7')
+        .fontColor(this.canUndo ? $r('app.color.primary') : $r('app.color.text_disabled'))
         .padding(8)
         .onClick(() => { this.onUndo(); });
 
       Text('Redo')
         .fontSize(11)
-        .fontColor(this.canRedo ? '#3498DB' : '#BDC3C7')
+        .fontColor(this.canRedo ? $r('app.color.primary') : $r('app.color.text_disabled'))
         .padding(8)
         .onClick(() => { this.onRedo(); });
 
@@ -79,7 +82,7 @@ export struct RibbonBar {
       if (!this.isSmallScreen) {
         Text('Console')
           .fontSize(11)
-          .fontColor('#7F8C8D')
+          .fontColor($r('app.color.text_secondary'))
           .padding(8)
           .onClick(() => {
             animateTo({ duration: 300, curve: Curve.EaseOut }, () => {
@@ -91,7 +94,12 @@ export struct RibbonBar {
       Toggle({ type: ToggleType.Switch, isOn: this.darkMode })
         .onChange((isOn: boolean) => {
           this.darkMode = isOn;
-          AppStorage.setOrCreate('darkMode', isOn);
+          AppStorage.setOrCreate(DARK_MODE_KEY, isOn);
+          // The colour resources follow the platform's colour mode, so the
+          // switch has to tell the platform as well — otherwise every
+          // `$r('app.color.x')` in the application keeps the light value.
+          const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
+          applyColorMode(ctx, isOn);
         })
         .width(40)
         .height(24);
@@ -99,7 +107,7 @@ export struct RibbonBar {
     .width('100%')
     .height(44)
     .padding({ left: this.isSmallScreen ? 4 : 12, right: this.isSmallScreen ? 4 : 12 })
-    .backgroundColor(this.darkMode ? '#16213e' : '#F8F9FA')
-    .border({ width: { bottom: 1 }, color: '#E4E7EB' });
+    .backgroundColor($r('app.color.bg_secondary'))
+    .border({ width: { bottom: 1 }, color: token('border_light', this.darkMode) });
   }
 }

@@ -22,9 +22,10 @@
  * the file system.
  */
 import { describe, it, expect } from './runner.ts';
-import { readFileSync, readdirSync, statSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, statSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { collectSources as collectSourcesShared, stripComments } from './sourceScan.ts';
 
 /**
  * The repository root, derived from this file's own location -- never the
@@ -36,46 +37,6 @@ const MAIN = ROOT + 'entry/src/main';
 
 /** The module suffixes ArkTS/TypeScript resolution may land on. */
 const MODULE_EXTS = ['.ts', '.tsx', '.ets', '.d.ts', '.js'];
-
-/**
- * Strip comments so that a commented-out import is not mistaken for a real
- * one. String and template literals are preserved, because a path inside a
- * string is not an import either but must not break the scanner.
- */
-export function stripComments(src: string): string {
-  let out = '';
-  let i = 0;
-  const n = src.length;
-  while (i < n) {
-    const c = src[i];
-    const d = src[i + 1];
-    if (c === '/' && d === '/') {
-      while (i < n && src[i] !== '\n') i++;
-      continue;
-    }
-    if (c === '/' && d === '*') {
-      i += 2;
-      while (i < n && !(src[i] === '*' && src[i + 1] === '/')) i++;
-      i += 2;
-      continue;
-    }
-    if (c === '"' || c === "'" || c === '`') {
-      const quote = c;
-      out += c;
-      i++;
-      while (i < n) {
-        if (src[i] === '\\') { out += src[i] + (src[i + 1] ?? ''); i += 2; continue; }
-        out += src[i];
-        if (src[i] === quote) { i++; break; }
-        i++;
-      }
-      continue;
-    }
-    out += c;
-    i++;
-  }
-  return out;
-}
 
 /**
  * The relative module specifiers of one source file. Package imports
@@ -115,21 +76,9 @@ export function resolveRelativeImport(fromFile: string, spec: string): string | 
 }
 
 function collectSources(dir: string, out: string[] = []): string[] {
-  let entries: string[];
-  try {
-    entries = readdirSync(dir);
-  } catch {
-    return out;
-  }
-  for (const name of entries) {
-    if (['node_modules', 'oh_modules', 'build', '.hvigor'].indexOf(name) >= 0) continue;
-    const p = join(dir, name);
-    let st;
-    try { st = statSync(p); } catch { continue; }
-    if (st.isDirectory()) collectSources(p, out);
-    else if (/\.(ets|ts|tsx)$/.test(name)) out.push(p);
-  }
-  return out;
+  // .ets and .ts: the layer under entry/src/main is ArkTS plus the shared
+  // TypeScript it imports.
+  return collectSourcesShared(dir, out, ['.ets', '.ts']);
 }
 
 describe('audit: a relative import one level too shallow made Splash.ets uncompilable', () => {

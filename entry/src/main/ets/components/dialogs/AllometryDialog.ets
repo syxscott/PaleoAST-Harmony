@@ -22,16 +22,16 @@ export struct AllometryDialog {
   build() {
     Column() {
       Text("Allometry").fontSize(18).fontWeight(FontWeight.Bold).margin({ bottom: 8 })
-      Text("Size-shape regression.").fontSize(11).fontColor("#7F8C8D").margin({ bottom: 16 })
-      Text("No parameters required - uses selected variables.").fontSize(11).fontColor("#7F8C8D").margin({ bottom: 8 })
-            Row() { Text("[+] Tips").fontSize(11).fontColor("#3498DB").onClick(() => { this.showTips = !this.showTips; }) }.width("100%").margin({ bottom: 8 })
+      Text("Size-shape regression.").fontSize(11).fontColor($r('app.color.text_secondary')).margin({ bottom: 16 })
+      Text("No parameters required - uses selected variables.").fontSize(11).fontColor($r('app.color.text_secondary')).margin({ bottom: 8 })
+            Row() { Text("[+] Tips").fontSize(11).fontColor($r('app.color.primary')).onClick(() => { this.showTips = !this.showTips; }) }.width("100%").margin({ bottom: 8 })
       if (this.showTips) { Column() {
-          Text("R-sq > 0.5: strong").fontSize(10).fontColor("#7F8C8D").margin({ bottom: 2 })
+          Text("R-sq > 0.5: strong").fontSize(10).fontColor($r('app.color.text_secondary')).margin({ bottom: 2 })
       }.margin({ bottom: 8 }) }
       Divider().margin({ top: 8, bottom: 12 })
       Row() {
-        Button("Cancel").backgroundColor("#95A5A6").fontColor("#FFFFFF").onClick(() => { this.visible = false; }).margin({ right: 12 })
-        Button("Run Analysis").type(ButtonType.Capsule).backgroundColor("#3498DB").fontColor("#FFFFFF").onClick(() => { this.onConfirm({}); this.visible = false; })
+        Button("Cancel").backgroundColor($r('app.color.bg_muted')).fontColor($r('app.color.text_on_accent')).onClick(() => { this.visible = false; }).margin({ right: 12 })
+        Button("Run Analysis").type(ButtonType.Capsule).backgroundColor($r('app.color.primary')).fontColor($r('app.color.text_on_accent')).onClick(() => { this.onConfirm({}); this.visible = false; })
       }.width("100%").justifyContent(FlexAlign.End)
     }.padding(24).width('92%').constraintSize({ maxWidth: 450 }).borderRadius(12)
   }

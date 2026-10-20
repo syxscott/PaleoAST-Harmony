@@ -102,7 +102,7 @@ export struct WorkspaceView {
                 Text(this.plotTitle)
                   .fontSize(14)
                   .fontWeight(FontWeight.Bold)
-                  .fontColor(this.darkMode ? '#ccc' : '#2C3E50')
+                  .fontColor($r('app.color.text_primary'))
                   .margin(10);
                 PlotCanvas({
                   plotType: this.plotType,
@@ -124,7 +124,7 @@ export struct WorkspaceView {
               Text('Result: ' + widget)
                 .fontSize(12)
                 .padding(16)
-                .fontColor(this.darkMode ? '#ccc' : '#2C3E50');
+                .fontColor($r('app.color.text_primary'));
             }
           }
           .tabBar(widget);

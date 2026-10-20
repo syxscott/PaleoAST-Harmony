@@ -35,8 +35,8 @@ export struct ImportDialog {
       Row() { Checkbox().select(this.hasRowLabels).onChange((v:boolean) => { this.hasRowLabels = v; }); Text('Has row labels').fontSize(13).margin({ left: 8 }) }.margin({ bottom: 16 })
       Divider().margin({ bottom: 12 })
       Row() {
-        Button('Cancel').backgroundColor('#95A5A6').fontColor('#FFFFFF').onClick(() => { this.visible = false; }).margin({ right: 12 })
-        Button('Import').type(ButtonType.Capsule).backgroundColor('#3498DB').fontColor('#FFFFFF').onClick(() => { this.doRun(); this.visible = false; })
+        Button('Cancel').backgroundColor($r('app.color.bg_muted')).fontColor($r('app.color.text_on_accent')).onClick(() => { this.visible = false; }).margin({ right: 12 })
+        Button('Import').type(ButtonType.Capsule).backgroundColor($r('app.color.primary')).fontColor($r('app.color.text_on_accent')).onClick(() => { this.doRun(); this.visible = false; })
       }.width('100%').justifyContent(FlexAlign.End)
     }.padding(24).width('92%').constraintSize({ maxWidth: 480 }).borderRadius(12)
   }

@@ -1,4 +1,5 @@
 import { DialogManager } from './DialogManager';
+import { token } from '../theme/tokens';
 /**
  * WelcomeView — Welcome screen when no data is loaded
  * Replaces inline @Builder WelcomeView in Index.ets
@@ -14,32 +15,32 @@ export struct WelcomeView {
           Text('PaleoAST')
             .fontSize(48)
             .fontWeight(FontWeight.Bold)
-            .fontColor('#3498DB')
+            .fontColor($r('app.color.primary'))
             .margin({ bottom: 8 });
 
           Text('PaleoAST-Harmony')
             .fontSize(20)
             .fontWeight(FontWeight.Medium)
-            .fontColor(this.darkMode ? '#ccc' : '#2C3E50');
+            .fontColor($r('app.color.text_primary'));
 
           Text('Paleontological Advanced Statistical Toolkit')
             .fontSize(12)
-            .fontColor('#7F8C8D')
+            .fontColor($r('app.color.text_secondary'))
             .margin({ top: 4, bottom: 24 });
 
           Button('打开 CSV 文件')
             .type(ButtonType.Capsule)
-            .backgroundColor('#3498DB')
-            .fontColor('#FFFFFF')
+            .backgroundColor($r('app.color.primary'))
+            .fontColor($r('app.color.text_on_accent'))
             .height(36)
             .fontSize(13)
             .onClick(() => { DialogManager.open('Import'); });
         }
       }
-      .backgroundColor(this.darkMode ? '#1a1a2e' : '#FFFFFF')
+      .backgroundColor($r('app.color.start_window_background'))
       .borderRadius(12)
       .padding(16)
-      .shadow({ radius: 8, color: '#00000010', width: 1, offsetY: 2 })
+      .shadow({ radius: 8, color: token('shadow_soft', this.darkMode), width: 1, offsetY: 2 })
       .width('60%');
     }
     .width('100%')

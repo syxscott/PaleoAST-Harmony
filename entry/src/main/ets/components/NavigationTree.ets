@@ -92,7 +92,7 @@ export struct NavigationTree {
                 Text(section.icon).fontSize(11).width(24).textAlign(TextAlign.Center)
                 Text(section.name).fontSize(12).fontWeight(FontWeight.Medium)
                   .layoutWeight(1)
-                Text(this.expandedSections.has(section.name) ? '[-]' : '[+]').fontSize(10).fontColor('#7F8C8D')
+                Text(this.expandedSections.has(section.name) ? '[-]' : '[+]').fontSize(10).fontColor($r('app.color.text_secondary'))
               }
               .width('100%').height(32).padding({ left: 8, right: 8 })
               .onClick(() => { this.toggleSection(section.name); })
@@ -102,11 +102,11 @@ export struct NavigationTree {
                 ForEach(section.entries, (entry: string) => {
                   Row() {
                     Text('    ' + entry).fontSize(11)
-                      .fontColor(this.selectedEntry === entry ? '#3498DB' : '#7F8C8D')
+                      .fontColor(this.selectedEntry === entry ? $r('app.color.primary') : $r('app.color.text_secondary'))
                       .fontWeight(this.selectedEntry === entry ? FontWeight.Medium : FontWeight.Normal)
                   }
                   .width('100%').height(26).padding({ left: 32 })
-                  .backgroundColor(this.selectedEntry === entry ? '#EBF5FB' : 'transparent')
+                  .backgroundColor(this.selectedEntry === entry ? $r('app.color.bg_tint') : 'transparent')
                   .onClick(() => {
                     this.selectedEntry = entry;
                     this.onNavigate(entry);
@@ -120,7 +120,7 @@ export struct NavigationTree {
       .width('100%').layoutWeight(1).scrollBar(BarState.Auto)
 
       // Bottom info
-      Text('PaleoAST v1.0').fontSize(9).fontColor('#BDC3C7')
+      Text('PaleoAST v1.0').fontSize(9).fontColor($r('app.color.text_disabled'))
         .padding(8).textAlign(TextAlign.Center).width('100%')
     }
     .width('100%').height('100%')

@@ -3,6 +3,7 @@
  * Replaces inline @Builder ConsolePanel in Index.ets
  */
 import { DiagnosticConsole } from './DiagnosticConsole';
+import { token } from '../theme/tokens';
 
 @Component
 export struct ConsoleView {
@@ -20,20 +21,20 @@ export struct ConsoleView {
 
         Text('Close')
           .fontSize(11)
-          .fontColor('#7F8C8D')
+          .fontColor($r('app.color.text_secondary'))
           .onClick(() => { this.showConsole = false; });
       }
       .width('100%')
       .height(28)
       .padding({ left: 12, right: 12 })
-      .backgroundColor(this.darkMode ? '#16213e' : '#F8F9FA');
+      .backgroundColor($r('app.color.bg_secondary'));
 
       DiagnosticConsole()
         .layoutWeight(1);
     }
     .height(180)
-    .backgroundColor(this.darkMode ? '#0f3460' : '#FAFBFC')
-    .border({ width: { top: 1 }, color: '#E4E7EB' })
+    .backgroundColor($r('app.color.bg_elevated'))
+    .border({ width: { top: 1 }, color: token('border_light', this.darkMode) })
     .transition(TransitionEffect.OPACITY.animation({ duration: 300 }));
   }
 }

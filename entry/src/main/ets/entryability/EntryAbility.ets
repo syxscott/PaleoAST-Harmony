@@ -1,6 +1,7 @@
 import { AbilityConstant, UIAbility, Want } from '@kit.AbilityKit';
 import { window, display } from '@kit.ArkUI';
 import { Breakpoints } from '../config/Breakpoint';
+import { applyColorMode, DARK_MODE_KEY } from '../theme/ThemeController';
 import Logger from '../utils/Logger';
 import { PreferenceManager } from '../utils/PreferenceManager';
 import { HistoryRepository } from '../database/HistoryRepository';
@@ -15,6 +16,12 @@ export default class EntryAbility extends UIAbility {
     // Settings first: everything else reads its defaults from AppStorage.
     PreferenceManager.init(this.context);
     PreferenceManager.loadAllToAppStorage();
+
+    // The colour resources ($r('app.color.x')) follow the platform's colour
+    // mode, not the application variable, so the two have to be put in step
+    // once at startup. The preference was just loaded, so this restores the
+    // theme the user chose last time.
+    applyColorMode(this.context, AppStorage.get<boolean>(DARK_MODE_KEY) ?? false);
 
     // The history store opens asynchronously; an analysis that runs before it is
     // ready simply skips persistence (HistoryRepository.isReady() guards it).

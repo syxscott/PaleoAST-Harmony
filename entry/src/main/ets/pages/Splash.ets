@@ -33,11 +33,11 @@ struct Splash {
 
   build() {
     Column() {
-      Text("PaleoAST").fontSize(36).fontWeight(FontWeight.Bold).fontColor("#3498DB").margin({bottom:8})
-      LoadingProgress().width(56).height(56).color("#3498DB").margin({bottom:16})
-      Progress({value:this.progress, total:100, type:ProgressType.Linear}).width("60%").color("#3498DB")
-      Text(this.statusLabel).fontSize(10).fontColor("#7F8C8D").margin({top:8})
-      Text("v1.0.0 HarmonyOS").fontSize(9).fontColor("#BDC3C7").margin({top:16})
+      Text("PaleoAST").fontSize(36).fontWeight(FontWeight.Bold).fontColor($r('app.color.primary')).margin({bottom:8})
+      LoadingProgress().width(56).height(56).color($r('app.color.primary')).margin({bottom:16})
+      Progress({value:this.progress, total:100, type:ProgressType.Linear}).width("60%").color($r('app.color.primary'))
+      Text(this.statusLabel).fontSize(10).fontColor($r('app.color.text_secondary')).margin({top:8})
+      Text("v1.0.0 HarmonyOS").fontSize(9).fontColor($r('app.color.text_disabled')).margin({top:16})
     }.width("100%").height("100%").justifyContent(FlexAlign.Center)
   }
 }

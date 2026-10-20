@@ -23,11 +23,11 @@ export struct LoadingView {
       LoadingProgress()
         .width(48)
         .height(48)
-        .color('#3498DB');
+        .color($r('app.color.primary'));
 
       Text(this.statusText)
         .fontSize(13)
-        .fontColor('#7F8C8D')
+        .fontColor($r('app.color.text_secondary'))
         .margin({ top: 16 });
     }
     .width('100%')

@@ -191,9 +191,9 @@ struct Index {
             // 错误态：可重试（HarmoneyOpenEye 四态容器模式）
             Column() {
               Text('⚠️').fontSize(40).margin({ bottom: 8 })
-              Text('Failed to load data').fontSize(16).fontWeight(FontWeight.Medium).fontColor('#E74C3C').margin({ bottom: 4 })
-              Text(this.loadError).fontSize(11).fontColor('#7F8C8D').margin({ bottom: 16 }).textAlign(TextAlign.Center).width('80%')
-              Button('Retry Import').backgroundColor('#3498DB').fontColor('#FFFFFF')
+              Text('Failed to load data').fontSize(16).fontWeight(FontWeight.Medium).fontColor($r('app.color.danger')).margin({ bottom: 4 })
+              Text(this.loadError).fontSize(11).fontColor($r('app.color.text_secondary')).margin({ bottom: 16 }).textAlign(TextAlign.Center).width('80%')
+              Button('Retry Import').backgroundColor($r('app.color.primary')).fontColor($r('app.color.text_on_accent'))
                 .onClick(() => { this.loadError = ''; DialogManager.open('Import'); })
             }.width('100%').height('100%').justifyContent(FlexAlign.Center)
           } else if (!this.hasData) {
@@ -261,7 +261,7 @@ struct Index {
       }
     .width('100%')
     .height('100%')
-    .backgroundColor(this.darkMode ? '#1a1a2e' : '#FFFFFF')
+    .backgroundColor($r('app.color.start_window_background'))
     // 鸿蒙特有：全局手势
     .gesture(
       SwipeGesture({ direction: SwipeDirection.Horizontal })

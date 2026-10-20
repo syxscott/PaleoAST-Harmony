@@ -1,3 +1,4 @@
+import { token } from '../theme/tokens';
 /**
  * Floating Toolbar — replaces views/floating_toolbar.py (194 lines)
  * Quick-access toolbar for common operations.
@@ -7,6 +8,9 @@ export struct FloatingToolbar {
   @State visible: boolean = true;
   @State positionX: number = 100;
   @State positionY: number = 100;
+  // The shadow colour is a string, not a Resource, so the toolbar has to know
+  // which theme is active. Same AppStorage key the Ribbon writes.
+  @StorageLink('darkMode') darkMode: boolean = false;
   // `isDragging` was written by the pan's start/end callbacks and read by
   // nothing, so it never affected rendering; the gesture now only needs the
   // delta, and the dead state plus the three uncalled show()/hide()/toggle()
@@ -44,9 +48,9 @@ export struct FloatingToolbar {
         Button('[Theme]').fontSize(10).height(28).onClick(() => { this.onAction('theme'); })
       }
       .padding(4).borderRadius(8)
-      .backgroundColor('#FFFFFF')
-      .border({ width: 1, color: '#E4E7EB' })
-      .shadow({ radius: 8, color: '#00000020', offsetY: 2 })
+      .backgroundColor($r('app.color.bg_primary'))
+      .border({ width: 1, color: $r('app.color.border_light') })
+      .shadow({ radius: 8, color: token('shadow_strong', this.darkMode), offsetY: 2 })
       .position({ x: this.positionX, y: this.positionY })
       // GestureMask: PARALLEL lets the pan and the child buttons both receive
       // the touch. Without it the pan gesture competes with the button clicks,

@@ -125,3 +125,10 @@ jobs:
       # must be one the dialog actually writes.
       - name: Run the static wiring check
         run: node test/device/run.mjs
+
+      # The colour resources are generated out of the token table
+      # (entry/src/main/ets/theme/tokens.ts). This checks that they are still
+      # in step with it: a token that was added to the table but never
+      # generated would be a colour that does not exist at runtime.
+      - name: Check the colour resources against the token table
+        run: node --experimental-transform-types tools/gen_theme_resources.mjs --check

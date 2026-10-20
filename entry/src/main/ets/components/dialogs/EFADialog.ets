@@ -31,7 +31,7 @@ export struct EFADialog {
   build() {
     Column() {
       Text('EFA — Elliptic Fourier Analysis').fontSize(18).fontWeight(FontWeight.Bold).margin({ bottom: 8 })
-      Text('Decomposes closed contours into harmonic components.').fontSize(11).fontColor('#7F8C8D').margin({ bottom: 16 })
+      Text('Decomposes closed contours into harmonic components.').fontSize(11).fontColor($r('app.color.text_secondary')).margin({ bottom: 16 })
 
       Row() {
         Text('Number of harmonics:').width(160).fontSize(13)
@@ -44,7 +44,7 @@ export struct EFADialog {
           })
       }.width('100%').margin({ bottom: 4 })
 
-      if (this.errorMsg) { Text(this.errorMsg).fontSize(10).fontColor('#E74C3C').margin({ bottom: 8 }) }
+      if (this.errorMsg) { Text(this.errorMsg).fontSize(10).fontColor($r('app.color.danger')).margin({ bottom: 8 }) }
 
       Row() {
         Text('Resample points:').width(160).fontSize(13)
@@ -53,25 +53,25 @@ export struct EFADialog {
       }.width('100%').margin({ bottom: 8 })
 
       Row() {
-        Text(this.showAdvanced ? '[-] Tips' : '[+] Tips').fontSize(11).fontColor('#3498DB')
+        Text(this.showAdvanced ? '[-] Tips' : '[+] Tips').fontSize(11).fontColor($r('app.color.primary'))
           .onClick(() => { this.showAdvanced = !this.showAdvanced; })
       }.width('100%').margin({ bottom: 8 })
 
       if (this.showAdvanced) {
         Column() {
-          Text('Data format: columns are [x1,x2,...,xN,y1,y2,...,yN].').fontSize(10).fontColor('#7F8C8D').margin({ bottom: 2 })
-          Text('First row is used as the contour specimen.').fontSize(10).fontColor('#7F8C8D').margin({ bottom: 2 })
-          Text('Low harmonics capture overall shape; high harmonics capture detail.').fontSize(10).fontColor('#7F8C8D').margin({ bottom: 2 })
-          Text('10 harmonics is sufficient for most shapes.').fontSize(10).fontColor('#7F8C8D')
+          Text('Data format: columns are [x1,x2,...,xN,y1,y2,...,yN].').fontSize(10).fontColor($r('app.color.text_secondary')).margin({ bottom: 2 })
+          Text('First row is used as the contour specimen.').fontSize(10).fontColor($r('app.color.text_secondary')).margin({ bottom: 2 })
+          Text('Low harmonics capture overall shape; high harmonics capture detail.').fontSize(10).fontColor($r('app.color.text_secondary')).margin({ bottom: 2 })
+          Text('10 harmonics is sufficient for most shapes.').fontSize(10).fontColor($r('app.color.text_secondary'))
         }.margin({ bottom: 8 })
       }
 
       Divider().margin({ top: 8, bottom: 12 })
 
       Row() {
-        Button('Cancel').backgroundColor('#95A5A6').fontColor('#FFFFFF')
+        Button('Cancel').backgroundColor($r('app.color.bg_muted')).fontColor($r('app.color.text_on_accent'))
           .onClick(() => { this.visible = false; }).margin({ right: 12 })
-        Button('Run Analysis').type(ButtonType.Capsule).backgroundColor('#3498DB').fontColor('#FFFFFF')
+        Button('Run Analysis').type(ButtonType.Capsule).backgroundColor($r('app.color.primary')).fontColor($r('app.color.text_on_accent'))
           .enabled(this.errorMsg === '')
           .onClick(() => {
             this.onConfirm({ n_harmonics: this.n_harmonics, n_points: this.n_points });

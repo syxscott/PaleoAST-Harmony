@@ -18,6 +18,7 @@ import './ets2026.test.ts';
 import './etsSyntax.test.ts';
 import './etsDispatch.test.ts';
 import './etsImports.test.ts';
+import './theme2026.test.ts';
 import './componentCount2026.test.ts';
 import './permutationCount2026.test.ts';
 import './binaryExport2026.test.ts';

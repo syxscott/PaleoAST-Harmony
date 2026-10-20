@@ -55,17 +55,17 @@ export struct WaveletDialog {
     }.width('100%').margin({ bottom: 8 })
 
     if (this.scaleError) {
-      Text(this.scaleError).fontSize(10).fontColor('#E74C3C').margin({ bottom: 4 })
+      Text(this.scaleError).fontSize(10).fontColor($r('app.color.danger')).margin({ bottom: 4 })
     }
 
     Row() {
-      Text('[+] Tips').fontSize(11).fontColor('#3498DB')
+      Text('[+] Tips').fontSize(11).fontColor($r('app.color.primary'))
         .onClick(() => { this.showTips = !this.showTips; })
     }.width('100%').margin({ bottom: 8 })
 
     if (this.showTips) {
       Column() {
-        Text('Higher scales: longer periods').fontSize(10).fontColor('#7F8C8D').margin({ bottom: 2 })
+        Text('Higher scales: longer periods').fontSize(10).fontColor($r('app.color.text_secondary')).margin({ bottom: 2 })
       }.margin({ bottom: 8 })
     }
   }
@@ -79,9 +79,9 @@ export struct WaveletDialog {
       Divider().margin({ top: 8, bottom: 12 })
 
       Row() {
-        Button('Cancel').backgroundColor('#95A5A6').fontColor('#FFFFFF')
+        Button('Cancel').backgroundColor($r('app.color.bg_muted')).fontColor($r('app.color.text_on_accent'))
           .onClick(() => { this.visible = false; }).margin({ right: 12 })
-        Button('Run Analysis').type(ButtonType.Capsule).backgroundColor('#3498DB').fontColor('#FFFFFF')
+        Button('Run Analysis').type(ButtonType.Capsule).backgroundColor($r('app.color.primary')).fontColor($r('app.color.text_on_accent'))
           .enabled(this.scaleError === '')
           .onClick(() => {
             this.onConfirm({ 'min_scale': this.min_scale, 'max_scale': this.max_scale });

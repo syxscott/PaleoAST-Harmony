@@ -3,6 +3,7 @@ import { SpreadsheetDataSource } from "./SpreadsheetDataSource";
 import { Matrix } from "../../core/math/Matrix";
 import { EventBus } from "../../core/utils/EventBus";
 import { blankGroups, fitGroups, cycleGroup, UNGROUPED } from "./rowGroups";
+import { token } from '../theme/tokens';
 
 /**
  * Scientific Spreadsheet Component — replaces views/ui_spreadsheet.py
@@ -28,8 +29,8 @@ export struct Spreadsheet {
   @State @Watch('onRowsCacheDirty') filterText: string = '';
   @State editValue: string = '';
   @State groupColors: Map<string, string> = new Map([
-    ['Group_A', '#3498DB'], ['Group_B', '#E74C3C'], ['Group_C', '#27AE60'],
-    ['Group_D', '#F39C12'], ['Ungrouped', '#95A5A6'],
+    ['Group_A', token('primary', this.darkMode)], ['Group_B', token('danger', this.darkMode)], ['Group_C', token('success', this.darkMode)],
+    ['Group_D', token('warning', this.darkMode)], ['Ungrouped', token('bg_muted', this.darkMode)],
   ]);
   @State rowGroups: string[] = []; // group label per row
   // @Prop（非 @State）：跟随父级（WorkspaceView/Index）主题切换实时联动
@@ -142,7 +143,7 @@ export struct Spreadsheet {
       // ─── Status Bar ───
       this.StatusBar()
     }.width('100%').height('100%')
-    .backgroundColor(this.darkMode ? '#1a1a2e' : '#FFFFFF')
+    .backgroundColor($r('app.color.start_window_background'))
   }
 
   // ─── 长按单元格上下文菜单（openharmony-sheet click-cell 模式） ─────────
@@ -151,8 +152,8 @@ export struct Spreadsheet {
   @Builder cellMenuPopup() {
     Column() {
       Text(`Cell ${this.selectedRow >= 0 ? this.selectedRow + 1 : '-'}, ${this.selectedCol >= 0 ? this.selectedCol + 1 : '-'}`)
-        .fontSize(10).fontColor('#7F8C8D').margin({ bottom: 6 })
-      Button('Copy value').fontSize(11).height(26).width('100%').backgroundColor('transparent').fontColor('#2C3E50')
+        .fontSize(10).fontColor($r('app.color.text_secondary')).margin({ bottom: 6 })
+      Button('Copy value').fontSize(11).height(26).width('100%').backgroundColor('transparent').fontColor($r('app.color.text_primary'))
         .onClick(() => {
           if (this.dataMatrix && this.selectedRow >= 0 && this.selectedCol >= 0) {
             const v = this.dataMatrix.data.get(this.selectedRow, this.selectedCol);
@@ -161,12 +162,12 @@ export struct Spreadsheet {
           }
           this.showCellMenu = false;
         })
-      Button('Assign next group').fontSize(11).height(26).width('100%').backgroundColor('transparent').fontColor('#2C3E50')
+      Button('Assign next group').fontSize(11).height(26).width('100%').backgroundColor('transparent').fontColor($r('app.color.text_primary'))
         .onClick(() => {
           if (this.selectedRow >= 0) { this.assignGroup(); }
           this.showCellMenu = false;
         })
-      Button('Mark as NA').fontSize(11).height(26).width('100%').backgroundColor('transparent').fontColor('#E74C3C')
+      Button('Mark as NA').fontSize(11).height(26).width('100%').backgroundColor('transparent').fontColor($r('app.color.danger'))
         .onClick(() => {
           if (this.dataMatrix && this.selectedRow >= 0 && this.selectedCol >= 0) {
             const old = this.dataMatrix.data.get(this.selectedRow, this.selectedCol);
@@ -180,7 +181,7 @@ export struct Spreadsheet {
     }
     .padding(10)
     .borderRadius(8)
-    .backgroundColor(this.darkMode ? '#2a2a4a' : '#FFFFFF')
+    .backgroundColor($r('app.color.bg_active'))
   }
 
   private copyCellToClipboard(text: string): void {
@@ -192,7 +193,7 @@ export struct Spreadsheet {
   @Builder Toolbar() {
     Row() {
       if (this.showGroups) {
-        Text('Groups:').fontSize(11).fontColor('#7F8C8D').margin({ right: 4 })
+        Text('Groups:').fontSize(11).fontColor($r('app.color.text_secondary')).margin({ right: 4 })
         Button('Set Group').fontSize(10).height(24).margin({ right: 4 })
           .onClick(() => { this.assignGroup(); })
         Button('Clear Groups').fontSize(10).height(24).margin({ right: 4 })
@@ -204,20 +205,20 @@ export struct Spreadsheet {
         .onChange((v: string) => { this.filterText = v; })
     }
     .width('100%').height(32).padding({ left: 8, right: 8 })
-    .backgroundColor(this.darkMode ? '#16213e' : '#F8F9FA')
-    .border({ width: { bottom: 1 }, color: '#E4E7EB' })
+    .backgroundColor($r('app.color.bg_secondary'))
+    .border({ width: { bottom: 1 }, color: token('border_light', this.darkMode) })
   }
 
   @Builder HeaderRow() {
     Row() {
       // Row number header
       Text('#').width(40).fontSize(10).fontWeight(FontWeight.Bold)
-        .textAlign(TextAlign.Center).fontColor(this.darkMode ? '#ccc' : '#2C3E50')
+        .textAlign(TextAlign.Center).fontColor($r('app.color.text_primary'))
 
       // Group column (if enabled)
       if (this.showGroups) {
         Text('Group').width(60).fontSize(10).fontWeight(FontWeight.Bold)
-          .textAlign(TextAlign.Center).fontColor(this.darkMode ? '#ccc' : '#2C3E50')
+          .textAlign(TextAlign.Center).fontColor($r('app.color.text_primary'))
       }
 
       // Column headers
@@ -225,8 +226,8 @@ export struct Spreadsheet {
         ForEach(this.dataMatrix.colLabels, (label: string, colIdx: number) => {
           Text(label).width(80).fontSize(10).fontWeight(FontWeight.Bold)
             .textAlign(TextAlign.Center)
-            .fontColor(this.sortColumn === colIdx ? '#3498DB' : (this.darkMode ? '#ccc' : '#2C3E50'))
-            .backgroundColor(this.sortColumn === colIdx ? '#EBF5FB' : 'transparent')
+            .fontColor(this.sortColumn === colIdx ? token('primary', this.darkMode) : (token('text_primary', this.darkMode)))
+            .backgroundColor(this.sortColumn === colIdx ? $r('app.color.bg_tint') : 'transparent')
             .onClick(() => {
               if (this.sortColumn === colIdx) { this.sortAscending = !this.sortAscending; }
               else { this.sortColumn = colIdx; this.sortAscending = true; }
@@ -235,7 +236,7 @@ export struct Spreadsheet {
       }
     }
     .width('100%').height(26)
-    .backgroundColor(this.darkMode ? '#0f3460' : '#E4E7EB')
+    .backgroundColor($r('app.color.bg_header'))
   }
 
   @Builder DataRows() {
@@ -247,14 +248,14 @@ export struct Spreadsheet {
         Row() {
           // Row number
           Text(String(rowIdx + 1)).width(40).fontSize(10).textAlign(TextAlign.Center)
-            .fontColor(this.darkMode ? '#aaa' : '#7F8C8D')
-            .backgroundColor(this.selectedRow === rowIdx ? '#EBF5FB' : 'transparent')
+            .fontColor($r('app.color.text_secondary'))
+            .backgroundColor(this.selectedRow === rowIdx ? $r('app.color.bg_tint') : 'transparent')
 
           // Group indicator
           if (this.showGroups) {
             Text(this.rowGroups[rowIdx] ?? 'Ungrouped').width(60).fontSize(9).textAlign(TextAlign.Center)
-              .fontColor('#FFFFFF')
-              .backgroundColor(this.groupColors.get(this.rowGroups[rowIdx] ?? 'Ungrouped') ?? '#95A5A6')
+              .fontColor($r('app.color.text_on_accent'))
+              .backgroundColor(this.groupColors.get(this.rowGroups[rowIdx] ?? 'Ungrouped') ?? token('bg_muted', this.darkMode))
               .borderRadius(4).padding(2)
           }
 
@@ -282,7 +283,7 @@ export struct Spreadsheet {
           })
         }
         .width('100%').height(22)
-        .backgroundColor(this.selectedRow === rowIdx ? '#EBF5FB' : (rowIdx % 2 === 0 ? 'transparent' : (this.darkMode ? '#16213e08' : '#F8F9FA08')))
+        .backgroundColor(this.selectedRow === rowIdx ? token('bg_tint', this.darkMode) : (rowIdx % 2 === 0 ? 'transparent' : (token('row_stripe', this.darkMode))))
       }, (rowIdx: number) => rowIdx.toString()) // stable key per row
     }
   }
@@ -291,23 +292,23 @@ export struct Spreadsheet {
     Row() {
       if (this.statusCellText.length > 0) {
         Text('Copied: ' + this.statusCellText)
-          .fontSize(11).fontColor('#3498DB')
+          .fontSize(11).fontColor($r('app.color.primary'))
       } else if (this.selectedRow >= 0 && this.selectedCol >= 0) {
         const val = this.dataMatrix?.data.get(this.selectedRow, this.selectedCol) ?? NaN;
         Text(`Row ${this.selectedRow + 1}, Col ${this.selectedCol + 1}: ${this.formatCell(val)}`)
-          .fontSize(11).fontColor('#7F8C8D')
+          .fontSize(11).fontColor($r('app.color.text_secondary'))
       } else if (this.dataMatrix != null) {
         Text(`${this.dataMatrix.nSamples} rows x ${this.dataMatrix.nVariables} columns`)
-          .fontSize(11).fontColor('#7F8C8D')
+          .fontSize(11).fontColor($r('app.color.text_secondary'))
       }
       Blank()
       if (this.selectedRows.size > 0) {
-        Text(`${this.selectedRows.size} rows selected`).fontSize(11).fontColor('#7F8C8D')
+        Text(`${this.selectedRows.size} rows selected`).fontSize(11).fontColor($r('app.color.text_secondary'))
       }
     }
     .width('100%').height(24).padding({ left: 8, right: 8 })
-    .backgroundColor(this.darkMode ? '#16213e' : '#F8F9FA')
-    .border({ width: { top: 1 }, color: '#E4E7EB' })
+    .backgroundColor($r('app.color.bg_secondary'))
+    .border({ width: { top: 1 }, color: token('border_light', this.darkMode) })
   }
 
   // ─── Cell Display ───────────────────────────────────────────────
@@ -319,15 +320,15 @@ export struct Spreadsheet {
 
   private getCellFontColor(row: number, col: number): string {
     const val = this.dataMatrix?.data.get(row, col) ?? NaN;
-    if (isNaN(val)) return '#E74C3C';
-    if (val < 0) return '#F39C12';
-    return this.darkMode ? '#ccc' : '#2C3E50';
+    if (isNaN(val)) return token('danger', this.darkMode);
+    if (val < 0) return token('warning', this.darkMode);
+    return token('text_primary', this.darkMode);
   }
 
   private getCellBg(row: number, col: number): string {
-    if (row === this.selectedRow && col === this.selectedCol) return '#3498DB40';
-    if (row === this.selectedRow) return '#EBF5FB';
-    if (col === this.selectedCol) return '#FDF2E9';
+    if (row === this.selectedRow && col === this.selectedCol) return token('cell_selected', this.darkMode);
+    if (row === this.selectedRow) return token('bg_tint', this.darkMode);
+    if (col === this.selectedCol) return token('bg_selected', this.darkMode);
     return 'transparent';
   }
 

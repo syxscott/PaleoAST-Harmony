@@ -14,10 +14,10 @@ export struct FileDropHandler {
     Column() {
       if (this.isDragging) {
         Column() {
-          Text('[Drop]').fontSize(32).fontColor('#3498DB')
-          Text('Drop file here').fontSize(14).fontColor('#7F8C8D')
+          Text('[Drop]').fontSize(32).fontColor($r('app.color.primary'))
+          Text('Drop file here').fontSize(14).fontColor($r('app.color.text_secondary'))
         }.width('100%').height('100%').justifyContent(FlexAlign.Center)
-          .border({ width: 2, color: '#3498DB', style: BorderStyle.Dashed })
+          .border({ width: 2, color: $r('app.color.primary'), style: BorderStyle.Dashed })
       } else {
         Text('').width('100%').height('100%')
       }

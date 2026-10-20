@@ -42,7 +42,7 @@ export struct PCoADialog {
       Text('PCoA — Principal Coordinate Analysis').fontSize(18).fontWeight(FontWeight.Bold).margin({ bottom: 8 })
 
       // Description
-      Text('Ordination method that preserves pairwise distances between samples.').fontSize(11).fontColor('#7F8C8D').margin({ bottom: 16 })
+      Text('Ordination method that preserves pairwise distances between samples.').fontSize(11).fontColor($r('app.color.text_secondary')).margin({ bottom: 16 })
 
       // n_components
       Row() {
@@ -58,7 +58,7 @@ export struct PCoADialog {
 
       // Error message
       if (this.errorMsg) {
-        Text(this.errorMsg).fontSize(10).fontColor('#E74C3C').margin({ bottom: 8 })
+        Text(this.errorMsg).fontSize(10).fontColor($r('app.color.danger')).margin({ bottom: 8 })
       }
 
       // Metric selector
@@ -70,20 +70,20 @@ export struct PCoADialog {
       }.width('100%').margin({ bottom: 4 })
 
       // Metric description
-      Text(this.metricDesc[this.metricIdx]).fontSize(10).fontColor('#95A5A6').margin({ bottom: 8 })
+      Text(this.metricDesc[this.metricIdx]).fontSize(10).fontColor($r('app.color.text_muted')).margin({ bottom: 8 })
 
       // Advanced section toggle
       Row() {
-        Text(this.showAdvanced ? '[-] Advanced' : '[+] Advanced').fontSize(11).fontColor('#3498DB')
+        Text(this.showAdvanced ? '[-] Advanced' : '[+] Advanced').fontSize(11).fontColor($r('app.color.primary'))
           .onClick(() => { this.showAdvanced = !this.showAdvanced; })
       }.width('100%').margin({ bottom: 8 })
 
       // Advanced options
       if (this.showAdvanced) {
         Column() {
-          Text('PCoA computes eigenvectors of the double-centered distance matrix.').fontSize(10).fontColor('#7F8C8D').margin({ bottom: 8 })
-          Text('Negative eigenvalues may occur with non-Euclidean metrics.').fontSize(10).fontColor('#7F8C8D').margin({ bottom: 8 })
-          Text('The first 2-3 axes typically capture most variance.').fontSize(10).fontColor('#7F8C8D')
+          Text('PCoA computes eigenvectors of the double-centered distance matrix.').fontSize(10).fontColor($r('app.color.text_secondary')).margin({ bottom: 8 })
+          Text('Negative eigenvalues may occur with non-Euclidean metrics.').fontSize(10).fontColor($r('app.color.text_secondary')).margin({ bottom: 8 })
+          Text('The first 2-3 axes typically capture most variance.').fontSize(10).fontColor($r('app.color.text_secondary'))
         }.margin({ bottom: 8 })
       }
 
@@ -91,9 +91,9 @@ export struct PCoADialog {
 
       // Buttons
       Row() {
-        Button('Cancel').backgroundColor('#95A5A6').fontColor('#FFFFFF')
+        Button('Cancel').backgroundColor($r('app.color.bg_muted')).fontColor($r('app.color.text_on_accent'))
           .onClick(() => { this.visible = false; }).margin({ right: 12 })
-        Button('Run Analysis').type(ButtonType.Capsule).backgroundColor('#3498DB').fontColor('#FFFFFF')
+        Button('Run Analysis').type(ButtonType.Capsule).backgroundColor($r('app.color.primary')).fontColor($r('app.color.text_on_accent'))
           .enabled(this.errorMsg === '')
           .onClick(() => {
             this.onConfirm({ n_components: this.n_components, metric: this.metricOpts[this.metricIdx] });

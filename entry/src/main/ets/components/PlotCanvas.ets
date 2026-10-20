@@ -16,6 +16,7 @@ import { AdaptiveFormatter, autoFormatter } from './plot/ValueFormatter';
 import type { IValueFormatter } from './plot/ValueFormatter';
 import { computeBoxPrimitives } from './plot/boxGeometry';
 import type { BoxGroup } from './plot/boxGeometry';
+import { token } from '../theme/tokens';
 
 /**
  * Pick radius (in vp) shared by hover and tap selection, and the grid
@@ -101,7 +102,7 @@ export struct PlotCanvas {
     const w = this.canvasWidth || 800;
     const h = this.canvasHeight || 600;
     ctx.clearRect(0, 0, w, h);
-    ctx.fillStyle = this.darkMode ? '#aaa' : '#95A5A6';
+    ctx.fillStyle = token('text_axis', this.darkMode);
     ctx.font = '13px sans-serif';
     ctx.textAlign = 'center';
     ctx.fillText(message, w / 2, h / 2);
@@ -225,9 +226,9 @@ export struct PlotCanvas {
         Button('SVG').fontSize(10).height(28).margin({ right: 4 })
           .onClick(() => { this.requestExport('svg'); })
         Blank()
-        Text(this.title).fontSize(11).fontColor('#7F8C8D')
+        Text(this.title).fontSize(11).fontColor($r('app.color.text_secondary'))
       }.width('100%').height(32).padding({ left: 8, right: 8 })
-        .backgroundColor(this.darkMode ? '#16213e' : '#F8F9FA')
+        .backgroundColor($r('app.color.bg_secondary'))
 
       // ─── Canvas ───
       Canvas((ctx: CanvasRenderingContext2D) => {
@@ -272,19 +273,19 @@ export struct PlotCanvas {
       // ─── Tooltip ───
       if (this.showTooltip && this.hoveredPoint >= 0) {
         Text(this.tooltipText)
-          .fontSize(10).fontColor('#2C3E50').padding(6)
-          .backgroundColor('#FFFFCC').borderRadius(4)
+          .fontSize(10).fontColor($r('app.color.text_primary')).padding(6)
+          .backgroundColor($r('app.color.bg_notice')).borderRadius(4)
           .position({ x: this.mouseX + 10, y: this.mouseY - 20 })
       }
 
       // ─── Status ───
       Row() {
         if (this.hoveredPoint >= 0) {
-          Text(this.tooltipText).fontSize(10).fontColor('#7F8C8D')
+          Text(this.tooltipText).fontSize(10).fontColor($r('app.color.text_secondary'))
         } else if (this.selectedPoints.size > 0) {
-          Text(this.selectedPoints.size + ' points selected').fontSize(10).fontColor('#3498DB')
+          Text(this.selectedPoints.size + ' points selected').fontSize(10).fontColor($r('app.color.primary'))
         } else {
-          Text(this.plotType).fontSize(10).fontColor('#BDC3C7')
+          Text(this.plotType).fontSize(10).fontColor($r('app.color.text_disabled'))
         }
       }.width('100%').height(20).padding({ left: 8 })
     }.width('100%').height('100%')
@@ -313,7 +314,7 @@ export struct PlotCanvas {
     this.redraw();
   }
 
-  setLineData(x: number[], y: number[], color: string = '#3498DB'): void {
+  setLineData(x: number[], y: number[], color: string = token('primary', this.darkMode)): void {
     this.plotData = { type: 'line', x, y, color };
     this.updateRanges();
     this.redraw();
@@ -364,7 +365,7 @@ export struct PlotCanvas {
     this.ylabel = o.ylabel ?? this.ylabel;
     this.darkMode = o.darkMode ?? this.darkMode;
     if (o.dataX && o.dataY && o.dataX.length > 0 && o.dataX.length === o.dataY.length) {
-      if (this.plotType === 'line') this.setLineData(o.dataX, o.dataY, o.color ?? '#3498DB');
+      if (this.plotType === 'line') this.setLineData(o.dataX, o.dataY, o.color ?? token('primary', this.darkMode));
       else this.setScatterData(o.dataX, o.dataY);
     } else {
       this.redraw();
@@ -477,15 +478,15 @@ export struct PlotCanvas {
 
     // Clear
     ctx.clearRect(0, 0, w, h);
-    ctx.fillStyle = this.darkMode ? '#1a1a2e' : '#FFFFFF';
+    ctx.fillStyle = token('start_window_background', this.darkMode);
     ctx.fillRect(0, 0, w, h);
 
     // Draw plot area background
-    ctx.fillStyle = this.darkMode ? '#0f3460' : '#FAFBFC';
+    ctx.fillStyle = token('bg_elevated', this.darkMode);
     ctx.fillRect(this.vp.margin.left, this.vp.margin.top, pw, ph);
 
     // Grid — horizontal from the Y ticks, vertical from the X ticks.
-    ctx.strokeStyle = this.darkMode ? '#333' : '#E4E7EB';
+    ctx.strokeStyle = token('border_light', this.darkMode);
     ctx.lineWidth = 0.5;
     for (const tick of ChartComputator.yTicks(this.vp, TICK_DIVISIONS)) {
       const gy = tick.pixel;
@@ -506,7 +507,7 @@ export struct PlotCanvas {
     }
 
     // Axes
-    ctx.strokeStyle = this.darkMode ? '#ccc' : '#2C3E50';
+    ctx.strokeStyle = token('text_primary', this.darkMode);
     ctx.lineWidth = 1.5;
     ctx.beginPath();
     ctx.moveTo(this.vp.margin.left, this.vp.margin.top);
@@ -516,7 +517,7 @@ export struct PlotCanvas {
 
     // Tick labels — positions and labels come from ChartComputator so the
     // Canvas renderer and the SVG exporter cannot drift apart.
-    ctx.fillStyle = this.darkMode ? '#aaa' : '#7F8C8D';
+    ctx.fillStyle = token('text_secondary', this.darkMode);
     ctx.font = '10px sans-serif';
     ctx.textAlign = 'center';
     for (const tick of ChartComputator.xTicks(this.vp, TICK_DIVISIONS, (v: number) => this.tickLabel(v))) {
@@ -530,7 +531,7 @@ export struct PlotCanvas {
 
     // Axis labels
     if (this.xlabel) {
-      ctx.fillStyle = this.darkMode ? '#ccc' : '#7F8C8D';
+      ctx.fillStyle = token('axis_line', this.darkMode);
       ctx.font = '12px sans-serif';
       ctx.textAlign = 'center';
       ctx.fillText(this.xlabel, this.vp.margin.left + pw / 2, h - 10);
@@ -546,7 +547,7 @@ export struct PlotCanvas {
 
     // Title
     if (this.title) {
-      ctx.fillStyle = this.darkMode ? '#fff' : '#2C3E50';
+      ctx.fillStyle = token('text_strong', this.darkMode);
       ctx.font = 'bold 14px sans-serif';
       ctx.textAlign = 'center';
       ctx.fillText(this.title, w / 2, 25);
@@ -556,16 +557,16 @@ export struct PlotCanvas {
   private drawScatter(ctx: CanvasRenderingContext2D, pw: number, ph: number): void {
     const data = this.plotData!;
     const x = data.x!, y = data.y!;
-    const colors = ['#3498DB', '#E74C3C', '#27AE60', '#F39C12', '#9B59B6', '#1ABC9C'];
+    const colors = [token('primary', this.darkMode), token('danger', this.darkMode), token('success', this.darkMode), token('warning', this.darkMode), token('series_5', this.darkMode), token('series_6', this.darkMode)];
     const n = x.length;
 
     // Zero lines
     if (this.vp.minX < 0 && this.vp.maxX > 0) {
-      ctx.strokeStyle = '#888'; ctx.lineWidth = 1;
+      ctx.strokeStyle = token('text_muted', this.darkMode); ctx.lineWidth = 1;
       ctx.beginPath(); ctx.moveTo(this.mapX(0), this.vp.margin.top); ctx.lineTo(this.mapX(0), this.vp.margin.top + ph); ctx.stroke();
     }
     if (this.vp.minY < 0 && this.vp.maxY > 0) {
-      ctx.strokeStyle = '#888'; ctx.lineWidth = 1;
+      ctx.strokeStyle = token('text_muted', this.darkMode); ctx.lineWidth = 1;
       ctx.beginPath(); ctx.moveTo(this.vp.margin.left, this.mapY(0)); ctx.lineTo(this.vp.margin.left + pw, this.mapY(0)); ctx.stroke();
     }
 
@@ -618,7 +619,7 @@ export struct PlotCanvas {
         ctx.stroke();
         ctx.globalAlpha = 1;
         if (pt.isHovered && data.labels?.[i]) {
-          ctx.fillStyle = this.darkMode ? '#ccc' : '#2C3E50';
+          ctx.fillStyle = token('text_primary', this.darkMode);
           ctx.font = '10px sans-serif';
           ctx.fillText(data.labels[i], pt.mx + 10, pt.my - 5);
         }
@@ -642,7 +643,7 @@ export struct PlotCanvas {
         ctx.globalAlpha = 1;
 
         if (isHovered && data.labels?.[i]) {
-          ctx.fillStyle = this.darkMode ? '#ccc' : '#2C3E50';
+          ctx.fillStyle = token('text_primary', this.darkMode);
           ctx.font = '10px sans-serif';
           ctx.fillText(data.labels[i], mx + 10, my - 5);
         }
@@ -657,7 +658,7 @@ export struct PlotCanvas {
         const y = this.vp.margin.top + 20 + i * 15;
         ctx.fillStyle = colors[i % colors.length];
         ctx.beginPath(); ctx.arc(this.vp.margin.left + pw - 80, y, 5, 0, 2 * Math.PI); ctx.fill();
-        ctx.fillStyle = this.darkMode ? '#ccc' : '#2C3E50';
+        ctx.fillStyle = token('text_primary', this.darkMode);
         ctx.textAlign = 'left';
         ctx.fillText('Group ' + uniqueGroups[i], this.vp.margin.left + pw - 70, y + 3);
       }
@@ -667,7 +668,7 @@ export struct PlotCanvas {
   private drawLine(ctx: CanvasRenderingContext2D, pw: number, ph: number): void {
     const data = this.plotData!;
     const x = data.x!, y = data.y!;
-    const color = data.color ?? '#3498DB';
+    const color = data.color ?? token('primary', this.darkMode);
 
     ctx.strokeStyle = color; ctx.lineWidth = 2;
     ctx.beginPath();
@@ -686,7 +687,7 @@ export struct PlotCanvas {
     // Hovered point
     if (this.hoveredPoint >= 0 && this.hoveredPoint < x.length) {
       const i = this.hoveredPoint;
-      ctx.strokeStyle = '#E74C3C'; ctx.lineWidth = 2;
+      ctx.strokeStyle = token('danger', this.darkMode); ctx.lineWidth = 2;
       ctx.beginPath(); ctx.arc(this.mapX(x[i]), this.mapY(y[i]), 8, 0, 2 * Math.PI); ctx.stroke();
     }
   }
@@ -737,7 +738,7 @@ export struct PlotCanvas {
     const iStart = this.visibleBarRange(labels.length, pw);
     if (iStart.iEnd < iStart.iStart) return;
     const { barWidth } = ChartComputator.barLayout(this.vp, iStart.iEnd - iStart.iStart + 1, 0.3);
-    const colors = ['#3498DB', '#E74C3C', '#27AE60', '#F39C12', '#9B59B6'];
+    const colors = [token('primary', this.darkMode), token('danger', this.darkMode), token('success', this.darkMode), token('warning', this.darkMode), token('series_5', this.darkMode)];
     const baseline = this.vp.mapY(0);
 
     for (let i = iStart.iStart; i <= iStart.iEnd; i++) {
@@ -750,7 +751,7 @@ export struct PlotCanvas {
       ctx.globalAlpha = 1;
 
       // Value label
-      ctx.fillStyle = this.darkMode ? '#ccc' : '#2C3E50';
+      ctx.fillStyle = token('text_primary', this.darkMode);
       ctx.font = '9px sans-serif'; ctx.textAlign = 'center';
       ctx.fillText(this.tickLabel(values[i]), centre, Math.min(top, baseline) - 3);
 
@@ -774,7 +775,7 @@ export struct PlotCanvas {
     // and Tukey whiskers the exporter never drew. The exported figure was
     // therefore not the figure on screen.
     const boxes = computeBoxPrimitives(this.vp, toBoxGroups(groups));
-    const colors = ['#3498DB', '#E74C3C', '#27AE60', '#F39C12', '#9B59B6'];
+    const colors = [token('primary', this.darkMode), token('danger', this.darkMode), token('success', this.darkMode), token('warning', this.darkMode), token('series_5', this.darkMode)];
 
     for (const box of boxes) {
       const color = colors[box.index % colors.length];
@@ -796,11 +797,11 @@ export struct PlotCanvas {
       ctx.strokeRect(left, box.yQ3, box.boxWidth, box.yQ1 - box.yQ3);
 
       // Median
-      ctx.strokeStyle = '#E74C3C'; ctx.lineWidth = 2.5;
+      ctx.strokeStyle = token('danger', this.darkMode); ctx.lineWidth = 2.5;
       ctx.beginPath(); ctx.moveTo(left, box.yMedian); ctx.lineTo(right, box.yMedian); ctx.stroke();
 
       // Group label
-      ctx.fillStyle = this.darkMode ? '#ccc' : '#2C3E50';
+      ctx.fillStyle = token('text_primary', this.darkMode);
       ctx.font = '11px sans-serif'; ctx.textAlign = 'center';
       ctx.fillText(box.label, box.centerX, this.vp.margin.top + ph + 15);
     }
@@ -843,14 +844,14 @@ export struct PlotCanvas {
 
       // Value annotation
       if (cellW > 30 && cellH > 20) {
-        ctx.fillStyle = norm > 0.5 ? '#fff' : '#2C3E50';
+        ctx.fillStyle = norm > 0.5 ? token('bg_primary', this.darkMode) : token('text_primary', this.darkMode);
         ctx.font = '9px sans-serif'; ctx.textAlign = 'center';
         ctx.fillText(matrix[i][j].toFixed(2), this.vp.margin.left + j * cellW + cellW / 2, this.vp.margin.top + i * cellH + cellH / 2 + 3);
       }
     }
 
     // Labels
-    ctx.fillStyle = this.darkMode ? '#ccc' : '#2C3E50';
+    ctx.fillStyle = token('text_primary', this.darkMode);
     ctx.font = '9px sans-serif';
     for (let i = 0; i < nRows; i++) {
       ctx.textAlign = 'right';
@@ -882,7 +883,7 @@ export struct PlotCanvas {
       ctx.fillStyle = 'rgb(' + barR[i] + ',' + barG[i] + ',' + barB[i] + ')';
       ctx.fillRect(barX, this.vp.margin.top + i, barW, 1);
     }
-    ctx.fillStyle = this.darkMode ? '#ccc' : '#2C3E50';
+    ctx.fillStyle = token('text_primary', this.darkMode);
     ctx.font = '10px sans-serif'; ctx.textAlign = 'left';
     ctx.fillText(maxV.toFixed(2), barX + barW + 3, this.vp.margin.top + 8);
     ctx.fillText(minV.toFixed(2), barX + barW + 3, this.vp.margin.top + ph);
@@ -1018,21 +1019,21 @@ export struct PlotCanvas {
     // copy of the transform (it used to, and the two could disagree).
     this.syncPlotSize();
     let svg = '<svg width="' + this.canvasWidth + '" height="' + this.canvasHeight + '" xmlns="http://www.w3.org/2000/svg">';
-    svg += '<rect width="100%" height="100%" fill="' + (this.darkMode ? '#1a1a2e' : '#FFFFFF') + '"/>';
+    svg += '<rect width="100%" height="100%" fill="' + (token('start_window_background', this.darkMode)) + '"/>';
 
     // Title
     if (this.title) {
-      svg += '<text x="' + (this.canvasWidth / 2) + '" y="25" text-anchor="middle" font-size="14" font-weight="bold" fill="' + (this.darkMode ? '#fff' : '#2C3E50') + '">' + this.escapeXml(this.title) + '</text>';
+      svg += '<text x="' + (this.canvasWidth / 2) + '" y="25" text-anchor="middle" font-size="14" font-weight="bold" fill="' + (token('text_strong', this.darkMode)) + '">' + this.escapeXml(this.title) + '</text>';
     }
 
     // Axes
     const pw = this.canvasWidth - this.vp.margin.left - this.vp.margin.right;
     const ph = this.canvasHeight - this.vp.margin.top - this.vp.margin.bottom;
-    svg += '<line x1="' + this.vp.margin.left + '" y1="' + this.vp.margin.top + '" x2="' + this.vp.margin.left + '" y2="' + (this.vp.margin.top + ph) + '" stroke="' + (this.darkMode ? '#ccc' : '#2C3E50') + '" stroke-width="1.5"/>';
-    svg += '<line x1="' + this.vp.margin.left + '" y1="' + (this.vp.margin.top + ph) + '" x2="' + (this.vp.margin.left + pw) + '" y2="' + (this.vp.margin.top + ph) + '" stroke="' + (this.darkMode ? '#ccc' : '#2C3E50') + '" stroke-width="1.5"/>';
+    svg += '<line x1="' + this.vp.margin.left + '" y1="' + this.vp.margin.top + '" x2="' + this.vp.margin.left + '" y2="' + (this.vp.margin.top + ph) + '" stroke="' + (token('text_primary', this.darkMode)) + '" stroke-width="1.5"/>';
+    svg += '<line x1="' + this.vp.margin.left + '" y1="' + (this.vp.margin.top + ph) + '" x2="' + (this.vp.margin.left + pw) + '" y2="' + (this.vp.margin.top + ph) + '" stroke="' + (token('text_primary', this.darkMode)) + '" stroke-width="1.5"/>';
 
     // Grid lines — horizontal from the Y ticks, vertical from the X ticks.
-    svg += '<g stroke="' + (this.darkMode ? '#333' : '#E4E7EB') + '" stroke-width="0.5">';
+    svg += '<g stroke="' + (token('border_light', this.darkMode)) + '" stroke-width="0.5">';
     for (const tick of ChartComputator.yTicks(this.vp, TICK_DIVISIONS)) {
       const gy = tick.pixel;
       svg += '<line x1="' + this.vp.margin.left + '" y1="' + gy + '" x2="' + (this.vp.margin.left + pw) + '" y2="' + gy + '"/>';
@@ -1048,7 +1049,7 @@ export struct PlotCanvas {
       switch (this.plotData.type) {
         case 'scatter':
           if (this.plotData.x) {
-            const colors = ['#3498DB', '#E74C3C', '#27AE60', '#F39C12', '#9B59B6', '#1ABC9C'];
+            const colors = [token('primary', this.darkMode), token('danger', this.darkMode), token('success', this.darkMode), token('warning', this.darkMode), token('series_5', this.darkMode), token('series_6', this.darkMode)];
             for (let i = 0; i < this.plotData.x.length; i++) {
               const px = this.mapX(this.plotData.x[i]).toFixed(1);
               const py = this.mapY(this.plotData.y![i]).toFixed(1);
@@ -1059,7 +1060,7 @@ export struct PlotCanvas {
           break;
         case 'line':
           if (this.plotData.x && this.plotData.y) {
-            const color = this.plotData.color ?? '#3498DB';
+            const color = this.plotData.color ?? token('primary', this.darkMode);
             let path = 'M ' + this.mapX(this.plotData.x[0]).toFixed(1) + ' ' + this.mapY(this.plotData.y[0]).toFixed(1);
             for (let i = 1; i < this.plotData.x.length; i++) {
               path += ' L ' + this.mapX(this.plotData.x[i]).toFixed(1) + ' ' + this.mapY(this.plotData.y[i]).toFixed(1);
@@ -1076,7 +1077,7 @@ export struct PlotCanvas {
             const iStart = range.iStart, iEnd = range.iEnd;
             if (iEnd >= iStart) {
               const barW = ChartComputator.barLayout(this.vp, iEnd - iStart + 1, 0.3).barWidth;
-              const barColors = ['#3498DB', '#E74C3C', '#27AE60', '#F39C12', '#9B59B6'];
+              const barColors = [token('primary', this.darkMode), token('danger', this.darkMode), token('success', this.darkMode), token('warning', this.darkMode), token('series_5', this.darkMode)];
               const baseline = this.vp.mapY(0);
               for (let i = iStart; i <= iEnd; i++) {
                 const centre = this.mapX(i);
@@ -1098,7 +1099,7 @@ export struct PlotCanvas {
             // whiskers at `mapX(group)` centres, while the canvas drew
             // Tukey whiskers with the upper median at a hand-computed X.
             const boxes = computeBoxPrimitives(this.vp, toBoxGroups(this.plotData.boxGroups));
-            const stroke = this.darkMode ? '#ccc' : '#2C3E50';
+            const stroke = token('text_primary', this.darkMode);
             for (const box of boxes) {
               const left = box.centerX - box.boxWidth / 2;
               const right = box.centerX + box.boxWidth / 2;
@@ -1160,7 +1161,7 @@ export struct PlotCanvas {
     // canvas renderer cannot drift apart. Positions and labels come from the
     // same ChartComputator the canvas uses, so the two are identical by
     // construction.
-    svg += '<g font-family="sans-serif" font-size="10" fill="' + (this.darkMode ? '#aaa' : '#7F8C8D') + '">';
+    svg += '<g font-family="sans-serif" font-size="10" fill="' + (token('text_secondary', this.darkMode)) + '">';
     for (const tick of ChartComputator.xTicks(this.vp, TICK_DIVISIONS, (v: number) => this.tickLabel(v))) {
       svg += '<text x="' + tick.pixel.toFixed(1) + '" y="' + (this.vp.margin.top + ph + 15)
         + '" text-anchor="middle">' + this.escapeXml(tick.label) + '</text>';
@@ -1364,7 +1365,7 @@ export const DEFAULT_PLOT_OPTIONS: PlotOptions = {
   darkMode: false,
   dataX: [],
   dataY: [],
-  color: '#3498DB',
+  color: token('primary', this.darkMode),
 };
 
 /** 合并默认值与覆盖项（浅合并，数组整体替换）。 */

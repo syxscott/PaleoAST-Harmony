@@ -57,7 +57,7 @@ export struct PCADialog {
     }.width('100%').margin({ bottom: 4 })
 
     if (this.errorMsg) {
-      Text(this.errorMsg).fontSize(10).fontColor('#E74C3C').margin({ bottom: 8 })
+      Text(this.errorMsg).fontSize(10).fontColor($r('app.color.danger')).margin({ bottom: 8 })
     }
 
     Row() {
@@ -67,18 +67,18 @@ export struct PCADialog {
         .onSelect((idx: number) => { this.methodIdx = idx; })
     }.width('100%').margin({ bottom: 4 })
 
-    Text(this.methodDesc[this.methodIdx]).fontSize(10).fontColor('#95A5A6').margin({ bottom: 8 })
+    Text(this.methodDesc[this.methodIdx]).fontSize(10).fontColor($r('app.color.text_muted')).margin({ bottom: 8 })
 
     Row() {
-      Text(this.showAdvanced ? '[-] Tips' : '[+] Tips').fontSize(11).fontColor('#3498DB')
+      Text(this.showAdvanced ? '[-] Tips' : '[+] Tips').fontSize(11).fontColor($r('app.color.primary'))
         .onClick(() => { this.showAdvanced = !this.showAdvanced; })
     }.width('100%').margin({ bottom: 8 })
 
     if (this.showAdvanced) {
       Column() {
-        Text('Use correlation PCA when variables have different units.').fontSize(10).fontColor('#7F8C8D').margin({ bottom: 2 })
-        Text('Scree plot helps decide how many components to retain.').fontSize(10).fontColor('#7F8C8D').margin({ bottom: 2 })
-        Text('Kaiser criterion: retain components with eigenvalue > 1.').fontSize(10).fontColor('#7F8C8D')
+        Text('Use correlation PCA when variables have different units.').fontSize(10).fontColor($r('app.color.text_secondary')).margin({ bottom: 2 })
+        Text('Scree plot helps decide how many components to retain.').fontSize(10).fontColor($r('app.color.text_secondary')).margin({ bottom: 2 })
+        Text('Kaiser criterion: retain components with eigenvalue > 1.').fontSize(10).fontColor($r('app.color.text_secondary'))
       }.margin({ bottom: 8 })
     }
   }
@@ -86,16 +86,16 @@ export struct PCADialog {
   build() {
     Column() {
       Text('PCA — Principal Component Analysis').fontSize(18).fontWeight(FontWeight.Bold).margin({ bottom: 8 })
-      Text('Finds orthogonal axes of maximum variance via SVD.').fontSize(11).fontColor('#7F8C8D').margin({ bottom: 16 })
+      Text('Finds orthogonal axes of maximum variance via SVD.').fontSize(11).fontColor($r('app.color.text_secondary')).margin({ bottom: 16 })
 
       this.contentBuilder()
 
       Divider().margin({ top: 8, bottom: 12 })
 
       Row() {
-        Button('Cancel').backgroundColor('#95A5A6').fontColor('#FFFFFF')
+        Button('Cancel').backgroundColor($r('app.color.bg_muted')).fontColor($r('app.color.text_on_accent'))
           .onClick(() => { this.visible = false; }).margin({ right: 12 })
-        Button('Run Analysis').type(ButtonType.Capsule).backgroundColor('#3498DB').fontColor('#FFFFFF')
+        Button('Run Analysis').type(ButtonType.Capsule).backgroundColor($r('app.color.primary')).fontColor($r('app.color.text_on_accent'))
           .enabled(this.errorMsg === '')
           .onClick(() => {
             this.onConfirm({ nComponents: this.nComponents, method: this.methodOpts[this.methodIdx] });
