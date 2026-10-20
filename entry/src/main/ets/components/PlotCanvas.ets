@@ -16,6 +16,18 @@ import { AdaptiveFormatter, autoFormatter } from './plot/ValueFormatter';
 import type { IValueFormatter } from './plot/ValueFormatter';
 import { computeBoxPrimitives } from './plot/boxGeometry';
 import type { BoxGroup } from './plot/boxGeometry';
+import {
+  computeScatterPrimitives,
+  computeLinePrimitives,
+  computeBarPrimitives,
+  computeHistogramBins,
+  computeHeatmapPrimitives,
+  heatCellColor,
+  barAxisRange,
+  paletteSlot,
+  scatterPaletteSlot,
+} from './plot/plotGeometry';
+import type { PointPrimitive } from './plot/plotGeometry';
 import { token } from '../theme/tokens';
 
 /**
@@ -327,13 +339,12 @@ export struct PlotCanvas {
   }
 
   setHistogramData(data: number[], nBins: number = 30): void {
-    const min = data.reduce((a, b) => Math.min(a, b), Infinity);
-    const max = data.reduce((a, b) => Math.max(a, b), -Infinity);
-    const binW = (max - min) / nBins || 1;
-    const bins = new Array(nBins).fill(0);
-    for (const v of data) { const idx = Math.min(Math.floor((v - min) / binW), nBins - 1); if (idx >= 0) bins[idx]++; }
-    const labels = bins.map((_, i) => (min + i * binW).toFixed(1));
-    this.setBarData(labels, bins);
+    // The binning is the SHARED implementation (plot/plotGeometry.ts): one
+    // rule decides the bin edges, the counts and the labels. The component
+    // only turns the result into a bar chart, which is what the SVG exporter
+    // draws as well.
+    const bins = computeHistogramBins(data, nBins);
+    this.setBarData(bins.labels, bins.counts);
   }
 
   setBoxPlotData(groups: { label: string; values: number[] }[]): void {
@@ -398,8 +409,10 @@ export struct PlotCanvas {
    *                    so the axis spans 0…n−1; Y spans 0…max because bars grow
    *                    from a zero baseline
    *   boxplot        — X spans the group indices, Y the pooled group values
-   *   heatmap        — X spans the column indices, Y the row indices, matching
-   *                    the cell geometry drawHeatmap() computes
+   *   heatmap        — X spans the column indices, Y the row indices. The
+   *                    cells themselves divide the plot rectangle (see
+   *                    plot/plotGeometry.ts), so this range drives the tick
+   *                    labels only.
    */
   private updateRanges(): void {
     const d = this.plotData;
@@ -412,12 +425,14 @@ export struct PlotCanvas {
         xs = d.x ?? null;
         ys = d.y ?? null;
         break;
-      case 'bar':
-        if (d.values && d.values.length > 0) {
-          xs = d.values.map((_: number, i: number) => i);
-          ys = [0].concat(d.values);
-        }
+      case 'bar': {
+        // The categorical axis range is the SHARED implementation
+        // (plot/plotGeometry.ts): X is the category index, Y spans the zero
+        // baseline and the tallest bar.
+        const barRange = barAxisRange(d.values ?? []);
+        if (barRange) { xs = barRange.xs; ys = barRange.ys; }
         break;
+      }
       case 'boxplot':
         if (d.boxGroups && d.boxGroups.length > 0) {
           xs = d.boxGroups.map((_: { label: string; values: number[] }, i: number) => i);
@@ -560,14 +575,20 @@ export struct PlotCanvas {
     const colors = [token('primary', this.darkMode), token('danger', this.darkMode), token('success', this.darkMode), token('warning', this.darkMode), token('series_5', this.darkMode), token('series_6', this.darkMode)];
     const n = x.length;
 
+    // The geometry comes from the SHARED implementation (plot/plotGeometry.ts),
+    // which the SVG exporter calls as well, so the exported figure cannot
+    // disagree with the figure on screen. Only the DECISION to draw the zero
+    // lines stays with the canvas — the exporter has never drawn them.
+    const prim = computeScatterPrimitives(this.vp, x, y);
+
     // Zero lines
-    if (this.vp.minX < 0 && this.vp.maxX > 0) {
+    if (prim.zeroX !== null) {
       ctx.strokeStyle = token('text_muted', this.darkMode); ctx.lineWidth = 1;
-      ctx.beginPath(); ctx.moveTo(this.mapX(0), this.vp.margin.top); ctx.lineTo(this.mapX(0), this.vp.margin.top + ph); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(prim.zeroX, this.vp.margin.top); ctx.lineTo(prim.zeroX, this.vp.margin.top + ph); ctx.stroke();
     }
-    if (this.vp.minY < 0 && this.vp.maxY > 0) {
+    if (prim.zeroY !== null) {
       ctx.strokeStyle = token('text_muted', this.darkMode); ctx.lineWidth = 1;
-      ctx.beginPath(); ctx.moveTo(this.vp.margin.left, this.mapY(0)); ctx.lineTo(this.vp.margin.left + pw, this.mapY(0)); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(this.vp.margin.left, prim.zeroY); ctx.lineTo(this.vp.margin.left + pw, prim.zeroY); ctx.stroke();
     }
 
     // ── Batched Path2D rendering for large datasets (N > 1000) ──
@@ -576,9 +597,9 @@ export struct PlotCanvas {
       const mapped: { mx: number; my: number; color: string; isHovered: boolean; isSelected: boolean }[] = new Array(n);
       for (let i = 0; i < n; i++) {
         mapped[i] = {
-          mx: this.mapX(x[i]),
-          my: this.mapY(y[i]),
-          color: data.groups ? colors[data.groups[i] % colors.length] : colors[0],
+          mx: prim.points[i].px,
+          my: prim.points[i].py,
+          color: colors[scatterPaletteSlot(data.groups, i, colors.length)],
           isHovered: this.hoveredPoint === i,
           isSelected: this.selectedPoints.has(i)
         };
@@ -627,10 +648,10 @@ export struct PlotCanvas {
     } else {
       // ── Standard per-point rendering for small datasets ──
       for (let i = 0; i < n; i++) {
-        const color = data.groups ? colors[data.groups[i] % colors.length] : colors[0];
+        const color = colors[scatterPaletteSlot(data.groups, i, colors.length)];
         const isHovered = this.hoveredPoint === i;
         const isSelected = this.selectedPoints.has(i);
-        const mx = this.mapX(x[i]), my = this.mapY(y[i]);
+        const mx = prim.points[i].px, my = prim.points[i].py;
         ctx.fillStyle = color;
         ctx.globalAlpha = isHovered ? 1.0 : (isSelected ? 0.9 : 0.7);
         ctx.beginPath();
@@ -670,56 +691,32 @@ export struct PlotCanvas {
     const x = data.x!, y = data.y!;
     const color = data.color ?? token('primary', this.darkMode);
 
+    // The geometry comes from the SHARED implementation (plot/plotGeometry.ts),
+    // which the SVG exporter calls as well: the same vertices, at the same
+    // pixel positions. (The canvas also draws a marker on every vertex; the
+    // exporter has never drawn one.)
+    const prim = computeLinePrimitives(this.vp, x, y);
+
     ctx.strokeStyle = color; ctx.lineWidth = 2;
     ctx.beginPath();
-    for (let i = 0; i < x.length; i++) {
-      if (i === 0) ctx.moveTo(this.mapX(x[i]), this.mapY(y[i]));
-      else ctx.lineTo(this.mapX(x[i]), this.mapY(y[i]));
+    for (let i = 0; i < prim.points.length; i++) {
+      if (i === 0) ctx.moveTo(prim.points[i].px, prim.points[i].py);
+      else ctx.lineTo(prim.points[i].px, prim.points[i].py);
     }
     ctx.stroke();
 
     // Points
-    for (let i = 0; i < x.length; i++) {
+    for (let i = 0; i < prim.points.length; i++) {
       ctx.fillStyle = color;
-      ctx.beginPath(); ctx.arc(this.mapX(x[i]), this.mapY(y[i]), 3, 0, 2 * Math.PI); ctx.fill();
+      ctx.beginPath(); ctx.arc(prim.points[i].px, prim.points[i].py, 3, 0, 2 * Math.PI); ctx.fill();
     }
 
     // Hovered point
     if (this.hoveredPoint >= 0 && this.hoveredPoint < x.length) {
       const i = this.hoveredPoint;
       ctx.strokeStyle = token('danger', this.darkMode); ctx.lineWidth = 2;
-      ctx.beginPath(); ctx.arc(this.mapX(x[i]), this.mapY(y[i]), 8, 0, 2 * Math.PI); ctx.stroke();
+      ctx.beginPath(); ctx.arc(prim.points[i].px, prim.points[i].py, 8, 0, 2 * Math.PI); ctx.stroke();
     }
-  }
-
-  /**
-   * Which bars of a categorical X axis fall inside the plot rectangle.
-   *
-   * Shared by drawBar() and the SVG exporter so the two cannot disagree.
-   *
-   * Two passes, because the bar width depends on how many bars are visible:
-   *   1. take the index range whose CENTRES are inside the plot rect
-   *   2. drop an edge bar whose rectangle would stick out past the axes, then
-   *      recompute the width for the smaller count
-   * Step 2 matters because ArkUI's Canvas does not clip: a bar drawn past the
-   * plot edge simply paints over the axis and the margin. The loop terminates
-   * because every pass removes at least one index.
-   */
-  private visibleBarRange(labelCount: number, plotWidthPx: number): { iStart: number; iEnd: number } {
-    const leftPx = this.vp.margin.left;
-    const rightPx = leftPx + plotWidthPx;
-    const a = this.vp.unmapX(leftPx);
-    const b = this.vp.unmapX(rightPx);
-    let iStart = Math.max(0, Math.ceil(Math.min(a, b)));
-    let iEnd = Math.min(labelCount - 1, Math.floor(Math.max(a, b)));
-    let changed = true;
-    while (changed && iEnd >= iStart && labelCount > 0) {
-      changed = false;
-      const w = ChartComputator.barLayout(this.vp, iEnd - iStart + 1, 0.3).barWidth;
-      if (this.vp.mapX(iStart) - w / 2 < leftPx) { iStart++; changed = true; }
-      if (iEnd >= iStart && this.vp.mapX(iEnd) + w / 2 > rightPx) { iEnd--; changed = true; }
-    }
-    return { iStart, iEnd };
   }
 
   private drawBar(ctx: CanvasRenderingContext2D, pw: number, ph: number): void {
@@ -735,32 +732,31 @@ export struct PlotCanvas {
     // updateRanges() sets the bar axis to span 0..max, so `vp.mapY(0)` is the
     // baseline and `vp.mapY(value)` the bar top — no separate maxVal
     // normalisation is needed, and the two can no longer disagree.
-    const iStart = this.visibleBarRange(labels.length, pw);
-    if (iStart.iEnd < iStart.iStart) return;
-    const { barWidth } = ChartComputator.barLayout(this.vp, iStart.iEnd - iStart.iStart + 1, 0.3);
+    //
+    // The geometry itself — the visible range, the width, the baseline and the
+    // rectangles — comes from the SHARED implementation (plot/plotGeometry.ts),
+    // which the SVG exporter calls as well.
+    const prim = computeBarPrimitives(this.vp, labels.length, values, pw);
+    if (prim.bars.length === 0) return;
     const colors = [token('primary', this.darkMode), token('danger', this.darkMode), token('success', this.darkMode), token('warning', this.darkMode), token('series_5', this.darkMode)];
-    const baseline = this.vp.mapY(0);
 
-    for (let i = iStart.iStart; i <= iStart.iEnd; i++) {
-      const centre = this.mapX(i);
-      const x = centre - barWidth / 2;
-      const top = this.mapY(values[i]);
-      ctx.fillStyle = colors[i % colors.length];
+    for (const bar of prim.bars) {
+      ctx.fillStyle = colors[paletteSlot(bar.index, colors.length)];
       ctx.globalAlpha = 0.8;
-      ctx.fillRect(x, Math.min(top, baseline), barWidth, Math.abs(baseline - top));
+      ctx.fillRect(bar.x, bar.y, bar.width, bar.height);
       ctx.globalAlpha = 1;
 
       // Value label
       ctx.fillStyle = token('text_primary', this.darkMode);
       ctx.font = '9px sans-serif'; ctx.textAlign = 'center';
-      ctx.fillText(this.tickLabel(values[i]), centre, Math.min(top, baseline) - 3);
+      ctx.fillText(this.tickLabel(bar.value), bar.centerX, bar.y - 3);
 
       // X label (rotated)
       ctx.save();
-      ctx.translate(centre, this.vp.margin.top + ph + 5);
+      ctx.translate(bar.centerX, this.vp.margin.top + ph + 5);
       ctx.rotate(-Math.PI / 4);
       ctx.textAlign = 'right';
-      ctx.fillText(labels[i], 0, 0);
+      ctx.fillText(labels[bar.index], 0, 0);
       ctx.restore();
     }
   }
@@ -810,43 +806,27 @@ export struct PlotCanvas {
   private drawHeatmap(ctx: CanvasRenderingContext2D, pw: number, ph: number): void {
     const data = this.plotData!;
     const matrix = data.matrix!, rowLabels = data.rowLabels!, colLabels = data.colLabels!;
-    const nRows = matrix.length, nCols = matrix[0]?.length ?? 0;
-    const cellW = pw / nCols, cellH = ph / nRows;
-    let minV = Infinity, maxV = -Infinity;
-    for (const row of matrix) for (const v of row) { minV = Math.min(minV, v); maxV = Math.max(maxV, v); }
-    const range = maxV - minV || 1;
+    // The geometry comes from the SHARED implementation (plot/plotGeometry.ts),
+    // which the SVG exporter calls as well: the same cells, at the same places,
+    // in the same colours, so the exported figure IS the figure on screen.
+    // The exporter used the viewport's cell pitch, which is wider than the
+    // plot rectangle because the viewport pads the data range — the last
+    // column ran out of the plot area, over the margin.
+    const prim = computeHeatmapPrimitives(this.vp, matrix, pw, ph);
+    const nRows = prim.rows, nCols = prim.cols;
 
-    // Pre-compute normalized values + derived colors once
-    const normVals: number[][] = new Array(nRows);
-    const rChans: number[][] = new Array(nRows);
-    const bChans: number[][] = new Array(nRows);
-    const gChans: number[][] = new Array(nRows); // green channel (blue-ish diverging)
-    for (let i = 0; i < nRows; i++) {
-      normVals[i] = new Array(nCols);
-      rChans[i] = new Array(nCols);
-      bChans[i] = new Array(nCols);
-      gChans[i] = new Array(nCols);
-      for (let j = 0; j < nCols; j++) {
-        const norm = (matrix[i][j] - minV) / range;
-        normVals[i][j] = norm;
-        rChans[i][j] = Math.floor(norm * 255);
-        bChans[i][j] = Math.floor((1 - norm) * 255);
-        gChans[i][j] = Math.floor(100 * (1 - Math.abs(norm - 0.5) * 2));
-      }
-    }
-
-    // Draw cells using pre-computed values
-    for (let i = 0; i < nRows; i++) for (let j = 0; j < nCols; j++) {
-      const norm = normVals[i][j];
-      const r = rChans[i][j], b = bChans[i][j], g = gChans[i][j];
-      ctx.fillStyle = 'rgb(' + r + ',' + g + ',' + b + ')';
-      ctx.fillRect(this.vp.margin.left + j * cellW, this.vp.margin.top + i * cellH, cellW - 1, cellH - 1);
+    // Draw cells using the shared geometry
+    for (const cell of prim.cells) {
+      ctx.fillStyle = cell.fill;
+      // One pixel is left free between two neighbouring cells, so that the
+      // grid lines show.
+      ctx.fillRect(cell.x, cell.y, cell.width - 1, cell.height - 1);
 
       // Value annotation
-      if (cellW > 30 && cellH > 20) {
-        ctx.fillStyle = norm > 0.5 ? token('bg_primary', this.darkMode) : token('text_primary', this.darkMode);
+      if (cell.width > 30 && cell.height > 20) {
+        ctx.fillStyle = cell.norm > 0.5 ? token('bg_primary', this.darkMode) : token('text_primary', this.darkMode);
         ctx.font = '9px sans-serif'; ctx.textAlign = 'center';
-        ctx.fillText(matrix[i][j].toFixed(2), this.vp.margin.left + j * cellW + cellW / 2, this.vp.margin.top + i * cellH + cellH / 2 + 3);
+        ctx.fillText(cell.value.toFixed(2), cell.centerX, cell.centerY + 3);
       }
     }
 
@@ -855,38 +835,29 @@ export struct PlotCanvas {
     ctx.font = '9px sans-serif';
     for (let i = 0; i < nRows; i++) {
       ctx.textAlign = 'right';
-      ctx.fillText(rowLabels[i] ?? '', this.vp.margin.left - 5, this.vp.margin.top + i * cellH + cellH / 2 + 3);
+      ctx.fillText(rowLabels[i] ?? '', this.vp.margin.left - 5, this.vp.margin.top + i * prim.cellHeight + prim.cellHeight / 2 + 3);
     }
     for (let j = 0; j < nCols; j++) {
       ctx.save();
-      ctx.translate(this.vp.margin.left + j * cellW + cellW / 2, this.vp.margin.top + ph + 5);
+      ctx.translate(this.vp.margin.left + j * prim.cellWidth + prim.cellWidth / 2, this.vp.margin.top + ph + 5);
       ctx.rotate(-Math.PI / 4);
       ctx.textAlign = 'right';
       ctx.fillText(colLabels[j] ?? '', 0, 0);
       ctx.restore();
     }
 
-    // Color bar — pre-compute gradient segments
+    // Color bar — the same scale as the cells
     const barX = this.vp.margin.left + pw + 10, barW = 15;
     const barNormVals: number[] = new Array(Math.ceil(ph));
-    const barR: number[] = new Array(barNormVals.length);
-    const barB: number[] = new Array(barNormVals.length);
-    const barG: number[] = new Array(barNormVals.length);
     for (let i = 0; i < barNormVals.length; i++) {
-      const norm = 1 - i / ph;
-      barNormVals[i] = norm;
-      barR[i] = Math.floor(norm * 255);
-      barB[i] = Math.floor((1 - norm) * 255);
-      barG[i] = Math.floor(100 * (1 - Math.abs(norm - 0.5) * 2));
-    }
-    for (let i = 0; i < barNormVals.length; i++) {
-      ctx.fillStyle = 'rgb(' + barR[i] + ',' + barG[i] + ',' + barB[i] + ')';
+      barNormVals[i] = 1 - i / ph;
+      ctx.fillStyle = heatCellColor(barNormVals[i]);
       ctx.fillRect(barX, this.vp.margin.top + i, barW, 1);
     }
     ctx.fillStyle = token('text_primary', this.darkMode);
     ctx.font = '10px sans-serif'; ctx.textAlign = 'left';
-    ctx.fillText(maxV.toFixed(2), barX + barW + 3, this.vp.margin.top + 8);
-    ctx.fillText(minV.toFixed(2), barX + barW + 3, this.vp.margin.top + ph);
+    ctx.fillText(prim.max.toFixed(2), barX + barW + 3, this.vp.margin.top + 8);
+    ctx.fillText(prim.min.toFixed(2), barX + barW + 3, this.vp.margin.top + ph);
   }
 
   // ─── Interaction ───────────────────────────────────────────────
@@ -1050,10 +1021,14 @@ export struct PlotCanvas {
         case 'scatter':
           if (this.plotData.x) {
             const colors = [token('primary', this.darkMode), token('danger', this.darkMode), token('success', this.darkMode), token('warning', this.darkMode), token('series_5', this.darkMode), token('series_6', this.darkMode)];
-            for (let i = 0; i < this.plotData.x.length; i++) {
-              const px = this.mapX(this.plotData.x[i]).toFixed(1);
-              const py = this.mapY(this.plotData.y![i]).toFixed(1);
-              const color = this.plotData.groups ? colors[this.plotData.groups[i] % colors.length] : colors[0];
+            // The SAME primitives the canvas renderer uses (see drawScatter):
+            // identical pixel positions, so the exported figure IS the figure
+            // on screen. The exporter has never drawn the zero lines.
+            const scatterPrim = computeScatterPrimitives(this.vp, this.plotData.x, this.plotData.y!);
+            for (let i = 0; i < scatterPrim.points.length; i++) {
+              const px = scatterPrim.points[i].px.toFixed(1);
+              const py = scatterPrim.points[i].py.toFixed(1);
+              const color = colors[scatterPaletteSlot(this.plotData.groups, i, colors.length)];
               svg += '<circle cx="' + px + '" cy="' + py + '" r="5" fill="' + color + '" opacity="0.7"/>';
             }
           }
@@ -1061,32 +1036,31 @@ export struct PlotCanvas {
         case 'line':
           if (this.plotData.x && this.plotData.y) {
             const color = this.plotData.color ?? token('primary', this.darkMode);
-            let path = 'M ' + this.mapX(this.plotData.x[0]).toFixed(1) + ' ' + this.mapY(this.plotData.y[0]).toFixed(1);
-            for (let i = 1; i < this.plotData.x.length; i++) {
-              path += ' L ' + this.mapX(this.plotData.x[i]).toFixed(1) + ' ' + this.mapY(this.plotData.y[i]).toFixed(1);
+            // The SAME vertices the canvas renderer uses (see drawLine).
+            const linePrim = computeLinePrimitives(this.vp, this.plotData.x, this.plotData.y);
+            // The old exporter read x[0]/y[0] directly, so an EMPTY series
+            // produced "M NaN NaN" instead of an error. Keep that output.
+            const empty: PointPrimitive = { index: 0, px: NaN, py: NaN };
+            const head = linePrim.points.length > 0 ? linePrim.points[0] : empty;
+            let path = 'M ' + head.px.toFixed(1) + ' ' + head.py.toFixed(1);
+            for (let i = 1; i < linePrim.points.length; i++) {
+              path += ' L ' + linePrim.points[i].px.toFixed(1) + ' ' + linePrim.points[i].py.toFixed(1);
             }
             svg += '<path d="' + path + '" fill="none" stroke="' + color + '" stroke-width="2"/>';
           }
           break;
         case 'bar':
           if (this.plotData.labels && this.plotData.values) {
-            // Same viewport-driven geometry AND the same visible range as
-            // drawBar(), otherwise the exported figure would disagree with the
-            // canvas exactly as the old pair did.
-            const range = this.visibleBarRange(this.plotData.labels.length, pw);
-            const iStart = range.iStart, iEnd = range.iEnd;
-            if (iEnd >= iStart) {
-              const barW = ChartComputator.barLayout(this.vp, iEnd - iStart + 1, 0.3).barWidth;
-              const barColors = [token('primary', this.darkMode), token('danger', this.darkMode), token('success', this.darkMode), token('warning', this.darkMode), token('series_5', this.darkMode)];
-              const baseline = this.vp.mapY(0);
-              for (let i = iStart; i <= iEnd; i++) {
-                const centre = this.mapX(i);
-                const top = this.mapY(this.plotData.values[i]);
-                const y = Math.min(top, baseline), h = Math.abs(baseline - top);
-                svg += '<rect x="' + (centre - barW / 2).toFixed(1) + '" y="' + y.toFixed(1)
-                  + '" width="' + barW.toFixed(1) + '" height="' + h.toFixed(1)
-                  + '" fill="' + barColors[i % barColors.length] + '" opacity="0.8"/>';
-              }
+            // The SAME primitives the canvas renderer uses (see drawBar):
+            // the same visible range, the same width, the same baseline and
+            // the same rectangles, so the exported figure IS the figure on
+            // screen.
+            const barPrim = computeBarPrimitives(this.vp, this.plotData.labels.length, this.plotData.values, pw);
+            const barColors = [token('primary', this.darkMode), token('danger', this.darkMode), token('success', this.darkMode), token('warning', this.darkMode), token('series_5', this.darkMode)];
+            for (const bar of barPrim.bars) {
+              svg += '<rect x="' + bar.x.toFixed(1) + '" y="' + bar.y.toFixed(1)
+                + '" width="' + bar.width.toFixed(1) + '" height="' + bar.height.toFixed(1)
+                + '" fill="' + barColors[paletteSlot(bar.index, barColors.length)] + '" opacity="0.8"/>';
             }
           }
           break;
@@ -1127,29 +1101,21 @@ export struct PlotCanvas {
           }
           break;
         }
-        case 'heatmap':
+        case 'heatmap': {
           if (this.plotData.matrix) {
-            const m = this.plotData.matrix;
-            const rows = m.length, cols = m.length > 0 ? m[0].length : 0;
-            if (rows > 0 && cols > 0) {
-              let lo = Infinity, hi = -Infinity;
-              for (const r of m) for (const v of r) { if (v < lo) lo = v; if (v > hi) hi = v; }
-              const span = hi - lo || 1;
-              const cw = Math.abs(this.mapX(1) - this.mapX(0));
-              const ch = Math.abs(this.mapY(0) - this.mapY(1));
-              for (let r = 0; r < rows; r++) {
-                for (let c = 0; c < cols; c++) {
-                  const t = (m[r][c] - lo) / span;
-                  const x = Math.min(this.mapX(c), this.mapX(c + 1));
-                  const y = Math.min(this.mapY(r), this.mapY(r + 1));
-                  svg += '<rect x="' + x.toFixed(1) + '" y="' + y.toFixed(1) + '" width="' + cw.toFixed(1)
-                    + '" height="' + ch.toFixed(1) + '" fill="rgb(' + Math.round(t * 255) + ','
-                    + Math.round((1 - Math.abs(t - 0.5) * 2) * 255) + ',255)"/>';
-                }
-              }
+            // The SAME cells the canvas renderer draws (see drawHeatmap):
+            // the same rectangles, at the same places, in the same colours,
+            // so the exported figure IS the figure on screen. The exporter
+            // used the viewport's cell pitch, which is wider than the plot
+            // rectangle — the last column ran out of the plot area.
+            const heatPrim = computeHeatmapPrimitives(this.vp, this.plotData.matrix, pw, ph);
+            for (const cell of heatPrim.cells) {
+              svg += '<rect x="' + cell.x.toFixed(1) + '" y="' + cell.y.toFixed(1) + '" width="' + cell.width.toFixed(1)
+                + '" height="' + cell.height.toFixed(1) + '" fill="' + cell.fill + '"/>';
             }
           }
           break;
+        }
       }
     }
 
@@ -1283,9 +1249,14 @@ export struct PlotCanvas {
 
     if (this.plotData?.type === 'scatter' && this.plotData.x) {
       ps += '0.2 0.6 0.8 setrgbcolor\n';
-      for (let i = 0; i < this.plotData.x.length; i++) {
-        const px = this.mapX(this.plotData.x[i]).toFixed(1);
-        const py = (this.canvasHeight - this.mapY(this.plotData.y![i])).toFixed(1);
+      // The SAME points the canvas draws and the SVG exports (see
+      // drawScatter / buildSVG) — the EPS exporter used to be the third copy
+      // of this geometry. PostScript's origin is the bottom-left corner, so
+      // the Y axis is flipped here; the X axis is not.
+      const epsPrim = computeScatterPrimitives(this.vp, this.plotData.x, this.plotData.y!);
+      for (const pt of epsPrim.points) {
+        const px = pt.px.toFixed(1);
+        const py = (this.canvasHeight - pt.py).toFixed(1);
         ps += px + ' ' + py + ' 5 0 360 arc fill\n';
       }
     }

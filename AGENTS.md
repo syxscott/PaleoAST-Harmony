@@ -10,6 +10,7 @@ instead:
 node --experimental-transform-types tests/test.mjs   # 586 unit tests, must stay green
 python tools/structure_check.py                       # bracket balance + duplicate exports
 node test/device/run.mjs                              # static wiring gate (19 cases)
+node --experimental-transform-types tools/gen_theme_resources.mjs --check  # colours vs token table
 ```
 
 `tests/etsImports.test.ts` (inside the unit suite) resolves every relative
@@ -41,6 +42,24 @@ affecting build output.
   `entry/src/main/core/` — two levels up, so `'../../core/...'`. A one-level
   `'../core/...'` points at `entry/src/main/ets/core/`, which does not exist.
   Every other module in the tree gets this right; only `Splash.ets` did not.
+- **Colours come from `ets/theme/tokens.ts`, never from a hex literal.**
+  The table is the single source of truth; `tools/gen_theme_resources.mjs`
+  writes `resources/base/element/color.json` and `resources/dark/…` out of
+  it, and the CI checks the two are in step. A UI attribute takes
+  `$r('app.color.<token>')`; the Canvas, the SVG export and any function that
+  *returns* a colour take `token('<token>', dark)`, because those need a
+  string. A **colour with an alpha channel must stay a string** — ArkUI reads
+  a resource colour as `#AARRGGBB` and a string colour as `#RRGGBBAA`.
+- **`setColorMode` lives on the `UIAbilityContext`, not on the `UIContext`**,
+  and the enum is `ConfigurationConstant.ColorMode.COLOR_MODE_DARK/LIGHT`
+  from `@kit.AbilityKit`. The platform gives the ability's colour mode
+  priority over the system's — that is what an in-app switch needs.
+  `ThemeController.applyColorMode` is the one place that calls it.
+- **State management V2 (`@ObservedV2` / `@Trace` / `@Local` / `@Param`)
+  only works in a `@ComponentV2` component.** The page and all its children
+  are V1 `@Component`, so a V1 `@State` cannot hold a V2 observed object —
+  it observes the reference, not what is inside it. Moving to V2 means
+  converting the whole `.ets` tree, which is a project of its own.
 - **Numerics**: read `.workbuddy/memory/MEMORY.md` → "已修复的关键坑" before
   touching `core/math/linalg.ts`, the xlsx/CSV parsers, `StateManager`, or
   Blomberg K. Those entries record defects that were found once already.

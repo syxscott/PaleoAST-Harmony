@@ -19,11 +19,21 @@ import { ConsoleView } from '../components/ConsoleView';
 import { StatusBar } from '../components/StatusBar';
 import { DialogLayer } from '../components/DialogLayer';
 import { selectPlotSeries } from '../components/plot/plotSeries';
+import { breakpointValue } from '../config/breakpointRules';
+import type { Breakpoint } from '../config/breakpointRules';
 import Logger from '../utils/Logger';
 import { PreferenceManager } from '../utils/PreferenceManager';
 import { AppSettings } from '../utils/AppSettings';
 import { HistoryRepository } from '../database/HistoryRepository';
 import { dataFingerprint, DATA_HASH_KEY } from '../utils/dataFingerprint';
+import { common } from '@kit.AbilityKit';
+import { applyColorMode, DARK_MODE_KEY } from '../theme/ThemeController';
+import { buildStratSections } from '../viewmodels/stratSections';
+import type { StratSection } from '../viewmodels/stratSections';
+import { phyloGroupMap, usableGroupCodes } from '../viewmodels/specimenGroups';
+import { clampSampleIndex } from '../viewmodels/dialogParams';
+import { analysisScriptHeader, analysisStepJson } from '../viewmodels/analysisScript';
+import type { AnalysisStep, ScriptDataInfo } from '../viewmodels/analysisScript';
 import fs from '@ohos.file.fs';
 
 // ─── 主页面 ──────────────────────────────────────────────────────
@@ -34,18 +44,6 @@ interface WidgetPlot {
   y: number[];
   title: string;
   type: string;
-}
-
-/**
- * One entry of the reproducible-analysis script: what ran, with which
- * parameters, and when. Declared as an interface because ArkTS requires object
- * literals to correspond to an explicitly declared type — the `.map()` in
- * restoreHistory() would not type-check with an inline anonymous shape.
- */
-interface AnalysisStep {
-  analysis: string;
-  params: Record<string, Object>;
-  at: string;
 }
 
 /**
@@ -163,7 +161,7 @@ struct Index {
         canUndo: $canUndo,
         canRedo: $canRedo,
         showConsole: $showConsole,
-        isSmallScreen: this.breakPoint === 'sm',
+        isSmallScreen: this.isSmallScreen(),
         onToggleSidebar: () => {
           animateTo({ duration: 250, curve: Curve.EaseInOut }, () => {
             this.sidebarOpen = !this.sidebarOpen;
@@ -219,12 +217,12 @@ struct Index {
         .layoutWeight(1)
         .height('100%')
       }
-      .showSideBar(this.breakPoint === 'sm' ? this.sidebarOpen : true)
-      .sideBarWidth(this.breakPoint === 'lg' || this.breakPoint === 'xl' ? 280 : 240)
+      .showSideBar(this.showSideBar())
+      .sideBarWidth(this.sideBarWidth())
       .minSideBarWidth(180)
       .maxSideBarWidth(320)
       // 防挤压：内容区低于此宽度时系统自动收起侧栏（折叠动画期间平滑）
-      .minContentWidth(this.breakPoint === 'sm' ? 0 : 480)
+      .minContentWidth(this.minContentWidth())
       .autoHide(true)
       .height('100%')
 
@@ -490,12 +488,17 @@ struct Index {
     this.navSections = RIBBON_TAB_SECTIONS[this.currentTab] ?? [];
   }
 
-  /** Clamp a dialog-supplied sample row index to the loaded matrix. */
+  /**
+   * Clamp a dialog-supplied sample row index to the loaded matrix.
+   *
+   * The rule itself is in viewmodels/dialogParams.ts, where the unit suite can
+   * cover it; this method only supplies the two things the rule needs: the
+   * value the dialog published and the size of the loaded matrix.
+   */
   private sampleIndex(params: Record<string, Object>): number {
     const nRows = this.stateMgr?.dataMatrix?.data.rows ?? 1;
     const raw = params['sample_index'] as number;
-    const idx = Number.isFinite(raw) ? Math.floor(raw) : 0;
-    return Math.min(Math.max(idx, 0), Math.max(0, nRows - 1));
+    return clampSampleIndex(raw, nRows);
   }
 
   // NOTE: "which series does this analysis plot?" is NOT decided here any
@@ -507,27 +510,54 @@ struct Index {
   // decision now lives in components/plot/plotSeries.ts, once, and is unit
   // tested there.
 
+  // ─── Responsive layout ────────────────────────────────────────────────
+  //
+  // Everything that depends on the viewport, in one place. These used to be
+  // five conditions of their own, spelled out where they were used:
+  //
+  //     .sideBarWidth(this.breakPoint === 'lg' || this.breakPoint === 'xl' ? 280 : 240)
+  //
+  // The same decision, five times over, in five slightly different shapes,
+  // none of it testable. The rules now live in config/breakpointRules.ts,
+  // where the unit suite can check them; the defaults are the values the
+  // old conditions produced.
+
+  /** The collapsed tri-fold / phone-portrait layout. */
+  private isSmallScreen(): boolean {
+    return breakpointValue(this.breakPoint as Breakpoint,
+      { sm: true, md: false, lg: false, xl: false }, false);
+  }
+
+  /** The width of the side bar. */
+  private sideBarWidth(): number {
+    return breakpointValue(this.breakPoint as Breakpoint,
+      { sm: 240, md: 240, lg: 280, xl: 280 }, 240);
+  }
+
+  /** Below this content width the system folds the side bar away. */
+  private minContentWidth(): number {
+    return breakpointValue(this.breakPoint as Breakpoint,
+      { sm: 0, md: 480, lg: 480, xl: 480 }, 480);
+  }
+
+  /** Whether the side bar is shown at all: on a small screen it is a drawer. */
+  private showSideBar(): boolean {
+    return breakpointValue(this.breakPoint as Breakpoint,
+      { sm: this.sidebarOpen, md: true, lg: true, xl: true }, true);
+  }
+
   /**
    * The two measured sections the "Stratigraphic Correlation" analysis works
    * on: heights from column 0, values from the next two columns.
    *
    * Both entry points (the dialog and the quick action) build them here, so
    * the two paths of one menu entry cannot drift into two different
-   * analyses.
+   * analyses. The rule itself lives in viewmodels/stratSections.ts, where the
+   * unit suite can cover it.
    */
-  private stratCorrSections(): { name: string; heights: number[]; values: number[] }[] {
+  private stratCorrSections(): StratSection[] {
     const dm = this.stateMgr?.dataMatrix;
-    if (!dm) return [];
-    const data = dm.data;
-    const safe = (colIdx: number): number[] => {
-      const c = data.col(colIdx);
-      return c.length === 0 ? [0] : c;
-    };
-    return [{
-      name: 'S1', heights: data.col(0), values: safe(1),
-    }, {
-      name: 'S2', heights: data.col(0), values: safe(Math.min(2, data.cols - 1)),
-    }];
+    return buildStratSections(dm ? dm.data : null);
   }
 
   /**
@@ -540,19 +570,14 @@ struct Index {
    * "p = 1, no difference" for an analysis that had never been run. It
    * refuses now; the groups the spreadsheet already holds are the missing
    * input, so they are used here.
+   *
+   * The rule itself lives in viewmodels/specimenGroups.ts, where the unit
+   * suite can cover it.
    */
   private phyloGroups(labels: string[]): Record<string, string> {
-    const groups: Record<string, string> = {};
     const dm = this.stateMgr?.dataMatrix;
-    if (!dm) return groups;
-    for (let i = 0; i < labels.length; i++) {
-      const g = dm.rowMeta.getGroup(i);
-      if (g === undefined) continue;
-      const name = g.trim();
-      if (name.length === 0 || name.toLowerCase() === 'ungrouped') continue;
-      groups[labels[i]] = name;
-    }
-    return groups;
+    if (!dm) return {};
+    return phyloGroupMap(labels, (i: number) => dm.rowMeta.getGroup(i));
   }
 
   private runDialogAnalysisCore(name: string, params: Record<string, Object>): any {
@@ -779,14 +804,12 @@ struct Index {
    * empty vector and reported "no significant difference" -- so a user who
    * grouped their data and ran PERMANOVA got p = 1 with no indication that
    * the grouping never reached the model.
+   *
+   * The refusal itself lives in viewmodels/specimenGroups.ts, where the unit
+   * suite can cover the message.
    */
   private requireGroups(): number[] {
-    const g = this.stateMgr.dataMatrix?.getGroups();
-    if (!g) {
-      throw new Error('No usable groups: assign every specimen to a named group, ' +
-        'using at least two different groups, before running this analysis');
-    }
-    return g;
+    return usableGroupCodes(this.stateMgr.dataMatrix?.getGroups());
   }
 
   private runQuickAnalysisCore(name: string): any {
@@ -1032,19 +1055,23 @@ struct Index {
   /**
    * 生成可复现分析脚本：按会话顺序列出每一步的分析名与参数，
    * 可在 PC 上审阅或回放（paleopal 的 UI↔脚本平价思想）。
+   *
+   * The header and the steps are built in viewmodels/analysisScript.ts, where
+   * the unit suite can cover what the exported document says. The JOINING stays
+   * here: `tests/etsSyntax.test.ts` pins the exact separator, and the document
+   * shape is a contract with whoever replays the script.
    */
   private buildAnalysisScript(): string {
     const dm = this.stateMgr?.dataMatrix;
-    const header = [
-      '// PaleoAST-Harmony reproducible analysis script',
-      '// Generated: ' + new Date().toISOString(),
-      dm ? '// Data: ' + dm.nSamples + ' x ' + dm.nVariables + (dm.currentFile ? ' (' + dm.currentFile + ')' : '') : '// Data: not loaded',
-      '// Steps: ' + this.analysisHistory.length,
-      '',
-    ];
-    const steps = this.analysisHistory.map((h, i) =>
-      JSON.stringify({ step: i + 1, analysis: h.analysis, params: h.params }, null, 2)
-    );
+    let info: ScriptDataInfo | null = null;
+    if (dm) {
+      const loaded: ScriptDataInfo = {
+        nSamples: dm.nSamples, nVariables: dm.nVariables, currentFile: dm.currentFile,
+      };
+      info = loaded;
+    }
+    const header = analysisScriptHeader(info, this.analysisHistory.length, new Date().toISOString());
+    const steps = analysisStepJson(this.analysisHistory);
     return header.join('\n') + '\n' + (steps.length > 0 ? '[' + steps.join(',\n') + ']' : '[]');
   }
 
@@ -1191,7 +1218,7 @@ struct Index {
     if (!this.hasData) { this.statusText = 'Please load data first'; return; }
 
     // 小屏（折叠态）：选择分析后自动收起抽屉侧栏，让出内容宽度
-    if (this.breakPoint === 'sm' && this.sidebarOpen) {
+    if (this.isSmallScreen() && this.sidebarOpen) {
       animateTo({ duration: 250, curve: Curve.EaseInOut }, () => {
         this.sidebarOpen = false;
       });
@@ -1332,10 +1359,19 @@ struct Index {
       case 'export': DialogManager.open('Export'); break;
       case 'history': void this.onHistoryAction(false); break;
       case 'clearhistory': void this.onHistoryAction(true); break;
-      case 'theme':
+      case 'theme': {
         this.darkMode = !this.darkMode;
-        AppStorage.setOrCreate('darkMode', this.darkMode);
+        AppStorage.setOrCreate(DARK_MODE_KEY, this.darkMode);
+        // The colour RESOURCES follow the platform's colour mode, so this
+        // path has to tell the platform as well -- the Ribbon's own switch
+        // does. Without it the Canvas and the SVG export change colour (they
+        // read the token table directly) while every `$r('app.color.x')` in
+        // the page stays light: half the application changed theme and half
+        // did not.
+        const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
+        applyColorMode(ctx, this.darkMode);
         break;
+      }
     }
   }
 
@@ -1361,7 +1397,14 @@ struct Index {
     if (this.currentWidget < 0) this.currentWidget = this.workspaceWidgets.length - 1;
   }
 
-  /** The oldest tab that may be dropped to make room. The data table never is. */
+  /**
+   * The oldest tab that may be dropped to make room. The data table never is.
+   *
+   * This rule stayed in the page on purpose: `tests/fixEts2026.test.ts` pins
+   * it as a source fact about this file (`w !== 'spreadsheet'` has to be
+   * between `addWidget` and `exportPlot`), so moving it into a view model
+   * would have weakened a regression test this change does not own.
+   */
   private evictableWidget(): string {
     for (const w of this.workspaceWidgets) {
       if (w !== 'spreadsheet') return w;

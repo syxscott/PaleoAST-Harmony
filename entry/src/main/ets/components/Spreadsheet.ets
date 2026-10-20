@@ -4,6 +4,8 @@ import { Matrix } from "../../core/math/Matrix";
 import { EventBus } from "../../core/utils/EventBus";
 import { blankGroups, fitGroups, cycleGroup, UNGROUPED } from "./rowGroups";
 import { token } from '../theme/tokens';
+import { SpreadsheetRow } from './SpreadsheetRow';
+import { formatCell } from './cellAppearance';
 
 /**
  * Scientific Spreadsheet Component — replaces views/ui_spreadsheet.py
@@ -46,6 +48,43 @@ export struct Spreadsheet {
   onDataChanged: (data: Matrix) => void = () => {};
   onSelectionChanged: (rows: number[], cols: number[]) => void = () => {};
   onGroupChanged: (groups: string[]) => void = () => {};
+
+  // ─── Callbacks for the reusable row ────────────────────────────────
+  // These are ARROW-FUNCTION PROPERTIES, not methods. A reusable component
+  // keeps the arguments it was created with, so the reference the row holds
+  // has to stay the same for the whole life of the table — an inline closure
+  // would be a different function on every render, and one that captured the
+  // row index would make a recycled row report the wrong row.
+  // The row index therefore travels as an argument.
+
+  /** A cell was clicked: select it, and leave the editor if one was open. */
+  private handleCellSelect = (row: number, col: number): void => {
+    if (this.editingCell !== null) { this.cancelEdit(); }
+    this.selectedRow = row;
+    this.selectedCol = col;
+  };
+
+  /** A cell was double-clicked: start editing it. */
+  private handleCellStartEdit = (row: number, col: number): void => {
+    this.startEditing(row, col);
+  };
+
+  /** The text in the editor changed. */
+  private handleEditValueChange = (value: string): void => {
+    this.editValue = value;
+  };
+
+  /** The editor was submitted: write the value back. */
+  private handleCommitEdit = (): void => {
+    this.commitEdit();
+  };
+
+  /** A cell was long-pressed: select it and open the context menu. */
+  private handleCellLongPress = (row: number, col: number): void => {
+    this.selectedRow = row;
+    this.selectedCol = col;
+    this.showCellMenu = true;
+  };
 
   // LazyForEach data source — recomputed outside the render path
   private dataSource: SpreadsheetDataSource = new SpreadsheetDataSource();
@@ -244,48 +283,45 @@ export struct Spreadsheet {
       // True LazyForEach: only renders visible rows, prevents DOM explosion.
       // Row indices come from the pre-computed filteredRowsCache (kept in sync
       // by @Watch callbacks — the render path never writes state).
+      //
+      // The row itself is a @Reusable component: scrolling recycles the row
+      // instances instead of building them again. Everything the row shows
+      // arrives as a @Prop (so a recycled row shows the CURRENT row, not the
+      // one it was created for) and everything it reports goes back through
+      // a callback (so it never writes into the parent's state by itself).
       LazyForEach(this.dataSource, (rowIdx: number) => {
-        Row() {
-          // Row number
-          Text(String(rowIdx + 1)).width(40).fontSize(10).textAlign(TextAlign.Center)
-            .fontColor($r('app.color.text_secondary'))
-            .backgroundColor(this.selectedRow === rowIdx ? $r('app.color.bg_tint') : 'transparent')
-
-          // Group indicator
-          if (this.showGroups) {
-            Text(this.rowGroups[rowIdx] ?? 'Ungrouped').width(60).fontSize(9).textAlign(TextAlign.Center)
-              .fontColor($r('app.color.text_on_accent'))
-              .backgroundColor(this.groupColors.get(this.rowGroups[rowIdx] ?? 'Ungrouped') ?? token('bg_muted', this.darkMode))
-              .borderRadius(4).padding(2)
-          }
-
-          // Data cells — use pre-computed columnIndices; TextInput while editing
-          ForEach(this.columnIndices, (_: Object, colIdx: number) => {
-            if (this.editingCell === `${rowIdx},${colIdx}`) {
-              TextInput({ text: this.editValue })
-                .width(80).height(20).fontSize(10)
-                .onChange((v: string) => { this.editValue = v; })
-                .onSubmit(() => { this.commitEdit(); })
-            } else {
-              Text(this.getCellDisplay(rowIdx, colIdx))
-                .width(80).fontSize(10).textAlign(TextAlign.Right)
-                .fontColor(this.getCellFontColor(rowIdx, colIdx))
-                .backgroundColor(this.getCellBg(rowIdx, colIdx))
-                .onClick(() => {
-                  if (this.editingCell !== null) { this.cancelEdit(); }
-                  this.selectedRow = rowIdx;
-                  this.selectedCol = colIdx;
-                })
-                .onDoubleClick(() => { this.startEditing(rowIdx, colIdx); })
-                .gesture(LongPressGesture({ repeatable: false })
-                  .onAction(() => { this.selectedRow = rowIdx; this.selectedCol = colIdx; this.showCellMenu = true; }))
-            }
-          })
-        }
-        .width('100%').height(22)
-        .backgroundColor(this.selectedRow === rowIdx ? token('bg_tint', this.darkMode) : (rowIdx % 2 === 0 ? 'transparent' : (token('row_stripe', this.darkMode))))
+        SpreadsheetRow({
+          dataMatrix: this.dataMatrix,
+          rowIndex: rowIdx,
+          columnIndices: this.columnIndices,
+          selectedRow: this.selectedRow,
+          selectedCol: this.selectedCol,
+          editingCell: this.editingCell ?? '',
+          editValue: this.editValue,
+          showGroups: this.showGroups,
+          groupLabel: this.groupLabelFor(rowIdx),
+          groupColor: this.groupColorFor(rowIdx),
+          darkMode: this.darkMode,
+          onSelect: this.handleCellSelect,
+          onStartEdit: this.handleCellStartEdit,
+          onEditValueChange: this.handleEditValueChange,
+          onCommitEdit: this.handleCommitEdit,
+          onLongPress: this.handleCellLongPress
+        })
       }, (rowIdx: number) => rowIdx.toString()) // stable key per row
     }
+  }
+
+  // ─── Group appearance of one row ───────────────────────────────────
+
+  /** The group label of one row, as the table shows it. */
+  private groupLabelFor(row: number): string {
+    return this.rowGroups[row] ?? 'Ungrouped';
+  }
+
+  /** The background colour of one row's group badge. */
+  private groupColorFor(row: number): string {
+    return this.groupColors.get(this.groupLabelFor(row)) ?? token('bg_muted', this.darkMode);
   }
 
   @Builder StatusBar() {
@@ -295,7 +331,7 @@ export struct Spreadsheet {
           .fontSize(11).fontColor($r('app.color.primary'))
       } else if (this.selectedRow >= 0 && this.selectedCol >= 0) {
         const val = this.dataMatrix?.data.get(this.selectedRow, this.selectedCol) ?? NaN;
-        Text(`Row ${this.selectedRow + 1}, Col ${this.selectedCol + 1}: ${this.formatCell(val)}`)
+        Text(`Row ${this.selectedRow + 1}, Col ${this.selectedCol + 1}: ${formatCell(val)}`)
           .fontSize(11).fontColor($r('app.color.text_secondary'))
       } else if (this.dataMatrix != null) {
         Text(`${this.dataMatrix.nSamples} rows x ${this.dataMatrix.nVariables} columns`)
@@ -312,33 +348,9 @@ export struct Spreadsheet {
   }
 
   // ─── Cell Display ───────────────────────────────────────────────
-
-  private getCellDisplay(row: number, col: number): string {
-    const val = this.dataMatrix?.data.get(row, col) ?? NaN;
-    return this.formatCell(val);
-  }
-
-  private getCellFontColor(row: number, col: number): string {
-    const val = this.dataMatrix?.data.get(row, col) ?? NaN;
-    if (isNaN(val)) return token('danger', this.darkMode);
-    if (val < 0) return token('warning', this.darkMode);
-    return token('text_primary', this.darkMode);
-  }
-
-  private getCellBg(row: number, col: number): string {
-    if (row === this.selectedRow && col === this.selectedCol) return token('cell_selected', this.darkMode);
-    if (row === this.selectedRow) return token('bg_tint', this.darkMode);
-    if (col === this.selectedCol) return token('bg_selected', this.darkMode);
-    return 'transparent';
-  }
-
-  private formatCell(value: number): string {
-    if (isNaN(value)) return 'NA';
-    if (!isFinite(value)) return value > 0 ? '+Inf' : '-Inf';
-    if (Number.isInteger(value) && Math.abs(value) < 1e10) return value.toString();
-    if (Math.abs(value) < 0.001 || Math.abs(value) >= 1e6) return value.toExponential(3);
-    return value.toFixed(4);
-  }
+  // The cell itself is drawn by SpreadsheetRow.ets; the rules that decide
+  // what a cell looks like live in cellAppearance.ts, so the row and the
+  // status bar below cannot disagree about the same value.
 
   // ─── Filtering / Sorting cache (kept out of the render path) ────
 

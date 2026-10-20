@@ -36,6 +36,10 @@
 
 | 日期 | 标题 | 类型 |
 |---|---|---|
+| 2026-10-20 | [图表几何:散点/折线/柱状/直方图各有两套实现 → 抽成共用几何](2026-10-20-ets-plot-shared-geometry.md) | 重构 / 缺陷修复 / 工程 |
+| 2026-10-20 | [Index.ets 的纯逻辑搬进 viewmodels/ 层,外加悬浮工具栏主题切换漏通知平台](2026-10-20-index-viewmodels-and-theme-platform-notify.md) | 重构 / 缺陷修复 / 工程 |
+| 2026-10-20 | [数据表:行内联在 LazyForEach 里,滑动一次重建一次 —— 改成 @Reusable 复用组件](2026-10-20-spreadsheet-reusable-rows.md) | 重构 / 性能 / 工程 |
+| 2026-10-20 | [断点布局:5 处零散判断 → 一张取值表 + 可单测的规则](2026-10-20-breakpoint-value-table.md) | 重构 / 工程 |
 | 2026-10-20 | [配色 token 化:442 处硬编码色 → 单一真源 + ArkUI 资源机制 + 系统深色模式](2026-10-20-theme-tokens-and-dark-mode.md) | 缺陷修复 / 重构 / 工程 |
 | 2026-10-20 | [Splash.ets 的相对导入少上溯一级:指向一个不存在的目录,整个启动页编译不过](2026-10-20-splash-ets-import-path.md) | 缺陷修复 / 工程 |
 | 2026-10-19 | [全仓审查与修复:16 条致命缺陷 + 验证基础设施的空洞](2026-10-19-full-repo-audit-fixes.md) | 缺陷修复 / 数值变更 / 工程 |
